@@ -42,6 +42,46 @@ DWORD ToWinProtect(uint32_t flags) {
     return (flags & PF_W) ? PAGE_READWRITE : PAGE_READONLY;
 }
 
+// Dumpers write modules as fake-signed SELFs: a 32-byte header and a table of
+// 32-byte segment entries, then the ELF header and program headers, then each
+// segment's bytes. A "blocked" entry holds one program header's bytes. Rebuild the
+// ELF file image those program headers describe.
+std::vector<uint8_t> UnwrapSelf(const std::vector<uint8_t>& s, const std::string& name) {
+    constexpr uint64_t kEncrypted = 0x2, kCompressed = 0x8, kBlocked = 0x800;
+    const uint16_t count = Read<uint16_t>(s, 24);
+    const uint64_t elf = 32 + uint64_t{count} * 32;
+    if (elf + 64 > s.size() || std::memcmp(s.data() + elf, "\x7F" "ELF", 4) != 0)
+        throw std::runtime_error(name + ": SELF holds no ELF header");
+    const uint64_t phoff = Read<uint64_t>(s, elf + 32);
+    const uint16_t phnum = Read<uint16_t>(s, elf + 56);
+    const uint64_t headers = phoff + phnum * sizeof(Phdr);
+    if (elf + headers > s.size()) throw std::runtime_error(name + ": SELF program headers truncated");
+
+    std::vector<Phdr> phdrs(phnum);
+    uint64_t end = headers;
+    for (int i = 0; i < phnum; ++i) {
+        phdrs[i] = Read<Phdr>(s, elf + phoff + i * sizeof(Phdr));
+        end = std::max(end, phdrs[i].offset + phdrs[i].fileSize);
+    }
+    if (end > (uint64_t{1} << 30)) throw std::runtime_error(name + ": SELF image too large");
+
+    std::vector<uint8_t> out(end);
+    std::memcpy(out.data(), s.data() + elf, headers);
+    for (uint64_t i = 0; i < count; ++i) {
+        const uint64_t flags = Read<uint64_t>(s, 32 + i * 32);
+        const uint64_t off = Read<uint64_t>(s, 32 + i * 32 + 8);
+        const uint64_t size = Read<uint64_t>(s, 32 + i * 32 + 16);
+        if (!(flags & kBlocked)) continue;
+        if (flags & (kEncrypted | kCompressed))
+            throw std::runtime_error(name + " is an encrypted or compressed SELF; dump it decrypted");
+        const uint32_t index = (flags >> 20) & 0xFFF;
+        if (index >= phnum || size != phdrs[index].fileSize || off + size > s.size())
+            throw std::runtime_error(name + ": malformed SELF segment " + std::to_string(i));
+        std::memcpy(out.data() + phdrs[index].offset, s.data() + off, size);
+    }
+    return out;
+}
+
 }  // namespace
 
 std::unique_ptr<Module> Module::Load(const std::filesystem::path& path) {
@@ -51,9 +91,11 @@ std::unique_ptr<Module> Module::Load(const std::filesystem::path& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) throw std::runtime_error("cannot open " + path.string());
     m->file_.assign(std::istreambuf_iterator<char>(in), {});
+    if (m->file_.size() >= 32 && std::memcmp(m->file_.data(), "\x4F\x15\x3D\x1D", 4) == 0)
+        m->file_ = UnwrapSelf(m->file_, m->fileName);
     const auto& f = m->file_;
     if (f.size() < 64 || std::memcmp(f.data(), "\x7F" "ELF", 4) != 0)
-        throw std::runtime_error(m->fileName + " is not a decrypted ELF");
+        throw std::runtime_error(m->fileName + " is not a decrypted ELF or SELF");
 
     m->entry = Read<uint64_t>(f, 24);
     uint64_t phoff = Read<uint64_t>(f, 32);
