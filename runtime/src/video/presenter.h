@@ -38,6 +38,14 @@ void PresentPixels(std::vector<uint8_t>& pixels, uint32_t width, uint32_t height
 // at gameHz (e.g. every 2nd refresh for 30 fps on 60 Hz). Returns false when
 // that doesn't divide evenly or the window isn't presenting; the caller then
 // paces with a timer.
-bool WaitForFlipSlot(double gameHz);
+bool WaitForFlipSlot(double gameHz, int64_t* slotNs = nullptr);
+
+// LBP3_PACING: what counts as a display refresh. vblank (default) = the window's DXGI
+// output; present = each SDL_RenderPresent returning (upstream); timer = no vsync, the
+// caller's 60 Hz timer grid.
+enum class Pacing { VBlank, Present, Timer };
+Pacing PacingMode();
+const char* PacingName();
+uint64_t VBlankCount();
 
 }  // namespace video

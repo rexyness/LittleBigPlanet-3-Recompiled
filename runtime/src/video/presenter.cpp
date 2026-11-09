@@ -15,6 +15,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <dxgi.h>
 
 namespace video {
 namespace {
@@ -32,12 +33,77 @@ uint32_t g_frameW = 0, g_frameH = 0;
 bool g_haveFrame = false;
 uint64_t g_frameSeq = 0;  // bumps with every new frame, so unchanged ones aren't re-uploaded
 
-// Real display refreshes: the present loop blocks on vsync, so each pass is one.
+// Real display refreshes. With LBP3_PACING=present (upstream) the present loop counts
+// them, trusting SDL_RenderPresent to block on vsync. A driver can force vsync off
+// (NVIDIA's "Vertical sync: Force off"), and then presents return thousands of times a
+// second. The default (vblank) counts them on a separate thread from the DXGI output
+// the window is on (IDXGIOutput::WaitForVBlank), which the driver setting doesn't affect.
 std::mutex g_vblankMutex;
 std::condition_variable g_vblankCv;
 uint64_t g_vblanks = 0;
-std::atomic<float> g_refreshHz{0.0f};
+std::atomic<bool> g_vblankSourceOk{false};
+std::atomic<double> g_refreshHz{0.0};
+std::atomic<HWND> g_hwnd{nullptr};
 std::atomic<void (*)(int)> g_hotkeyHandler{nullptr};
+std::atomic<uint64_t> g_presents{0};
+
+void CountVBlank() {
+    {
+        std::lock_guard lock(g_vblankMutex);
+        ++g_vblanks;
+    }
+    g_vblankCv.notify_all();
+}
+
+// Waits on the vblanks of whichever output the window is on, checked about every
+// 60 refreshes so moving the window to another display follows it.
+void VBlankThread() {
+    IDXGIFactory1* factory = nullptr;
+    IDXGIOutput* output = nullptr;
+    HMONITOR monitor = nullptr;
+    int sinceCheck = 0;
+    for (;;) {
+        if (!output || ++sinceCheck >= 60) {
+            sinceCheck = 0;
+            const HWND hwnd = g_hwnd.load();
+            const HMONITOR m = hwnd ? MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) : nullptr;
+            if (m && (m != monitor || !output || !factory || !factory->IsCurrent())) {
+                if (output) output->Release();
+                output = nullptr;
+                if (!factory || !factory->IsCurrent()) {
+                    if (factory) factory->Release();
+                    factory = nullptr;
+                    CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory));
+                }
+                IDXGIAdapter1* adapter = nullptr;
+                for (UINT a = 0; factory && !output && factory->EnumAdapters1(a, &adapter) != DXGI_ERROR_NOT_FOUND; ++a) {
+                    IDXGIOutput* o = nullptr;
+                    for (UINT i = 0; !output && adapter->EnumOutputs(i, &o) != DXGI_ERROR_NOT_FOUND; ++i) {
+                        DXGI_OUTPUT_DESC desc{};
+                        if (SUCCEEDED(o->GetDesc(&desc)) && desc.Monitor == m) {
+                            output = o;
+                            std::fprintf(stderr, "[video] vblank source: %ls\n", desc.DeviceName);
+                        } else {
+                            o->Release();
+                        }
+                    }
+                    adapter->Release();
+                }
+                monitor = m;
+                if (!output) std::fprintf(stderr, "[video] vblank source: no DXGI output for the window's monitor\n");
+            }
+        }
+        if (!output || FAILED(output->WaitForVBlank())) {
+            g_vblankSourceOk = false;
+            if (output) output->Release();
+            output = nullptr;
+            Sleep(100);
+            continue;
+        }
+        g_vblankSourceOk = true;
+        CountVBlank();
+    }
+}
 
 void PresenterThread() {
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
@@ -56,10 +122,29 @@ void PresenterThread() {
     SDL_GetRenderVSync(renderer, &vsync);
     std::fprintf(stderr, "[video] window renderer: %s, vsync %s (%d)\n", SDL_GetRendererName(renderer),
                  vsyncOk ? "on" : "FAILED", vsync);
-    if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window))) {
-        g_refreshHz = mode->refresh_rate;
-        std::fprintf(stderr, "[video] display refresh %.2f Hz\n", mode->refresh_rate);
+    auto readRefresh = [&] {
+        if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window))) {
+            // The exact rational when SDL has it (239.999 Hz shows as 240.00 in refresh_rate).
+            const double hz = mode->refresh_rate_numerator > 0 && mode->refresh_rate_denominator > 0
+                                  ? double(mode->refresh_rate_numerator) / double(mode->refresh_rate_denominator)
+                                  : double(mode->refresh_rate);
+            g_refreshHz = hz;
+            std::fprintf(stderr, "[video] display refresh %.3f Hz\n", hz);
+        }
+    };
+    readRefresh();
+    const Pacing pacing = PacingMode();
+    std::fprintf(stderr, "[video] pacing: %s\n", PacingName());
+    if (pacing != Pacing::Present) {
+        g_hwnd = static_cast<HWND>(
+            SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+        std::thread(VBlankThread).detach();
     }
+    uint64_t presentedAtVblank = 0;
+    LARGE_INTEGER qpf, statsFrom;
+    QueryPerformanceFrequency(&qpf);
+    QueryPerformanceCounter(&statsFrom);
+    uint64_t statsPresents = 0, statsVblanks = 0;
     SDL_Texture* texture = nullptr;
     uint32_t texW = 0, texH = 0;
     uint64_t shownSeq = ~0ull;
@@ -71,11 +156,19 @@ void PresenterThread() {
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
                 if (auto handler = g_hotkeyHandler.load()) handler(static_cast<int>(e.key.key));
             }
+            if (e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED) readRefresh();
             if (e.type == SDL_EVENT_QUIT) {
                 std::fprintf(stderr, "[video] window closed\n");
                 std::fflush(stderr);
                 ExitProcess(0);
             }
+        }
+
+        // Present once per real vblank, so the window doesn't spin when vsync is forced off.
+        if (pacing != Pacing::Present && g_vblankSourceOk.load()) {
+            std::unique_lock lock(g_vblankMutex);
+            g_vblankCv.wait_for(lock, std::chrono::milliseconds(50), [&] { return g_vblanks > presentedAtVblank; });
+            presentedAtVblank = g_vblanks;
         }
 
         DisplayBuffer buf;
@@ -110,20 +203,61 @@ void PresenterThread() {
                 SDL_UpdateTexture(texture, nullptr, buf.address, static_cast<int>(buf.pitchPixels * 4));
             SDL_RenderTexture(renderer, texture, nullptr, nullptr);
         }
-        SDL_RenderPresent(renderer);  // paced by vsync
-        {
-            std::lock_guard lock(g_vblankMutex);
-            ++g_vblanks;
+        SDL_RenderPresent(renderer);  // paced by vsync, unless a driver forces it off
+        ++g_presents;
+        if (pacing == Pacing::Present) CountVBlank();
+
+        // Presents and vblanks per second, every 5 s.
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        const double secs = double(now.QuadPart - statsFrom.QuadPart) / double(qpf.QuadPart);
+        if (secs >= 5.0) {
+            uint64_t vb;
+            {
+                std::lock_guard lock(g_vblankMutex);
+                vb = g_vblanks;
+            }
+            const uint64_t pr = g_presents.load();
+            std::fprintf(stderr, "[pace] %.1f presents/s, %.1f vblanks/s (%s), refresh %.2f Hz\n",
+                         double(pr - statsPresents) / secs, double(vb - statsVblanks) / secs, PacingName(),
+                         g_refreshHz.load());
+            statsPresents = pr;
+            statsVblanks = vb;
+            statsFrom = now;
         }
-        g_vblankCv.notify_all();
     }
 }
 
 }  // namespace
 
-bool WaitForFlipSlot(double gameHz) {
-    const float refresh = g_refreshHz.load();
-    if (refresh <= 0.0f || gameHz <= 0.0) return false;
+Pacing PacingMode() {
+    static const Pacing mode = [] {
+        const char* v = std::getenv("LBP3_PACING");
+        if (v && std::strcmp(v, "present") == 0) return Pacing::Present;
+        if (v && std::strcmp(v, "timer") == 0) return Pacing::Timer;
+        return Pacing::VBlank;
+    }();
+    return mode;
+}
+
+const char* PacingName() {
+    switch (PacingMode()) {
+    case Pacing::Present: return "present";
+    case Pacing::Timer: return "timer";
+    default: return "vblank";
+    }
+}
+
+uint64_t VBlankCount() {
+    std::lock_guard lock(g_vblankMutex);
+    return g_vblanks;
+}
+
+bool WaitForFlipSlot(double gameHz, int64_t* slotNs) {
+    if (PacingMode() == Pacing::Timer) return false;
+    if (PacingMode() == Pacing::VBlank && !g_vblankSourceOk.load()) return false;
+    const double refresh = g_refreshHz.load();
+    if (refresh <= 0.0 || gameHz <= 0.0) return false;
     const double ratio = refresh / gameHz;
     const uint64_t perFlip = static_cast<uint64_t>(ratio + 0.5);
     if (perFlip == 0 || std::abs(ratio - static_cast<double>(perFlip)) > 0.05) return false;  // e.g. 30 fps on 144 Hz
@@ -132,8 +266,31 @@ bool WaitForFlipSlot(double gameHz) {
     if (next == 0 || next > g_vblanks + perFlip) next = g_vblanks + perFlip;  // first flip / after a resync
     const bool ok = g_vblankCv.wait_for(lock, std::chrono::milliseconds(200), [&] { return g_vblanks >= next; });
     if (!ok) return false;  // window not presenting (minimized?): use the timer
+    const uint64_t vblank = g_vblanks;
     // Running late keeps the cadence from the current vblank instead of trying to catch up.
-    next = std::max(next, g_vblanks) + perFlip;
+    next = std::max(next, vblank) + perFlip;
+    lock.unlock();
+    // The flip's time for the game's frame clock: the vblank's ideal time (anchor + index *
+    // refresh period), not when this thread woke up, so the game sees the exact frame
+    // deltas a console would. Wake-up times put ~0.1 ms of jitter into them; in one run
+    // that came with 43% of frames running 0 or 2 sim steps, against 7-18% with exact
+    // times (the rest is game-side, see the frame-pacing ticket). Re-anchors when the
+    // real time strays more than 2 ms (a late frame, a missed vblank, a rate change).
+    if (slotNs) {
+        static double anchorNs = 0, anchorPeriodNs = 0;
+        static uint64_t anchorVblank = 0;
+        const double nowNs = double(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count());
+        const double periodNs = 1e9 / refresh;
+        double ideal = anchorNs + double(vblank - anchorVblank) * periodNs;
+        if (anchorNs == 0 || periodNs != anchorPeriodNs || vblank < anchorVblank || std::abs(nowNs - ideal) > 2e6) {
+            anchorNs = ideal = nowNs;
+            anchorVblank = vblank;
+            anchorPeriodNs = periodNs;
+        }
+        *slotNs = static_cast<int64_t>(ideal);
+    }
     return true;
 }
 

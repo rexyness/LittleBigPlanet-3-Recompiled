@@ -64,9 +64,11 @@ constexpr uint32_t kIrqGfxFlip = 0x08;
 // Waits for this flip's slot. Flips land on vblanks, every (rate + 1) of the
 // console's 60 Hz ones. Use the window's real vsync when the rates divide evenly,
 // so every frame stays on screen equally long; otherwise a 60 Hz timer.
-void WaitFlipSlot() {
+// Returns true when the flip was paced by vblanks, false when by the timer grid.
+bool WaitFlipSlotInner() {
     const int vblanksPerFlip = g_flipRate.load() + 1;
-    if (video::WaitForFlipSlot(60.0 / vblanksPerFlip)) {
+    int64_t slotNs = 0;
+    if (video::WaitForFlipSlot(60.0 / vblanksPerFlip, &slotNs)) {
         g_nextFlip = Clock::now();
     } else {
         // Flips stay on a fixed grid of vblanks: the next slot follows from the last slot,
@@ -90,9 +92,43 @@ void WaitFlipSlot() {
         // thread's steady clock anchors on the grid, not on when the flip happened.
         kernel::NoteFlip(std::chrono::duration_cast<std::chrono::nanoseconds>(g_nextFlip.time_since_epoch()).count());
         g_nextFlip += period;
-        return;
+        return false;
     }
-    kernel::NoteFlip(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count());
+    // The vblank's ideal time, so the game's frame clock sees exact frame deltas.
+    kernel::NoteFlip(slotNs ? slotNs
+                            : std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count());
+    return true;
+}
+
+// Pacing statistics for the [video] status line: time spent waiting for the slot (the
+// frame's headroom under the cap) and how many flips fell back to the timer.
+double g_paceWaitMs = 0, g_paceWorkMs = 0;
+int g_paceTimerFlips = 0;
+
+void WaitFlipSlot() {
+    static Clock::time_point lastEnd = Clock::now();
+    const auto start = Clock::now();
+    const bool vsynced = WaitFlipSlotInner();
+    const auto end = Clock::now();
+    const double waitMs = std::chrono::duration<double, std::milli>(end - start).count();
+    const double workMs = std::chrono::duration<double, std::milli>(start - lastEnd).count();
+    lastEnd = end;
+    g_paceWaitMs += waitMs;
+    g_paceWorkMs += workMs;
+    g_paceTimerFlips += !vsynced;
+    // LBP3_PACE_LOG=1: one line per flip in analysis\pace.csv.
+    static FILE* csv = [] {
+        FILE* f = std::getenv("LBP3_PACE_LOG") ? std::fopen("analysis\\pace.csv", "w") : nullptr;
+        if (f) std::fprintf(f, "flip,end_ms,work_ms,wait_ms,path,vblanks\n");
+        return f;
+    }();
+    if (csv) {
+        static uint64_t n = 0;
+        std::fprintf(csv, "%llu,%.3f,%.3f,%.3f,%c,%llu\n", static_cast<unsigned long long>(n++),
+                     std::chrono::duration<double, std::milli>(end.time_since_epoch()).count(), workMs, waitMs,
+                     vsynced ? 'v' : 't', static_cast<unsigned long long>(video::VBlankCount()));
+        if (n % 300 == 0) std::fflush(csv);
+    }
 }
 
 // Reports a completed flip to the game.
@@ -111,12 +147,16 @@ void SignalFlip(int64_t flipArg) {
     if (++g_flipCount % kFlipsPerStatus == 0) {
         std::fprintf(stderr,
                      "[video] %llu frames flipped (avg %.1f ms, worst %.1f ms, %d over 40 ms; %u new images, "
-                     "%u expanded; %u early releases, %u wait addresses learned)\n",
+                     "%u expanded; %u early releases, %u wait addresses learned; work %.1f ms, slot wait %.1f ms, "
+                     "%d on timer)\n",
                      static_cast<unsigned long long>(g_flipCount), sumMs / kFlipsPerStatus, worstMs, slow,
                      VideoCore::g_lbp3ImageCreates.exchange(0), VideoCore::g_lbp3ImageExpands.exchange(0),
-                     gpu::TakeEarlyReleases(), gpu::LearnedWaits());
+                     gpu::TakeEarlyReleases(), gpu::LearnedWaits(), g_paceWorkMs / kFlipsPerStatus,
+                     g_paceWaitMs / kFlipsPerStatus, g_paceTimerFlips);
         sumMs = worstMs = 0;
         slow = 0;
+        g_paceWaitMs = g_paceWorkMs = 0;
+        g_paceTimerFlips = 0;
     }
     for (void* eq : g_flipQueues)
         kernel::TriggerEvent(eq, kInternalFlipEventId, kernel::kEvfiltVideoOut,
