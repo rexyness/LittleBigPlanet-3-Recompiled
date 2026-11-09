@@ -271,11 +271,10 @@ bool WaitForFlipSlot(double gameHz, int64_t* slotNs) {
     next = std::max(next, vblank) + perFlip;
     lock.unlock();
     // The flip's time for the game's frame clock: the vblank's ideal time (anchor + index *
-    // refresh period), not when this thread woke up, so the game sees the exact frame
-    // deltas a console would. Wake-up times put ~0.1 ms of jitter into them; in one run
-    // that came with 43% of frames running 0 or 2 sim steps, against 7-18% with exact
-    // times (the rest is game-side, see the frame-pacing ticket). Re-anchors when the
-    // real time strays more than 2 ms (a late frame, a missed vblank, a rate change).
+    // refresh period), not when this thread woke up (~0.1 ms of jitter), so the game sees
+    // the exact frame deltas a console would. This doesn't measurably cure the 0/2 sim
+    // steps (camera snaps); those are game-side. Re-anchors when the real time strays
+    // more than 2 ms (a late frame, a missed vblank, a refresh-rate change).
     if (slotNs) {
         static double anchorNs = 0, anchorPeriodNs = 0;
         static uint64_t anchorVblank = 0;
