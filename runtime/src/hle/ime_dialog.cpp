@@ -387,6 +387,11 @@ void RunWindow(std::shared_ptr<Session> s) {
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        // Enter and Esc close the dialog only on a fresh press: one still held from the
+        // game window (Enter is the menus' Confirm key) arrives here as auto-repeat
+        // (bit 30: the key was already down) and would confirm the prefill at once.
+        if (msg.message == WM_KEYDOWN && (msg.wParam == VK_RETURN || msg.wParam == VK_ESCAPE) && (msg.lParam & (1 << 30)))
+            continue;
         if (IsDialogMessageW(hwnd, &msg)) continue;  // Enter = OK, Esc = Cancel, Tab
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
@@ -509,8 +514,11 @@ int PS4_SYSV_ABI sceImeDialogGetStatus() {
     }
     // The game saw a neutral pad while the dialog was up; a Cross still held from
     // confirming would reach it as a fresh press (and reopen the text field), so the
-    // gate stays up until Cross and Circle are released.
-    if (g_gateHeld && g_status != kStatusRunning && ((!cross && !circle) || Clock::now() - g_finishedAt > kGateReleaseTimeout)) {
+    // gate stays up until Cross and Circle are released. Likewise Enter and Esc, which
+    // are keyboard actions (Confirm, Back) once the game window has the focus again.
+    const bool keyHeld = (GetAsyncKeyState(VK_RETURN) | GetAsyncKeyState(VK_ESCAPE)) & 0x8000;
+    if (g_gateHeld && g_status != kStatusRunning &&
+        ((!cross && !circle && !keyHeld) || Clock::now() - g_finishedAt > kGateReleaseTimeout)) {
         modal::End();
         g_gateHeld = false;
     }

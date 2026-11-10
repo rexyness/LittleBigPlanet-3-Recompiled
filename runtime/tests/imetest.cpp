@@ -4,11 +4,16 @@
 // control's "ime" commands. The window opens briefly and never takes the foreground.
 // Prints each failed check; exit code 0 = all passed.
 //
+// The pad cases run in child processes (imetest --pad cross|circle): they feed the
+// pad through input::Read with LBP3_AUTOPRESS, which is read once per process.
+//
 // imetest --manual: per-monitor DPI aware like the game (SDL3), opens one dialog as the
 // game's text chat would and waits for a person to confirm or cancel it; for trying
 // the layout, typing and Windows' IME by hand.
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <string>
@@ -20,6 +25,7 @@
 
 #include "hle/ime_dialog.h"
 #include "hle/modal.h"
+#include "input/gamepad.h"
 
 namespace input::remote {
 void Parse(const std::string& line);  // gamepad_sdl.cpp: one line of analysis\input_cmd.txt
@@ -137,8 +143,10 @@ int32_t GameFinish() {
     r.endStatus = -1;  // (the game leaves 0 here; -1 shows a GetResult that wrote nothing)
     CHECK_EQ(sceImeDialogGetResult(&r), 0);
     CHECK_EQ(sceImeDialogTerm(), 0);
-    CHECK_EQ(sceImeDialogGetStatus(), kStatusNone);  // also lets the gate down (no pad held)
-    CHECK(!hle::modal::Active());
+    CHECK_EQ(sceImeDialogGetStatus(), kStatusNone);
+    // The gate comes down on that poll (no pad here), unless Enter or Esc is down on
+    // this PC's keyboard, which is read globally: then within the dialog's 1 s cap.
+    CHECK(WaitFor([] { return sceImeDialogGetStatus() == kStatusNone && !hle::modal::Active(); }, 1500));
     CHECK(WaitFor([] { return FindDialog() == nullptr; }));
     return r.endStatus;
 }
@@ -237,6 +245,11 @@ void TestKeysAndCancel() {
     CHECK(dialog != nullptr);
     if (!dialog) return;
     SetText(EditOf(dialog), L"Enter key");
+    // Auto-repeat of an Enter or Esc still held from the game window (bit 30: already
+    // down) doesn't close the dialog; a fresh Enter does.
+    for (UINT vk : {VK_RETURN, VK_ESCAPE})
+        PostMessageW(EditOf(dialog), WM_KEYDOWN, vk, 1 | ((vk == VK_RETURN ? 0x1Cu : 0x01u) << 16) | (1u << 30));
+    CHECK(!WaitFor([] { return sceImeDialogGetStatus() != kStatusRunning; }, 300));
     Key(EditOf(dialog), VK_RETURN, 0x1C);
     CHECK(PollUntilFinished());
     CHECK_EQ(GameFinish(), kEndOk);
@@ -417,6 +430,83 @@ void TestRemoteCommands() {
     CHECK_EQ(Buffer(), u"x");
 }
 
+// imetest --pad cross|circle. LBP3_AUTOPRESS taps the button for 150 ms every 2 s
+// through input::Read, as in an automated game run; the tap that's held when the dialog
+// opens doesn't count, the next one confirms or cancels. Then the modal gate must stay
+// up while the button is still held, and come down after.
+int PadCase(const std::string& button) {
+    using std::chrono::steady_clock;
+    const bool cross = button == "cross";
+    std::printf("pad (child): %s %s, the gate stays up while it's held\n", button.c_str(), cross ? "confirms" : "cancels");
+    // input::Init reads user\config\input.ini under the working folder and writes a
+    // default one if there's none: give it a folder of its own, removed at the end.
+    wchar_t temp[MAX_PATH];
+    GetTempPathW(MAX_PATH, temp);
+    const std::wstring dir = std::wstring(temp) + L"lbp3-imetest-" + std::to_wstring(GetCurrentProcessId());
+    CreateDirectoryW(dir.c_str(), nullptr);
+    SetCurrentDirectoryW(dir.c_str());
+    _putenv_s("LBP3_AUTOPRESS", button.c_str());
+    input::Init();
+    SetCurrentDirectoryW(temp);
+    DeleteFileW((dir + L"\\user\\config\\input.ini").c_str());
+    RemoveDirectoryW((dir + L"\\user\\config").c_str());
+    RemoveDirectoryW((dir + L"\\user").c_str());
+    RemoveDirectoryW(dir.c_str());
+    Prefill(u"Prefilled");
+    CHECK_EQ(Open(96), 0);
+    CHECK(WaitFor([] { return sceImeDialogGetStatus() == kStatusFinished; }, 8000));
+    const auto finished = steady_clock::now();
+    const uint32_t bit = cross ? ps4::PAD_CROSS : ps4::PAD_CIRCLE;
+    ps4::PadData pad{};
+    input::Read(0, pad);
+    CHECK((pad.buttons & bit) != 0);  // the closing tap is still held...
+    CHECK(hle::modal::Active());      // ...so the game still sees a neutral pad
+    bool leaked = false;
+    while (hle::modal::Active() && steady_clock::now() - finished < std::chrono::seconds(3)) {
+        sceImeDialogGetStatus();  // the game's poll, which lets the gate down
+        input::Read(0, pad);
+        leaked |= (pad.buttons & bit) && !hle::modal::Active();
+        Sleep(5);
+    }
+    const auto down = steady_clock::now() - finished;
+    CHECK(!leaked);
+    CHECK(!hle::modal::Active());
+    CHECK(down < std::chrono::milliseconds(1500));
+    Result r;
+    std::memset(&r, 0, sizeof(r));
+    r.endStatus = -1;
+    CHECK_EQ(sceImeDialogGetResult(&r), 0);
+    CHECK_EQ(r.endStatus, cross ? kEndOk : kEndUserCanceled);
+    CHECK_EQ(sceImeDialogTerm(), 0);
+    CHECK_EQ(Buffer(), u"Prefilled");
+    std::printf("pad (child): %d checks, %d failed\n", g_checks, g_failures);
+    return g_failures ? 1 : 0;
+}
+
+// Runs `imetest --pad <button>` with our output handles; returns its exit code.
+int RunPadChild(const wchar_t* button) {
+    std::fflush(stdout);
+    std::fflush(stderr);
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring cmd = L"\"" + std::wstring(exe) + L"\" --pad " + button;
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    for (HANDLE h : {si.hStdOutput, si.hStdError}) SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi)) return -1;
+    if (WaitForSingleObject(pi.hProcess, 20000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 2);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return static_cast<int>(code);
+}
+
 // One dialog for a person to try; prints what the game would get.
 int Manual() {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -434,6 +524,7 @@ int Manual() {
 
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "--manual") return Manual();
+    if (argc > 2 && std::string(argv[1]) == "--pad") return PadCase(argv[2]);
     TestIdle();
     TestBadParams();
     TestScriptedConfirm();
@@ -445,6 +536,8 @@ int main(int argc, char** argv) {
     TestUnicode();
     TestRemoteCommands();
     TestIdle();
+    CHECK_EQ(RunPadChild(L"cross"), 0);
+    CHECK_EQ(RunPadChild(L"circle"), 0);
     std::printf("%d checks, %d failed\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }
