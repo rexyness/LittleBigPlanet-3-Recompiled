@@ -265,6 +265,12 @@ int PS4_SYSV_ABI sceVideoOutGetDeviceCapabilityInfo_(int32_t handle, uint64_t* c
     return 0;
 }
 
+// Gap 7 / top band: log what the game asks for (it was a silent stub).
+int PS4_SYSV_ABI sceVideoOutSetWindowModeMargins(int32_t handle, int32_t top, int32_t bottom) {
+    std::fprintf(stderr, "[video] SetWindowModeMargins(handle %d, top %d, bottom %d)\n", handle, top, bottom);
+    return 0;
+}
+
 int PS4_SYSV_ABI sceVideoOutSetFlipRate(int32_t handle, int32_t rate) {
     if (handle != kHandle) return static_cast<int>(0x80290001);  // INVALID_HANDLE
     if (rate < 0 || rate > 2) return static_cast<int>(0x80290006);  // INVALID_VALUE
@@ -524,6 +530,7 @@ void RegisterVideoOut(core::Linker& linker) {
     HLE_REG(linker, "libSceVideoOut", sceVideoOutAddFlipEvent);
     HLE_REG(linker, "libSceVideoOut", sceVideoOutSetFlipRate);
     HLE_REG(linker, "libSceVideoOut", sceVideoOutGetDeviceCapabilityInfo_);
+    HLE_REG(linker, "libSceVideoOut", sceVideoOutSetWindowModeMargins);
     HLE_REG(linker, "libSceVideoOut", sceVideoOutSetBufferAttribute);
     HLE_REG(linker, "libSceVideoOut", sceVideoOutRegisterBuffers);
     HLE_REG(linker, "libSceGnmDriver", sceGnmSubmitAndFlipCommandBuffers);
