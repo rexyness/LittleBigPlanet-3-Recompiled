@@ -150,4 +150,7 @@ constexpr int32_t kDecErrorInvalidData = static_cast<int32_t>(0x80650010);
 constexpr int32_t kDecErrorUnsupportedData = static_cast<int32_t>(0x80650011);
 constexpr int32_t kDecErrorDecode = static_cast<int32_t>(0x80650012);
 
+// The stb quality used for the encode param's compression ratio (its byte at +0x2b).
+int QualityFromRatio(uint32_t ratio);
+
 }  // namespace hle::jpeg

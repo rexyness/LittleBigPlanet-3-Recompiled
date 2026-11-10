@@ -858,8 +858,11 @@ void TestGameCustomData() {
     CHECK_EQ(sceGameCustomDataDialogOpen(param.data()), 0);
     CHECK_EQ(sceGameCustomDataDialogUpdateStatus(), kStatusFinished);
     uint8_t result[0x40] = {};
-    CHECK_EQ(sceGameCustomDataDialogGetResult(result), 0);
+    // As the firmware: the common result at +0x08 and as the return value, the dialog's at +0x0C.
+    CHECK_EQ(sceGameCustomDataDialogGetResult(result), kResultUserCanceled);
     int32_t value = 0;
+    std::memcpy(&value, result + 0x08, 4);
+    CHECK_EQ(value, kResultUserCanceled);
     std::memcpy(&value, result + 0x0C, 4);
     CHECK_EQ(value, kResultUserCanceled);  // the game turns 1 into 0x8002a671 (cancelled), 0 into success
     sceGameCustomDataDialogClose();

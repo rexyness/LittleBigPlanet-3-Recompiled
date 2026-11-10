@@ -186,9 +186,21 @@ void TestBadParams() {
     p.inputTextBuffer = nullptr;
     CHECK_EQ(sceImeDialogInit(&p, nullptr), kErrorInvalidInputTextBuffer);
     CHECK_EQ(Open(0), kErrorInvalidMaxTextLength);
-    CHECK_EQ(Open(kMaxTextLength + 1), kErrorInvalidMaxTextLength);
     CHECK_EQ(sceImeDialogGetStatus(), kStatusNone);
     CHECK(!hle::modal::Active());
+}
+
+void TestMaxLengthClamped() {
+    std::puts("a max length over 2048 is clamped, as the firmware does, not refused");
+    Reset();
+    Prefill(u"Hello");
+    CHECK_EQ(Open(kMaxTextLength + 1), 0);
+    HWND dialog = WaitDialog();
+    CHECK(dialog != nullptr);
+    if (dialog) CHECK_EQ(SendMessageW(EditOf(dialog), EM_GETLIMITTEXT, 0, 0), kMaxTextLength);
+    CHECK_EQ(sceImeDialogAbort(), 0);
+    Reset();
+    CHECK_EQ(Buffer(), u"Hello");  // aborted: nothing written
 }
 
 void TestScriptedConfirm() {
@@ -527,6 +539,7 @@ int main(int argc, char** argv) {
     if (argc > 2 && std::string(argv[1]) == "--pad") return PadCase(argv[2]);
     TestIdle();
     TestBadParams();
+    TestMaxLengthClamped();
     TestScriptedConfirm();
     TestWindowConfirm();
     TestKeysAndCancel();

@@ -458,7 +458,7 @@ int PS4_SYSV_ABI sceImeDialogInit(const Param* param, const void* extended) {
         error = kErrorBusy;
     } else if (!param->inputTextBuffer) {
         error = kErrorInvalidInputTextBuffer;
-    } else if (param->maxTextLength == 0 || param->maxTextLength > kMaxTextLength) {
+    } else if (param->maxTextLength == 0) {  // over the maximum is clamped, as the firmware does
         error = kErrorInvalidMaxTextLength;
     }
     if (error != kernel::SCE_OK) {
@@ -467,13 +467,13 @@ int PS4_SYSV_ABI sceImeDialogInit(const Param* param, const void* extended) {
     }
 
     auto s = std::make_shared<Session>();
-    s->maxLength = param->maxTextLength;
+    s->maxLength = std::min(param->maxTextLength, kMaxTextLength);
     s->type = param->type;
     s->option = param->option;
     s->enterLabel = param->enterLabel;
     s->title = StripBom(FromGame(param->title, 512));
     s->placeholder = StripBom(FromGame(param->placeholder, 512));
-    s->prefill = FromGame(param->inputTextBuffer, param->maxTextLength);
+    s->prefill = FromGame(param->inputTextBuffer, s->maxLength);
     std::fprintf(stderr, "[ime] dialog opened: \"%s\", up to %u characters, text \"%s\" (type %u, options %#x)\n",
                  Utf8(s->title).c_str(), s->maxLength, Utf8(s->prefill).c_str(), s->type, s->option);
     // LBP3 passes neither. A filter is game code, which can't run on the window thread.

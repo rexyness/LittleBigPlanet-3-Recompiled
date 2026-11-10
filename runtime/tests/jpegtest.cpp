@@ -516,7 +516,15 @@ void TestDecodeTruncatedAndCorrupt() {
 }
 
 void TestEncodeLikeTheGame() {
-    std::printf("encode: B8G8R8A8 frames as the game sends them (pitch 4w, buffer w*h, quality 70/90/50)\n");
+    std::printf("encode: the compression ratio maps to the firmware's quantisers (m2/firmware.md)\n");
+    {
+        const struct { uint32_t ratio; int quality; } map[] = {{0, 100}, {1, 100}, {50, 80}, {70, 73},
+                                                               {90, 65}, {128, 50}, {255, 17}};
+        for (const auto& m : map)
+            Check(hle::jpeg::QualityFromRatio(m.ratio) == m.quality, "ratio %u gives quality %d, not %d", m.ratio,
+                  hle::jpeg::QualityFromRatio(m.ratio), m.quality);
+    }
+    std::printf("encode: B8G8R8A8 frames as the game sends them (pitch 4w, buffer w*h, ratio 70/90/50)\n");
     const struct {
         uint32_t w, h;
         uint8_t q;
@@ -534,7 +542,7 @@ void TestEncodeLikeTheGame() {
         if (e.encode <= 0) continue;
         Check(IsJfif(e.jpeg), "%ux%u output is not FF D8 FF E0 ... FF D9 (the game's loader needs JFIF)", s.w, s.h);
         // Same bytes as stb fed the source RGB directly: the BGRA unpacking is exact.
-        Check(e.jpeg == StbEncode(rgb, s.w, s.h, s.q), "%ux%u output differs from stb on the RGB source", s.w, s.h);
+        Check(e.jpeg == StbEncode(rgb, s.w, s.h, hle::jpeg::QualityFromRatio(s.q)), "%ux%u output differs from stb on the RGB source", s.w, s.h);
         int rw = 0, rh = 0;
         const Bytes ref = StbDecode(e.jpeg, &rw, &rh);
         Check(!ref.empty() && uint32_t(rw) == s.w && uint32_t(rh) == s.h, "%ux%u reference decode %dx%d", s.w, s.h,
@@ -583,7 +591,7 @@ void TestEncodeOtherFormats() {
     const Encoded e1 = GameEncode(rgba.data(), w, h, w * 4 + 64, 90, o);
     const Bytes d1 = e1.encode > 0 ? StbDecode(e1.jpeg, &rw, &rh) : Bytes{};
     const Diff diff1 = Compare(d1, rgb);
-    Check(e1.encode > 0 && e1.jpeg == StbEncode(rgb, w, h, 90) && PatchError(d1, w, patches) <= 40,
+    Check(e1.encode > 0 && e1.jpeg == StbEncode(rgb, w, h, hle::jpeg::QualityFromRatio(90)) && PatchError(d1, w, patches) <= 40,
           "RGBA, pitch +64: %08X, not the same bytes as stb on the RGB source", uint32_t(e1.encode));
     std::printf("  RGBA pitch %u: %d bytes, == stb, PSNR %.1f dB\n", w * 4 + 64, e1.encode, diff1.psnr);
 

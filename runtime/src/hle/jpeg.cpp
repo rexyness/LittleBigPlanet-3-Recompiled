@@ -300,6 +300,20 @@ const char* EncFormatName(uint16_t f) {
 
 }  // namespace
 
+// The encode param's byte at +0x2b is a compression ratio, not a quality. The firmware's
+// libSceJpegEnc scales each quantiser to base * r' / 128, where r' = r up to 128 and
+// 2r - 128 above, so 128 gives the standard tables and a higher value compresses more.
+// stb takes an IJG quality (50 = the standard tables); this picks the quality whose
+// tables come within 1 of the firmware's (m2/firmware.md). LBP3 passes 70 for Popit
+// photos (quality 73), 90 for cross-play thumbnails (65) and 50 for camera frames (80).
+int QualityFromRatio(uint32_t ratio) {
+    if (ratio < 2) return 100;
+    const double scaled = ratio <= 128 ? double(ratio) : 2.0 * ratio - 128.0;
+    const double s = scaled / 128.0;
+    const double quality = s <= 1.0 ? 100.0 - 50.0 * s : 50.0 / s;
+    return std::clamp(static_cast<int>(std::lround(quality)), 1, 100);
+}
+
 // ---- libSceJpegDec ----------------------------------------------------------
 
 int32_t PS4_SYSV_ABI sceJpegDecParseHeader(const DecParseParam* param, DecImageInfo* info) {
@@ -455,7 +469,7 @@ int32_t PS4_SYSV_ABI sceJpegEncEncode(EncHandle handle, const EncEncodeParam* pa
     if (!packed) return Fail(kEncErrorInvalidSize, "Encode: out of memory for %ux%u", p.width, p.height);
     ToPacked(p, comp, packed.get());
 
-    const int quality = std::clamp<int>(p.quality, 1, 100);
+    const int quality = QualityFromRatio(p.quality);
     Sink sink{static_cast<uint8_t*>(p.jpeg), p.jpegSize, 0, false};
     const int ok = stbi_write_jpg_to_func(SinkWrite, &sink, static_cast<int>(p.width), static_cast<int>(p.height),
                                           comp, packed.get(), quality);
@@ -470,8 +484,8 @@ int32_t PS4_SYSV_ABI sceJpegEncEncode(EncHandle handle, const EncEncodeParam* pa
         outputInfo->height = p.height;
     }
     if (ShouldLog(g_encLogs)) {
-        std::fprintf(stderr, "[jpeg] encoded %ux%u %s, quality %d -> %u bytes (buffer %u)\n", p.width, p.height,
-                     EncFormatName(p.pixelFormat), quality, sink.used, p.jpegSize);
+        std::fprintf(stderr, "[jpeg] encoded %ux%u %s, ratio %u (quality %d) -> %u bytes (buffer %u)\n", p.width,
+                     p.height, EncFormatName(p.pixelFormat), p.quality, quality, sink.used, p.jpegSize);
     }
     return static_cast<int32_t>(sink.used);
 }

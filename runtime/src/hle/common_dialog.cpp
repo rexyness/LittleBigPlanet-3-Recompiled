@@ -752,9 +752,12 @@ int32_t PS4_SYSV_ABI sceGameCustomDataDialogUpdateStatus() { return g_customStat
 int32_t PS4_SYSV_ABI sceGameCustomDataDialogGetResult(void* result) {
     if (g_customStatus.load() != kStatusFinished) return kErrorNotFinished;
     if (!result) return kErrorArgNull;
+    // As the firmware does: the common result at +0x08, the dialog's own at +0x0C (the one
+    // LBP3 reads), and the common result as the return value.
     const int32_t cancelled = kResultUserCanceled;
+    std::memcpy(static_cast<uint8_t*>(result) + 0x08, &cancelled, sizeof(cancelled));
     std::memcpy(static_cast<uint8_t*>(result) + kGameCustomDataResultOffset, &cancelled, sizeof(cancelled));
-    return kOk;
+    return cancelled;
 }
 
 int32_t PS4_SYSV_ABI sceGameCustomDataDialogClose() {
