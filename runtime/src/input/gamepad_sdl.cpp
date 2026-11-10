@@ -257,7 +257,6 @@ bool Read(int slot, ps4::PadData& out) {
 
     SDL_UpdateGamepads();
     RefreshSlots();
-    if (slot == 0) game_state::CutSceneWatchdog();  // the game reads pads once a frame
     SDL_Gamepad* p = g_pads[slot];
     if (!p) {
         const bool remote = remote::Apply(slot, out) | AutoPressCross(slot, out);
@@ -307,6 +306,12 @@ bool Read(int slot, ps4::PadData& out) {
     out.connected = true;
     out.connectedCount = 1;
     return true;
+}
+
+void RunGameHooks(int slot) {
+    if (slot != 0) return;
+    game_state::CutSceneWatchdog();  // the game reads pads once a frame
+    actions::RunGameHooks();
 }
 
 // Debug aid for getting past prompts while nothing is drawn yet:

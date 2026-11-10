@@ -42,7 +42,12 @@ bool AnyHeld();
 // Holds an action for `ms` as if its key were down (remote-controlled test runs).
 // Returns false for an unknown action name.
 bool HoldForTest(const std::string& name, uint64_t ms);
-// Applies the held actions to this frame's control input for player 1.
+// Applies the held actions to this frame's control input for player 1. Runs no game code,
+// so system dialogs can read the pad through it from any thread.
 void ApplyToFrame(ps4::PadData& frame);
+// The actions that call the game directly (open_computer, and open_popit's block on the
+// computer). Game code: only from the game's own pad read, with no input lock held, and
+// not while a system dialog has the controller.
+void RunGameHooks();
 
 }  // namespace input::actions

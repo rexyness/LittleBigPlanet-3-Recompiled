@@ -1,12 +1,28 @@
 #include "hle/modal.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+#include "hle/pad_types.h"
 
 namespace hle::modal {
 namespace {
 
+using Clock = std::chrono::steady_clock;
+constexpr auto kReleaseTimeout = std::chrono::seconds(1);
+
 std::atomic<int> g_open{0};
+// Steady-clock ticks until which the gate waits for the answering press to be released
+// after the last dialog closed; 0 = not waiting.
+std::atomic<int64_t> g_releaseUntil{0};
+
+int64_t Now() { return Clock::now().time_since_epoch().count(); }
 
 }  // namespace
 
@@ -19,9 +35,24 @@ void End() {
     int n = g_open.load();
     while (n > 0 && !g_open.compare_exchange_weak(n, n - 1)) {
     }
+    if (n == 1) g_releaseUntil = Now() + std::chrono::duration_cast<Clock::duration>(kReleaseTimeout).count();
     std::fprintf(stderr, "[modal] closed (%d open)\n", n > 0 ? n - 1 : 0);
 }
 
 bool Active() { return g_open.load() > 0; }
+
+bool HoldsPad(uint32_t realButtons) {
+    if (g_open.load() > 0) return true;
+    const int64_t until = g_releaseUntil.load();
+    if (!until) return false;
+    // Enter and Esc confirm and cancel the dialog windows; once the game window has the
+    // focus again they are keyboard actions (Confirm, Back) too.
+    const bool keys = ((GetAsyncKeyState(VK_RETURN) | GetAsyncKeyState(VK_ESCAPE)) & 0x8000) != 0;
+    const bool held = (realButtons & (ps4::PAD_CROSS | ps4::PAD_CIRCLE)) != 0 || keys;
+    if (held && Now() < until) return true;
+    int64_t expected = until;
+    g_releaseUntil.compare_exchange_strong(expected, 0);  // a dialog that closed since keeps its own wait
+    return false;
+}
 
 }  // namespace hle::modal

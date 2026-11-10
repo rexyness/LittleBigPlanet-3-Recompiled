@@ -899,6 +899,26 @@ void TestRegistration() {
 
 }  // namespace
 
+// The gate after a dialog closes: the game keeps a neutral pad until the press that
+// answered it is released (hle/modal.h), so that press doesn't act on the menu behind.
+void TestGateWaitsForRelease() {
+    std::printf("gate: held until the answering press is released\n");
+    while (GetAsyncKeyState(VK_RETURN) & 0x8000) Sleep(10);  // the release is checked against the real keyboard
+    CHECK(!hle::modal::HoldsPad(0));
+    hle::modal::Begin("test");
+    CHECK(hle::modal::HoldsPad(0));
+    hle::modal::End();
+    CHECK(!hle::modal::Active());
+    CHECK(hle::modal::HoldsPad(ps4::PAD_CROSS));   // Cross still down from answering
+    CHECK(hle::modal::HoldsPad(ps4::PAD_CIRCLE));
+    CHECK(!hle::modal::HoldsPad(ps4::PAD_SQUARE));  // released: the game gets the pad back
+    CHECK(!hle::modal::HoldsPad(ps4::PAD_CROSS));   // and a new Cross is the game's
+    hle::modal::Begin("test");
+    hle::modal::End();
+    Sleep(1100);
+    CHECK(!hle::modal::HoldsPad(ps4::PAD_CROSS));   // held past the 1 s cap: the game gets it
+}
+
 int main(int argc, char** argv) {
     ui::SetPadReaderForTest(TestPad);
     if (argc == 2 && std::strcmp(argv[1], "--autopress-env") == 0) {  // child of RunAutoPressFromEnvironment
@@ -921,6 +941,7 @@ int main(int argc, char** argv) {
     TestAutoPress(false);
     TestCentredOverGameWindow();
     TestGameCustomData();
+    TestGateWaitsForRelease();
     TestRegistration();
     RunAutoPressFromEnvironment();
     std::printf("\n%d checks, %d failed: %s\n", g_checks, g_failures, g_failures ? "FAIL" : "PASS");

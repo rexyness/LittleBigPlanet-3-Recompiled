@@ -9,7 +9,12 @@ constexpr int kMaxPads = 4;
 
 void Init();
 // Fills `out` for the given player slot. Returns false if nothing is connected there.
+// Runs no game code, so system dialogs may read the real pad with it from any thread.
 bool Read(int slot, ps4::PadData& out);
+// What the game's own pad read does besides reading: keyboard actions that call the game
+// directly, and the opt-in cutscene watchdog. Game code: call it from the game's thread
+// in scePadReadState, with no lock held, and not while a system dialog has the controller.
+void RunGameHooks(int slot);
 void SetVibration(int slot, uint8_t largeMotor, uint8_t smallMotor);
 void SetLightBar(int slot, uint8_t r, uint8_t g, uint8_t b);
 

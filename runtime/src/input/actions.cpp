@@ -2,6 +2,7 @@
 #include "input/game_state.h"
 
 #include <array>
+#include <atomic>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -137,6 +138,13 @@ bool AnyHeld() {
     return false;
 }
 
+namespace {
+// The Popit press that open_popit adds to the frame, and how long the computer stays blocked.
+std::atomic<uint32_t> g_pulse{0};
+std::atomic<uint64_t> g_pulseUntil{0};
+uint64_t g_blockUntil = 0;  // RunGameHooks only
+}  // namespace
+
 void ApplyToFrame(ps4::PadData& frame) {
     // Character movement: the walk and layer directions go through the left stick, which
     // is what the game's character controller reads, at full deflection.
@@ -147,6 +155,20 @@ void ApplyToFrame(ps4::PadData& frame) {
     if (Held(Action::Jump)) frame.buttons |= ps4::PAD_CROSS;
     if (Held(Action::Grab)) frame.buttons |= ps4::PAD_R1;
 
+    // A Popit press from RunGameHooks (R), held for 150 ms.
+    const uint32_t pulse = g_pulse.load();
+    if (pulse && SDL_GetTicks() < g_pulseUntil.load()) frame.buttons |= pulse;
+
+    if (Held(Action::MenuUp)) frame.buttons |= ps4::PAD_UP;
+    if (Held(Action::MenuDown)) frame.buttons |= ps4::PAD_DOWN;
+    if (Held(Action::MenuLeft)) frame.buttons |= ps4::PAD_LEFT;
+    if (Held(Action::MenuRight)) frame.buttons |= ps4::PAD_RIGHT;
+    if (Held(Action::Confirm)) frame.buttons |= ps4::PAD_CROSS;
+    if (Held(Action::Back)) frame.buttons |= ps4::PAD_CIRCLE;
+    if (Held(Action::Pause)) frame.buttons |= ps4::PAD_OPTIONS;
+}
+
+void RunGameHooks() {
     // The Pod computer and the Popit share one control in the game. Here each has its own:
     // open_computer calls the game's own "use the Pod computer" request directly (from
     // anywhere in the Pod), open_popit presses the Popit control with the computer request
@@ -156,8 +178,6 @@ void ApplyToFrame(ps4::PadData& frame) {
     // Known gap: in reach of the computer the game itself doesn't open the Popit, so R
     // does nothing there.
     static bool computerWas = false, popitWas = false;
-    static uint32_t pulse = 0;
-    static uint64_t pulseUntil = 0, blockUntil = 0;
     const bool computerKey = Held(Action::OpenComputer), popitKey = Held(Action::OpenPopit);
     const bool computerPressed = computerKey && !computerWas, popitPressed = popitKey && !popitWas;
     computerWas = computerKey;
@@ -167,25 +187,16 @@ void ApplyToFrame(ps4::PadData& frame) {
         const bool popit = game_state::PopitOpen();
         if (computerPressed && !menu && !popit) game_state::UsePodComputer();
         if (popitPressed && !menu) {
-            pulse = popit ? ps4::PAD_CIRCLE : ps4::PAD_SQUARE;  // R toggles
-            pulseUntil = SDL_GetTicks() + 150;
+            g_pulse = popit ? ps4::PAD_CIRCLE : ps4::PAD_SQUARE;  // R toggles
+            g_pulseUntil = SDL_GetTicks() + 150;
             game_state::BlockComputerFromSquare(true);
-            blockUntil = SDL_GetTicks() + 1000;
+            g_blockUntil = SDL_GetTicks() + 1000;
         }
     }
-    if (pulse && SDL_GetTicks() < pulseUntil) frame.buttons |= pulse;
-    if (blockUntil && SDL_GetTicks() >= blockUntil) {
+    if (g_blockUntil && SDL_GetTicks() >= g_blockUntil) {
         game_state::BlockComputerFromSquare(false);
-        blockUntil = 0;
+        g_blockUntil = 0;
     }
-
-    if (Held(Action::MenuUp)) frame.buttons |= ps4::PAD_UP;
-    if (Held(Action::MenuDown)) frame.buttons |= ps4::PAD_DOWN;
-    if (Held(Action::MenuLeft)) frame.buttons |= ps4::PAD_LEFT;
-    if (Held(Action::MenuRight)) frame.buttons |= ps4::PAD_RIGHT;
-    if (Held(Action::Confirm)) frame.buttons |= ps4::PAD_CROSS;
-    if (Held(Action::Back)) frame.buttons |= ps4::PAD_CIRCLE;
-    if (Held(Action::Pause)) frame.buttons |= ps4::PAD_OPTIONS;
 }
 
 }  // namespace input::actions

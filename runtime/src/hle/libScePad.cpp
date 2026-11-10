@@ -58,13 +58,15 @@ int PS4_SYSV_ABI scePadReadState(int32_t handle, ps4::PadData* data) {
     if (slot < 0) return SCE_PAD_ERROR_INVALID_HANDLE;
     if (!data) return SCE_PAD_ERROR_INVALID_ARG;
     input::Read(slot, *data);  // a disconnected pad is reported via data->connected
-    if (modal::Active()) {
+    if (modal::HoldsPad(data->buttons)) {
         // A system dialog has the controller: the game sees a neutral pad (hle/modal.h).
         data->buttons = 0;
         data->leftStick = {0x80, 0x80};
         data->rightStick = {0x80, 0x80};
         data->analogButtons.l2 = data->analogButtons.r2 = 0;
         data->touchData.touchNum = 0;
+    } else {
+        input::RunGameHooks(slot);
     }
     return SCE_OK;
 }
