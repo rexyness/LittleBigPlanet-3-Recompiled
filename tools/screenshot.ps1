@@ -20,11 +20,17 @@ public static class Win {
 [void][Win]::SetThreadDpiAwarenessContext([IntPtr](-4))
 
 if ($AutoPress) { $env:LBP3_AUTOPRESS = $AutoPress }
+# Test runs open on the monitor named in analysis\test_display.txt (a number or a rate such as
+# "165hz"; LBP3_DISPLAY in runtime/src/video/presenter.cpp), unless LBP3_DISPLAY is set already.
+$testDisplay = "$root\analysis\test_display.txt"
+$setDisplay = -not $env:LBP3_DISPLAY -and (Test-Path $testDisplay)
+if ($setDisplay) { $env:LBP3_DISPLAY = (Get-Content $testDisplay -TotalCount 1).Trim() }
 $p = Start-Process -FilePath "$root\build\lbp3.exe" `
     -ArgumentList "--run", "--skip-intro" `
     -WorkingDirectory $root -RedirectStandardOutput "$root\analysis\shot_stdout.txt" `
     -RedirectStandardError "$root\analysis\shot_stderr.txt" -PassThru
 $env:LBP3_AUTOPRESS = $null
+if ($setDisplay) { $env:LBP3_DISPLAY = $null }
 Start-Sleep -Seconds $Seconds
 $p.Refresh()
 $hwnd = $p.MainWindowHandle

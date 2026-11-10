@@ -15,10 +15,16 @@ foreach ($kv in $EnvVars) {
     $name, $value = $kv -split "=", 2
     Set-Item -Path "env:$name" -Value $value
 }
+# Test runs open on the monitor named in analysis\test_display.txt (a number or a rate such as
+# "165hz"; LBP3_DISPLAY in runtime/src/video/presenter.cpp), unless LBP3_DISPLAY is set already.
+$testDisplay = "$root\analysis\test_display.txt"
+$setDisplay = -not $env:LBP3_DISPLAY -and (Test-Path $testDisplay)
+if ($setDisplay) { $env:LBP3_DISPLAY = (Get-Content $testDisplay -TotalCount 1).Trim() }
 $p = Start-Process -FilePath "$root\build\lbp3.exe" `
     -ArgumentList $exeArgs `
     -WorkingDirectory $root -RedirectStandardOutput "$root\analysis\remote_stdout.txt" `
     -RedirectStandardError "$root\analysis\remote_stderr.txt" -PassThru
 $env:LBP3_REMOTE_INPUT = $null
 foreach ($kv in $EnvVars) { Remove-Item -Path ("env:" + ($kv -split "=", 2)[0]) -ErrorAction SilentlyContinue }
+if ($setDisplay) { $env:LBP3_DISPLAY = $null }
 Write-Host "started pid $($p.Id)"

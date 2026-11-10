@@ -105,6 +105,51 @@ void VBlankThread() {
     }
 }
 
+double DisplayHz(SDL_DisplayID id) {
+    const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(id);
+    if (!mode) return 0.0;
+    if (mode->refresh_rate_numerator > 0 && mode->refresh_rate_denominator > 0)
+        return double(mode->refresh_rate_numerator) / double(mode->refresh_rate_denominator);
+    return mode->refresh_rate;
+}
+
+// LBP3_DISPLAY picks the display the window opens on, centred: a number (1 = the first
+// display SDL lists) or a refresh rate such as "165hz" (the display whose current rate is
+// nearest). Numbers shift when monitors are switched on and off; rates don't. The clone's
+// test launchers set it from analysis\test_display.txt, so test runs use one monitor while
+// the player's own sessions open on the primary as before.
+void PlaceWindow(SDL_Window* window) {
+    const char* want = std::getenv("LBP3_DISPLAY");
+    if (!want || !*want) return;
+    int count = 0;
+    SDL_DisplayID* ids = SDL_GetDisplays(&count);
+    SDL_DisplayID pick = 0;
+    char* end = nullptr;
+    const double value = std::strtod(want, &end);
+    const bool byRate = end && (*end == 'h' || *end == 'H');
+    if (ids && byRate) {
+        double best = 1e9;
+        for (int i = 0; i < count; ++i) {
+            const double off = std::fabs(DisplayHz(ids[i]) - value);
+            if (off < best) {
+                best = off;
+                pick = ids[i];
+            }
+        }
+    } else if (ids && end != want && value >= 1 && value <= count) {
+        pick = ids[static_cast<int>(value) - 1];
+    }
+    if (pick) {
+        SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED_DISPLAY(pick), SDL_WINDOWPOS_CENTERED_DISPLAY(pick));
+        std::fprintf(stderr, "[video] LBP3_DISPLAY=%s: window on \"%s\" (%.2f Hz), one of %d displays\n", want,
+                     SDL_GetDisplayName(pick), DisplayHz(pick), count);
+    } else {
+        std::fprintf(stderr, "[video] LBP3_DISPLAY=%s matches none of %d displays; window left where SDL put it\n",
+                     want, count);
+    }
+    SDL_free(ids);
+}
+
 void PresenterThread() {
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
         std::fprintf(stderr, "[video] SDL video init failed: %s\n", SDL_GetError());
@@ -112,6 +157,7 @@ void PresenterThread() {
     }
     SDL_Window* window = SDL_CreateWindow("LittleBigPlanet 3 (native)", kWindowWidth, kWindowHeight,
                                           SDL_WINDOW_RESIZABLE);
+    if (window) PlaceWindow(window);
     SDL_Renderer* renderer = window ? SDL_CreateRenderer(window, nullptr) : nullptr;
     if (!renderer) {
         std::fprintf(stderr, "[video] window creation failed: %s\n", SDL_GetError());

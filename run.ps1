@@ -14,8 +14,14 @@ $out = "$dir\analysis\run_stdout.txt"
 $err = "$dir\analysis\run_stderr.txt"
 $args = @("--run", "--dump-after=$Seconds", "--skip-intro")
 $args += $Break | ForEach-Object { "--break=$_" }
+# Test runs open on the monitor named in analysis\test_display.txt (a number or a rate such as
+# "165hz"; LBP3_DISPLAY in runtime/src/video/presenter.cpp), unless LBP3_DISPLAY is set already.
+$testDisplay = "$dir\analysis\test_display.txt"
+$setDisplay = -not $env:LBP3_DISPLAY -and (Test-Path $testDisplay)
+if ($setDisplay) { $env:LBP3_DISPLAY = (Get-Content $testDisplay -TotalCount 1).Trim() }
 $p = Start-Process -FilePath "$dir\build\lbp3.exe" -ArgumentList $args `
     -WorkingDirectory $dir -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+if ($setDisplay) { $env:LBP3_DISPLAY = $null }
 if (-not $p.WaitForExit(($Seconds + 10) * 1000)) {
     Stop-Process -Id $p.Id -Force
     Write-Host "hung even past the thread dump (stopped)"
