@@ -79,8 +79,16 @@ void WatchThreads() {
     std::unordered_map<DWORD, bool> done;
     for (;;) {
         if (g_watchDeref) {
-            const uint64_t ptr = *reinterpret_cast<const uint64_t*>(
+            // The pointer may live in memory the game hasn't mapped yet.
+            const auto* slot = reinterpret_cast<const uint64_t*>(
                 reinterpret_cast<uint64_t>(g_watchModule->base) + g_watchPtrOff);
+            MEMORY_BASIC_INFORMATION mbi;
+            if (!VirtualQuery(slot, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
+                (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+                Sleep(200);
+                continue;
+            }
+            const uint64_t ptr = *slot;
             const uint64_t want = ptr ? ((ptr + g_watchPtrAdd) & ~7ull) : 0;
             if (want != g_watchAddr) {
                 g_watchAddr = want;
@@ -124,7 +132,11 @@ LONG CALLBACK Handler(EXCEPTION_POINTERS* ep) {
     const DWORD code = ep->ExceptionRecord->ExceptionCode;
 
     if (code == EXCEPTION_SINGLE_STEP && g_watchAddr && (c.Dr6 & 1)) {
-        if (g_watchHits++ < 60) {
+        static const int maxHits = [] {  // LBP3_HWWATCH_HITS=<n> (default 60)
+            const char* v = std::getenv("LBP3_HWWATCH_HITS");
+            return v ? std::atoi(v) : 60;
+        }();
+        if (g_watchHits++ < maxHits) {
             const uint64_t base = reinterpret_cast<uint64_t>(g_watchModule->base);
             const uint64_t value = *reinterpret_cast<const uint64_t*>(g_watchAddr);
             std::fprintf(stderr, "[hwwatch] write to eboot+0x%llx (now %016llx) by eboot+0x%llx, thread %lu\n",

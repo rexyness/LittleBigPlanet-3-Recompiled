@@ -25,6 +25,7 @@
 
 namespace hle::kernel {
 void CommitWholeStack();  // kernel_pthread.cpp
+void DumpSyncTrace();     // kernel_sync.cpp (LBP3_TRACE_SYNC=1)
 }
 
 namespace core {
@@ -616,6 +617,7 @@ void RequestPerfReport() {
         char name[64];
         std::snprintf(name, sizeof(name), "analysis\\perf\\perf%02d.txt", ++n);
         // Where every thread is right now first (into the log): shows what a stuck game waits on.
+        hle::kernel::DumpSyncTrace();
         std::fprintf(stderr, "[perf] all threads:\n");
         DumpAllThreads();
         std::fprintf(stderr, "[perf] sampling main and GPU threads for %s\n", name);
