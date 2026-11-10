@@ -226,13 +226,13 @@ DWORD WINAPI MainThread(void*) {
     hle::kernel::CommitWholeStack();
     SetupThreadTls();
     RegisterCurrentThread("main");
+    hle::kernel::SetGuestFpState();  // before any module_start runs, as on the console
     for (Module* m : g_startFirst) StartModule(*m, 0, nullptr);
     static const char* const kArgv0 = "/app0/eboot.bin";
     g_params.argc = 1;
     g_params.argv[0] = kArgv0;
     g_params.entryAddr = reinterpret_cast<uint64_t>(g_eboot->Addr(g_eboot->entry));
     std::fprintf(stderr, "[entry] jumping to %s\n", Describe(g_params.entryAddr).c_str());
-    hle::kernel::SetGuestFpState();
     JumpToEntry(&g_params);
 }
 
