@@ -257,6 +257,14 @@ int PS4_SYSV_ABI sceVideoOutRegisterBuffers(int32_t handle, int32_t start, void*
     return start;  // the buffer set index
 }
 
+// Gap 7 experiment: the generic stub returned success without writing the capability word,
+// so the game read whatever was there. Report no special capability (no HDR), as shadPS4 does.
+int PS4_SYSV_ABI sceVideoOutGetDeviceCapabilityInfo_(int32_t handle, uint64_t* capability) {
+    (void)handle;
+    if (capability) *capability = 0;
+    return 0;
+}
+
 int PS4_SYSV_ABI sceVideoOutSetFlipRate(int32_t handle, int32_t rate) {
     if (handle != kHandle) return static_cast<int>(0x80290001);  // INVALID_HANDLE
     if (rate < 0 || rate > 2) return static_cast<int>(0x80290006);  // INVALID_VALUE
@@ -515,6 +523,7 @@ void RegisterVideoOut(core::Linker& linker) {
     HLE_REG(linker, "libSceVideoOut", sceVideoOutOpen);
     HLE_REG(linker, "libSceVideoOut", sceVideoOutAddFlipEvent);
     HLE_REG(linker, "libSceVideoOut", sceVideoOutSetFlipRate);
+    HLE_REG(linker, "libSceVideoOut", sceVideoOutGetDeviceCapabilityInfo_);
     HLE_REG(linker, "libSceVideoOut", sceVideoOutSetBufferAttribute);
     HLE_REG(linker, "libSceVideoOut", sceVideoOutRegisterBuffers);
     HLE_REG(linker, "libSceGnmDriver", sceGnmSubmitAndFlipCommandBuffers);
