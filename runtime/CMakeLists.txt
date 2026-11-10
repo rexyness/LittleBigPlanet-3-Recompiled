@@ -56,6 +56,7 @@ add_library(hle STATIC
     src/video/presenter.cpp
 )
 target_include_directories(hle PUBLIC src)
+target_include_directories(hle PRIVATE ${SHADPS4_EXT}/stb)  # hle/jpeg.cpp
 target_link_libraries(hle PUBLIC shader_recompiler video_core)
 target_compile_definitions(hle PUBLIC _WIN32_WINNT=0x0A00 NOMINMAX _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(hle PUBLIC SDL3::SDL3 bcrypt winmm dbghelp onecore advapi32 dxgi)
@@ -66,7 +67,11 @@ target_link_libraries(lbp3 PRIVATE hle)
 add_executable(padtest tests/padtest.cpp)
 target_link_libraries(padtest PRIVATE hle)
 
-foreach(exe lbp3 padtest)
+add_executable(jpegtest tests/jpegtest.cpp)
+target_link_libraries(jpegtest PRIVATE hle)
+target_include_directories(jpegtest PRIVATE ${SHADPS4_EXT}/stb)
+
+foreach(exe lbp3 padtest jpegtest)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()
