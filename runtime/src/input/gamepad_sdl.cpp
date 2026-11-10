@@ -228,6 +228,10 @@ bool Apply(int slot, ps4::PadData& out) {
 }  // namespace remote
 
 bool Read(int slot, ps4::PadData& out) {
+    // The game reads pads on its own threads and system dialogs poll from theirs; RefreshSlots
+    // closes and reopens g_pads entries, so one reader at a time.
+    static std::mutex readMutex;
+    std::lock_guard readLock(readMutex);
     std::memset(&out, 0, sizeof(out));
     out.leftStick = out.rightStick = {128, 128};
     out.orientation = {0.f, 0.f, 0.f, 1.f};

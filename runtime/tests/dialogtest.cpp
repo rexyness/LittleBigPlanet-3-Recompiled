@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -28,6 +29,8 @@
 #include "hle/modal.h"
 #include "hle/pad_types.h"
 #include "hle/register.h"
+
+#include <SDL3/SDL.h>
 
 using namespace hle::common_dialog;
 namespace ui = hle::dialog_ui;
@@ -712,9 +715,11 @@ void TestBootSaveMessages() {
     CHECK(!hle::modal::Active());
 }
 
-void TestAutoPress() {
-    Section("LBP3_AUTOPRESS: each dialog answers itself with the choice that changes nothing");
-    ui::SetAutoPressForTest(1);
+// fromEnv: the real switch, LBP3_AUTOPRESS in the environment (dialogtest runs itself for that).
+void TestAutoPress(bool fromEnv) {
+    Section(fromEnv ? "LBP3_AUTOPRESS from the environment: each dialog answers itself with the choice that changes nothing"
+                    : "LBP3_AUTOPRESS: each dialog answers itself with the choice that changes nothing");
+    if (!fromEnv) ui::SetAutoPressForTest(1);
     ui::SetAutoAnswerDelayForTest(150);
     Result res;
 
@@ -776,8 +781,73 @@ void TestAutoPress() {
     CHECK_EQ(sceMsgDialogTerminate(), 0);
     CHECK(WaitNoDialogs());
 
-    ui::SetAutoPressForTest(0);
+    if (!fromEnv) ui::SetAutoPressForTest(0);
     CHECK(!hle::modal::Active());
+}
+
+// The dialogs centre on the game's SDL window (found by its class, in this process).
+void TestCentredOverGameWindow() {
+    Section("dialogs centre over the game window");
+    CHECK(SDL_Init(SDL_INIT_VIDEO));
+    RECT work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    SDL_Window* window = SDL_CreateWindow("dialogtest: stand-in for the game window", 800, 600, 0);
+    CHECK(window != nullptr);
+    if (!window) return;
+    SDL_SetWindowPosition(window, work.left + 40, work.top + 60);  // off-centre on purpose
+    SDL_ShowWindow(window);
+    for (int i = 0; i < 20; ++i) {
+        SDL_PumpEvents();
+        Wait(10);
+    }
+    const HWND game = static_cast<HWND>(
+        SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+    wchar_t cls[32] = {};
+    GetClassNameW(game, cls, 32);
+    CHECK(std::wcscmp(cls, L"SDL_app") == 0);
+
+    CHECK_EQ(sceMsgDialogInitialize(), 0);
+    MsgSystem m(kMsgSysEmptyStore);
+    CHECK_EQ(sceMsgDialogOpen(&m.p), 0);
+    HWND dlg = FindDialog();
+    CHECK(dlg != nullptr);
+    RECT g{}, d{};
+    GetWindowRect(game, &g);
+    GetWindowRect(dlg, &d);
+    CHECK(std::abs((g.left + g.right) / 2 - (d.left + d.right) / 2) <= 2);
+    CHECK(std::abs((g.top + g.bottom) / 2 - (d.top + d.bottom) / 2) <= 2);
+    CHECK(GetWindowLongW(dlg, GWL_EXSTYLE) & WS_EX_TOPMOST);
+    Click(dlg, kButton1);
+    CHECK_EQ(PollUntil(MsgUpdate, kStatusFinished), kStatusFinished);
+    CHECK_EQ(sceMsgDialogTerminate(), 0);
+    CHECK(WaitNoDialogs());
+    SDL_DestroyWindow(window);
+    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+}
+
+// Runs this exe again with LBP3_AUTOPRESS set, so the dialogs read the real switch.
+void RunAutoPressFromEnvironment() {
+    wchar_t self[MAX_PATH];
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    std::wstring cmd = L"\"" + std::wstring(self) + L"\" --autopress-env";
+    SetEnvironmentVariableW(L"LBP3_AUTOPRESS", L"cross");
+    std::fflush(stdout);
+    STARTUPINFOW si{sizeof(si)};
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    PROCESS_INFORMATION pi{};
+    const bool started = CreateProcessW(self, cmd.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi);
+    SetEnvironmentVariableW(L"LBP3_AUTOPRESS", nullptr);
+    CHECK(started);
+    if (!started) return;
+    WaitForSingleObject(pi.hProcess, 120000);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    CHECK_EQ(code, 0);
 }
 
 void TestGameCustomData() {
@@ -830,8 +900,15 @@ void TestRegistration() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc == 3 && std::strcmp(argv[1], "--capture") == 0) g_captureDir = argv[2];
     ui::SetPadReaderForTest(TestPad);
+    if (argc == 2 && std::strcmp(argv[1], "--autopress-env") == 0) {  // child of RunAutoPressFromEnvironment
+        CHECK(std::getenv("LBP3_AUTOPRESS") != nullptr);
+        TestInitialization();
+        TestAutoPress(true);
+        std::printf("  (autopress child: %d checks, %d failed)\n", g_checks, g_failures);
+        return g_failures ? 1 : 0;
+    }
+    if (argc == 3 && std::strcmp(argv[1], "--capture") == 0) g_captureDir = argv[2];
     ui::SetAutoPressForTest(0);
     TestInitialization();
     TestBusyAndNotInitialized();
@@ -841,9 +918,11 @@ int main(int argc, char** argv) {
     TestLoadFlow();
     TestImportListOnDisk();
     TestBootSaveMessages();
-    TestAutoPress();
+    TestAutoPress(false);
+    TestCentredOverGameWindow();
     TestGameCustomData();
     TestRegistration();
+    RunAutoPressFromEnvironment();
     std::printf("\n%d checks, %d failed: %s\n", g_checks, g_failures, g_failures ? "FAIL" : "PASS");
     return g_failures ? 1 : 0;
 }
