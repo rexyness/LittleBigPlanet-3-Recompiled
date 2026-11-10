@@ -321,10 +321,13 @@ int PS4_SYSV_ABI sceNetEpollControl(int ep, int op, int id, EpollEvent* ev) {
 // Reports sockets with queued datagrams as readable. Long or infinite waits
 // are capped so the caller keeps looping.
 int PS4_SYSV_ABI sceNetEpollWait(int ep, EpollEvent* events, int maxEvents, int timeoutUs) {
+    // Microsecond timeouts, not truncated to whole milliseconds, and no oversleeping the deadline:
+    // the game host thread sends each simulation tick when a 33,333 us wait ends, and a tick that
+    // drifted against the frames gave 0 then 2 sim steps (camera snaps).
     const auto deadline = std::chrono::steady_clock::now() +
-                          (timeoutUs < 0 ? kEpollMaxSleep
-                                         : std::min<std::chrono::milliseconds>(
-                                               std::chrono::milliseconds(timeoutUs / 1000), kEpollMaxSleep));
+                          (timeoutUs < 0 ? std::chrono::duration_cast<std::chrono::microseconds>(kEpollMaxSleep)
+                                         : std::min<std::chrono::microseconds>(std::chrono::microseconds(timeoutUs),
+                                                                               kEpollMaxSleep));
     for (;;) {
         int n = 0;
         {
@@ -337,8 +340,10 @@ int PS4_SYSV_ABI sceNetEpollWait(int ep, EpollEvent* events, int maxEvents, int 
                 ++n;
             }
         }
-        if (n > 0 || std::chrono::steady_clock::now() >= deadline) return n;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        const auto now = std::chrono::steady_clock::now();
+        if (n > 0 || now >= deadline) return n;
+        if (deadline - now > std::chrono::microseconds(1500)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        else std::this_thread::yield();
     }
 }
 
