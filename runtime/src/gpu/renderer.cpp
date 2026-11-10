@@ -37,6 +37,11 @@
 
 namespace core {
 void* ProcParam();  // runtime/src/core/runner.h (not included: shadPS4 has its own core/ headers)
+uint8_t* EbootBase();
+}
+
+namespace VideoCore {
+extern std::atomic<const volatile u8*> g_lbp3CaptureQueued;  // texture_cache.cpp
 }
 
 namespace Core {
@@ -99,6 +104,16 @@ bool Init() {
         g_rasterizer = new Vulkan::Rasterizer(*g_instance, *g_scheduler, *g_runtime, g_liverpool);
         for (auto [addr, size] : g_pendingMaps) RegisterWithRasterizer(addr, size);
         g_pendingMaps.clear();
+    }
+    // LBP3's photos and icons: the texture cache writes the capture targets back for the CPU
+    // while the game has a capture job queued, the byte its job runner (eboot 0x401a50) tests:
+    // "lea r14, [rip + 0xf2bc38]; cmp byte ptr [r14], 0" at 0x401a5a, i.e. eboot+0x132d699.
+    if (uint8_t* eboot = core::EbootBase()) {
+        static constexpr uint8_t kRunner[] = {0x4c, 0x8d, 0x35, 0x38, 0xbc, 0xf2, 0x00, 0x41, 0x80, 0x3e, 0x00};
+        if (std::memcmp(eboot + 0x401a5a, kRunner, sizeof(kRunner)) == 0)
+            VideoCore::g_lbp3CaptureQueued = eboot + 0x132d699;
+        else
+            std::fprintf(stderr, "[gpu] the capture job code differs from v01.28: photos will be black\n");
     }
 
     for (auto irq : kForwardedIrqs) {
