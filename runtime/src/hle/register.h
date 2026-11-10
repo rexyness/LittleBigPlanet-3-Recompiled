@@ -25,6 +25,8 @@ void RegisterNetOffline(core::Linker& linker);
 void RegisterRtc(core::Linker& linker);
 void RegisterHttpOffline(core::Linker& linker);
 void RegisterDialogs(core::Linker& linker);
+void RegisterImeDialog(core::Linker& linker);
+void RegisterJpeg(core::Linker& linker);
 void RegisterAudioOut(core::Linker& linker);
 void RegisterTrophy(core::Linker& linker);
 void RegisterFiber(core::Linker& linker);

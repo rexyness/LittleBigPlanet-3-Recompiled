@@ -27,6 +27,8 @@ void RegisterAll(core::Linker& linker) {
     RegisterRtc(linker);
     RegisterHttpOffline(linker);
     RegisterDialogs(linker);
+    RegisterImeDialog(linker);
+    RegisterJpeg(linker);
     RegisterAudioOut(linker);
     RegisterTrophy(linker);
     RegisterFiber(linker);

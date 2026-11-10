@@ -28,6 +28,9 @@ add_library(hle STATIC
     src/hle/trophy.cpp
     src/hle/fiber.cpp
     src/hle/dialogs.cpp
+    src/hle/ime_dialog.cpp
+    src/hle/jpeg.cpp
+    src/hle/modal.cpp
     src/hle/gnm_packets.cpp
     src/hle/http_offline.cpp
     src/hle/kernel_fs.cpp
