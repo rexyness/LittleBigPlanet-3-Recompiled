@@ -66,7 +66,10 @@ target_link_libraries(lbp3 PRIVATE hle)
 add_executable(padtest tests/padtest.cpp)
 target_link_libraries(padtest PRIVATE hle)
 
-foreach(exe lbp3 padtest)
+add_executable(imetest tests/imetest.cpp)
+target_link_libraries(imetest PRIVATE hle)
+
+foreach(exe lbp3 padtest imetest)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()
