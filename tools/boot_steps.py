@@ -12,8 +12,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 out = (ROOT / "analysis" / "run_stdout.txt").read_text()
 base = int(re.search(r"loaded eboot\.bin\s+\S+\s+at ([0-9A-Fa-f]+)", out).group(1), 16)
 sys.path.insert(0, str(ROOT / "tools"))
-from gamedir import eboot  # noqa: E402
-elf = eboot().read_bytes()
+from gamedir import eboot_elf  # noqa: E402
+elf = eboot_elf()
 err = (ROOT / "analysis" / "run_stderr.txt").read_text().split("\n")
 for i, line in enumerate(err):
     m = re.match(r"\[break\] eboot\.bin\+0xab09([25]) \(hit (\d+)", line)
