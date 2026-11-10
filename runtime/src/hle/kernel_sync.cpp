@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -47,44 +48,39 @@ bool WaitWithTimeout(std::condition_variable& cv, std::unique_lock<std::mutex>& 
 }
 
 
-// LBP3_TRACE_SYNC=1: keep the last 65,536 semaphore and event-flag signals and waits (thread
-// name, guest return address) in memory; F10 writes them to analysis\sync_trace.txt. For
-// lost-wake-up hunts.
+// LBP3_TRACE_SYNC=1: keep the last 262,144 semaphore and event-flag signals and waits in
+// memory as raw fields (cheap enough not to change the game's timing much); F10 formats them
+// into analysis\sync_trace.txt. For lost-wake-up hunts.
 bool SyncTraceOn() {
     static const bool on = std::getenv("LBP3_TRACE_SYNC") != nullptr;
     return on;
 }
 
-constexpr size_t kSyncRing = size_t{1} << 16;
-char (*g_syncRing)[192] = nullptr;
+enum class SyncKind : uint8_t { SemaWait, SemaWoke, SemaSignal, EfWait, EfWoke, EfSet };
+
+struct SyncEvent {
+    int64_t qpc;
+    const void* obj;
+    const void* site;
+    uint64_t a, b;
+    uint32_t tid;
+    uint32_t c;
+    SyncKind kind;
+};
+
+constexpr size_t kSyncRing = size_t{1} << 18;
+SyncEvent* g_syncRing = nullptr;
 std::atomic<uint64_t> g_syncNext{0};
 
-void SyncLog(const char* fmt, ...) {
-    static char (*ring)[192] = [] {
-        g_syncRing = new char[kSyncRing][192];
-        for (size_t i = 0; i < kSyncRing; ++i) g_syncRing[i][0] = 0;
+void SyncRec(SyncKind kind, const void* obj, uint64_t a, uint64_t b, uint32_t c, const void* site) {
+    static SyncEvent* ring = [] {
+        g_syncRing = new SyncEvent[kSyncRing]();
         return g_syncRing;
     }();
-    char* slot = ring[g_syncNext.fetch_add(1, std::memory_order_relaxed) % kSyncRing];
-    va_list args;
-    va_start(args, fmt);
-    std::vsnprintf(slot, 192, fmt, args);
-    va_end(args);
-}
-
-std::string SyncThreadName() {
-    PWSTR w = nullptr;
-    std::string out;
-    if (SUCCEEDED(GetThreadDescription(GetCurrentThread(), &w)) && w) {
-        for (const wchar_t* c = w; *c; ++c) out += static_cast<char>(*c < 128 ? *c : '?');
-        LocalFree(w);
-    }
-    return out.empty() ? std::to_string(GetCurrentThreadId()) : out;
-}
-
-double SyncTraceMs() {
-    static const auto t0 = std::chrono::steady_clock::now();
-    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    SyncEvent& e = ring[g_syncNext.fetch_add(1, std::memory_order_relaxed) % kSyncRing];
+    e = SyncEvent{t.QuadPart, obj, site, a, b, GetCurrentThreadId(), c, kind};
 }
 
 // --- semaphores ---------------------------------------------------------------
@@ -238,21 +234,16 @@ int PS4_SYSV_ABI sceKernelDeleteSema(Sema* sem) {
 int PS4_SYSV_ABI sceKernelWaitSema(Sema* sem, int need, uint32_t* timeout) {
     if (!SyncTraceOn()) return SemaWait(sem, need, timeout);
     void* site = __builtin_return_address(0);
-    SyncLog("[sync] %.1f %s sema-wait '%s' need %d (count %d) from %s", SyncTraceMs(),
-                 SyncThreadName().c_str(), sem ? sem->name.c_str() : "?", need, sem ? sem->count : -1,
-                 core::DescribeAddress(reinterpret_cast<uint64_t>(site)).c_str());
+    SyncRec(SyncKind::SemaWait, sem, static_cast<uint64_t>(need), sem ? static_cast<uint64_t>(sem->count) : 0, 0, site);
     const int r = SemaWait(sem, need, timeout);
-    SyncLog("[sync] %.1f %s sema-woke '%s' -> %d", SyncTraceMs(), SyncThreadName().c_str(),
-                 sem ? sem->name.c_str() : "?", r);
+    SyncRec(SyncKind::SemaWoke, sem, static_cast<uint64_t>(static_cast<uint32_t>(r)), 0, 0, site);
     return r;
 }
 
 int PS4_SYSV_ABI sceKernelSignalSema(Sema* sem, int count) {
     if (SyncTraceOn())
-        SyncLog("[sync] %.1f %s sema-signal '%s' +%d (count %d, waiters %d) from %s", SyncTraceMs(),
-                     SyncThreadName().c_str(), sem ? sem->name.c_str() : "?", count, sem ? sem->count : -1,
-                     sem ? sem->waiters : -1,
-                     core::DescribeAddress(reinterpret_cast<uint64_t>(__builtin_return_address(0))).c_str());
+        SyncRec(SyncKind::SemaSignal, sem, static_cast<uint64_t>(count), sem ? static_cast<uint64_t>(sem->count) : 0,
+                sem ? static_cast<uint32_t>(sem->waiters) : 0, __builtin_return_address(0));
     return SemaSignal(sem, count);
 }
 
@@ -337,10 +328,7 @@ int PS4_SYSV_ABI sceKernelSetEventFlag(EventFlag* ef, uint64_t bits) {
     ef->bits |= bits;
     ef->cv.notify_all();
     if (SyncTraceOn())
-        SyncLog("[sync] %.1f %s ef-set '%s' |= %llx -> %llx from %s", SyncTraceMs(),
-                     SyncThreadName().c_str(), ef->name.c_str(), static_cast<unsigned long long>(bits),
-                     static_cast<unsigned long long>(ef->bits),
-                     core::DescribeAddress(reinterpret_cast<uint64_t>(__builtin_return_address(0))).c_str());
+        SyncRec(SyncKind::EfSet, ef, bits, ef->bits, 0, __builtin_return_address(0));
     static const bool trace = std::getenv("LBP3_TRACE_EF") != nullptr;
     static std::atomic<int> n{0};
     if (trace && n++ < 400)
@@ -370,17 +358,13 @@ int PS4_SYSV_ABI sceKernelWaitEventFlag(EventFlag* ef, uint64_t pattern, uint32_
     }
     const bool syncTrace = !(timeout && *timeout == 0) && SyncTraceOn();  // polls are too many
     if (syncTrace)
-        SyncLog("[sync] %.1f %s ef-wait '%s' pattern %llx mode %x (bits %llx) from %s", SyncTraceMs(),
-                     SyncThreadName().c_str(), ef->name.c_str(), static_cast<unsigned long long>(pattern), mode,
-                     static_cast<unsigned long long>(ef->bits),
-                     core::DescribeAddress(reinterpret_cast<uint64_t>(__builtin_return_address(0))).c_str());
+        SyncRec(SyncKind::EfWait, ef, pattern, ef->bits, mode, __builtin_return_address(0));
     std::unique_lock lk(ef->m);
     auto ready = [&] { return (mode & kWaitAnd) ? (ef->bits & pattern) == pattern : (ef->bits & pattern) != 0; };
     bool ok = WaitWithTimeout(ef->cv, lk, timeout, ready);
     if (result) *result = ef->bits;
     if (syncTrace)
-        SyncLog("[sync] %.1f %s ef-woke '%s' bits %llx ok %d", SyncTraceMs(), SyncThreadName().c_str(),
-                     ef->name.c_str(), static_cast<unsigned long long>(ef->bits), ok ? 1 : 0);
+        SyncRec(SyncKind::EfWoke, ef, ef->bits, ok ? 1 : 0, mode, nullptr);
     if (!ok) return SceErr(kETIMEDOUT);
     if (mode & kClearAll) ef->bits = 0;
     else if (mode & kClearPattern) ef->bits &= ~pattern;
@@ -470,14 +454,70 @@ int64_t PS4_SYSV_ABI sceKernelGetEventData(const Event* ev) { return ev->data; }
 void* PS4_SYSV_ABI sceKernelGetEventUserData(const Event* ev) { return ev->udata; }
 
 
-// Writes the [sync] ring (LBP3_TRACE_SYNC=1), oldest first, to analysis\sync_trace.txt.
+// Writes the sync ring (LBP3_TRACE_SYNC=1), oldest first, to analysis\sync_trace.txt.
+// Columns: ms since the first event, thread, event, object name, fields, guest call site.
 void DumpSyncTrace() {
     if (!g_syncRing) return;
     FILE* f = std::fopen("analysis\\sync_trace.txt", "w");
     if (!f) return;
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
     const uint64_t next = g_syncNext.load();
     const uint64_t first = next > kSyncRing ? next - kSyncRing : 0;
-    for (uint64_t i = first; i < next; ++i) std::fprintf(f, "%s\n", g_syncRing[i % kSyncRing]);
+    const int64_t t0 = g_syncRing[first % kSyncRing].qpc;
+    std::map<uint32_t, std::string> names;
+    auto threadName = [&](uint32_t tid) -> const std::string& {
+        auto it = names.find(tid);
+        if (it != names.end()) return it->second;
+        std::string out = std::to_string(tid);
+        if (HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid)) {
+            PWSTR w = nullptr;
+            if (SUCCEEDED(GetThreadDescription(h, &w)) && w && *w) {
+                out.clear();
+                for (const wchar_t* c = w; *c; ++c) out += static_cast<char>(*c < 128 ? *c : '?');
+            }
+            if (w) LocalFree(w);
+            CloseHandle(h);
+        }
+        return names.emplace(tid, out).first->second;
+    };
+    for (uint64_t i = first; i < next; ++i) {
+        const SyncEvent& e = g_syncRing[i % kSyncRing];
+        const double ms = 1000.0 * static_cast<double>(e.qpc - t0) / static_cast<double>(freq.QuadPart);
+        const char* tn = threadName(e.tid).c_str();
+        const std::string site = e.site ? core::DescribeAddress(reinterpret_cast<uint64_t>(e.site)) : "";
+        switch (e.kind) {
+        case SyncKind::SemaWait:
+            std::fprintf(f, "%.3f %s sema-wait '%s' need %llu (count %lld) from %s\n", ms, tn,
+                         static_cast<const Sema*>(e.obj)->name.c_str(), (unsigned long long)e.a, (long long)(int64_t)e.b,
+                         site.c_str());
+            break;
+        case SyncKind::SemaWoke:
+            std::fprintf(f, "%.3f %s sema-woke '%s' -> %d\n", ms, tn, static_cast<const Sema*>(e.obj)->name.c_str(),
+                         static_cast<int>(static_cast<uint32_t>(e.a)));
+            break;
+        case SyncKind::SemaSignal:
+            std::fprintf(f, "%.3f %s sema-signal '%s' +%llu (count %lld, waiters %u) from %s\n", ms, tn,
+                         static_cast<const Sema*>(e.obj)->name.c_str(), (unsigned long long)e.a, (long long)(int64_t)e.b,
+                         e.c, site.c_str());
+            break;
+        case SyncKind::EfWait:
+            std::fprintf(f, "%.3f %s ef-wait '%s' pattern %llx mode %x (bits %llx) from %s\n", ms, tn,
+                         static_cast<const EventFlag*>(e.obj)->name.c_str(), (unsigned long long)e.a, e.c,
+                         (unsigned long long)e.b, site.c_str());
+            break;
+        case SyncKind::EfWoke:
+            std::fprintf(f, "%.3f %s ef-woke '%s' bits %llx ok %llu\n", ms, tn,
+                         static_cast<const EventFlag*>(e.obj)->name.c_str(), (unsigned long long)e.a,
+                         (unsigned long long)e.b);
+            break;
+        case SyncKind::EfSet:
+            std::fprintf(f, "%.3f %s ef-set '%s' |= %llx -> %llx from %s\n", ms, tn,
+                         static_cast<const EventFlag*>(e.obj)->name.c_str(), (unsigned long long)e.a,
+                         (unsigned long long)e.b, site.c_str());
+            break;
+        }
+    }
     std::fclose(f);
     std::fprintf(stderr, "[sync] wrote %llu events to analysis\\sync_trace.txt\n",
                  static_cast<unsigned long long>(next - first));
