@@ -25,6 +25,7 @@
 
 namespace hle::kernel {
 void CommitWholeStack();  // kernel_pthread.cpp
+void SetGuestFpState();   // kernel_pthread.cpp
 }
 
 namespace core {
@@ -225,6 +226,7 @@ DWORD WINAPI MainThread(void*) {
     hle::kernel::CommitWholeStack();
     SetupThreadTls();
     RegisterCurrentThread("main");
+    hle::kernel::SetGuestFpState();  // before any module_start runs, as on the console
     for (Module* m : g_startFirst) StartModule(*m, 0, nullptr);
     static const char* const kArgv0 = "/app0/eboot.bin";
     g_params.argc = 1;
