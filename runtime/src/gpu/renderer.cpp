@@ -672,7 +672,16 @@ void SubmitGfx(const uint32_t* dcb, uint32_t dcbBytes, const uint32_t* ccb, uint
     // texture while our GPU was still copying it, tearing the intro video.
     // LBP3_GPU_ASYNC=1 restores the overlap (faster; for testing).
     static const bool async = std::getenv("LBP3_GPU_ASYNC") != nullptr;
-    if (!async) WaitGpu();
+    // Wait for the graphics queue only (ticket 10). LBP3_SUBMIT_WAIT=all restores waiting on
+    // every queue, where a blocked compute queue released the game before this submission ran.
+    static const bool waitAll = [] {
+        const char* v = std::getenv("LBP3_SUBMIT_WAIT");
+        return v && std::string(v) == "all";
+    }();
+    static const bool strict = std::getenv("LBP3_SYNC_STRICT") != nullptr;
+    if (async) return;
+    if (waitAll || strict) WaitGpu();
+    else g_liverpool->WaitGfxIdleOrBlocked();
 }
 
 }  // namespace gpu

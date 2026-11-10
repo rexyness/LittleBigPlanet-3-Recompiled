@@ -14,6 +14,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #define WIN32_LEAN_AND_MEAN
@@ -56,7 +57,7 @@ bool SyncTraceOn() {
     return on;
 }
 
-enum class SyncKind : uint8_t { SemaWait, SemaWoke, SemaSignal, EfWait, EfWoke, EfSet, EqTrigger };
+enum class SyncKind : uint8_t { SemaWait, SemaWoke, SemaSignal, EfWait, EfWoke, EfSet, EqTrigger, Gpu };
 
 struct SyncEvent {
     int64_t qpc;
@@ -71,6 +72,20 @@ struct SyncEvent {
 constexpr size_t kSyncRing = size_t{1} << 18;
 SyncEvent* g_syncRing = nullptr;
 std::atomic<uint64_t> g_syncNext{0};
+
+// Names of sync objects by address, kept (never erased) so the dump never reads freed objects.
+std::mutex g_syncNamesMutex;
+std::unordered_map<const void*, std::string> g_syncNames;
+void SyncName(const void* obj, const std::string& name) {
+    if (!SyncTraceOn()) return;
+    std::lock_guard lk(g_syncNamesMutex);
+    g_syncNames[obj] = name;
+}
+std::string SyncNameOf(const void* obj) {
+    std::lock_guard lk(g_syncNamesMutex);
+    auto it = g_syncNames.find(obj);
+    return it == g_syncNames.end() ? "?" : it->second;
+}
 
 void SyncRec(SyncKind kind, const void* obj, uint64_t a, uint64_t b, uint32_t c, const void* site) {
     static SyncEvent* ring = [] {
@@ -219,6 +234,7 @@ int PS4_SYSV_ABI sceKernelCreateSema(Sema** sem, const char* name, uint32_t attr
     s->count = s->initial = initial;
     s->max = max;
     *sem = s;
+    SyncName(s, s->name);
     return SCE_OK;
 }
 
@@ -313,6 +329,7 @@ int PS4_SYSV_ABI sceKernelCreateEventFlag(EventFlag** ef, const char* name, uint
     f->name = name ? name : "";
     f->bits = initial;
     *ef = f;
+    SyncName(f, f->name);
     std::fprintf(stderr, "[kernel] event flag '%s' created (%p)\n", f->name.c_str(), static_cast<void*>(f));
     return SCE_OK;
 }
@@ -385,6 +402,7 @@ int PS4_SYSV_ABI sceKernelCreateEqueue(Equeue** eq, const char* name) {
     auto* q = new Equeue;
     q->name = name ? name : "";
     *eq = q;
+    SyncName(q, q->name);
     return SCE_OK;
 }
 
@@ -455,6 +473,27 @@ int64_t PS4_SYSV_ABI sceKernelGetEventData(const Event* ev) { return ev->data; }
 void* PS4_SYSV_ABI sceKernelGetEventUserData(const Event* ev) { return ev->udata; }
 
 
+// Command-processor events for the sync ring (LBP3_TRACE_SYNC=1); `what` must be a string literal.
+void SyncRecGpu(const char* what, uint64_t a, uint64_t b) {
+    if (!SyncTraceOn()) return;
+    // A wait also records the label's current value (b's high half), so stuck waits show it.
+    if (std::strcmp(what, "gfx WAIT") == 0 || std::strcmp(what, "compute WAIT") == 0) {
+        b = (b & 0xffffffffull) | (static_cast<uint64_t>(*reinterpret_cast<const volatile uint32_t*>(a)) << 32);
+    }
+    SyncRec(SyncKind::Gpu, what, a, b, 0, nullptr);
+    // LBP3 ticket 10: the three per-frame wait flags (c18/c20/c28) at every graphics submit.
+    if (std::strcmp(what, "SubmitGfx") == 0) {
+        static const bool flagsMapped = [] {
+            MEMORY_BASIC_INFORMATION mbi;
+            return VirtualQuery(reinterpret_cast<void*>(0x1e1303c18), &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT;
+        }();
+        if (flagsMapped) {
+            const auto* f = reinterpret_cast<const volatile uint64_t*>(0x1e1303c18);
+            SyncRec(SyncKind::Gpu, "flags c18/c20/c28", f[0], (f[1] & 0xffffffff) | (f[2] << 32), 0, nullptr);
+        }
+    }
+}
+
 // Writes the sync ring (LBP3_TRACE_SYNC=1), oldest first, to analysis\sync_trace.txt.
 // Columns: ms since the first event, thread, event, object name, fields, guest call site.
 void DumpSyncTrace() {
@@ -492,35 +531,39 @@ void DumpSyncTrace() {
         switch (e.kind) {
         case SyncKind::SemaWait:
             std::fprintf(f, "%.3f %s sema-wait '%s' need %llu (count %lld) from %s\n", ms, tn,
-                         static_cast<const Sema*>(e.obj)->name.c_str(), (unsigned long long)e.a, (long long)(int64_t)e.b,
+                         SyncNameOf(e.obj).c_str(), (unsigned long long)e.a, (long long)(int64_t)e.b,
                          site.c_str());
             break;
         case SyncKind::SemaWoke:
-            std::fprintf(f, "%.3f %s sema-woke '%s' -> %d\n", ms, tn, static_cast<const Sema*>(e.obj)->name.c_str(),
+            std::fprintf(f, "%.3f %s sema-woke '%s' -> %d\n", ms, tn, SyncNameOf(e.obj).c_str(),
                          static_cast<int>(static_cast<uint32_t>(e.a)));
             break;
         case SyncKind::SemaSignal:
             std::fprintf(f, "%.3f %s sema-signal '%s' +%llu (count %lld, waiters %u) from %s\n", ms, tn,
-                         static_cast<const Sema*>(e.obj)->name.c_str(), (unsigned long long)e.a, (long long)(int64_t)e.b,
+                         SyncNameOf(e.obj).c_str(), (unsigned long long)e.a, (long long)(int64_t)e.b,
                          e.c, site.c_str());
             break;
         case SyncKind::EfWait:
             std::fprintf(f, "%.3f %s ef-wait '%s' pattern %llx mode %x (bits %llx) from %s\n", ms, tn,
-                         static_cast<const EventFlag*>(e.obj)->name.c_str(), (unsigned long long)e.a, e.c,
+                         SyncNameOf(e.obj).c_str(), (unsigned long long)e.a, e.c,
                          (unsigned long long)e.b, site.c_str());
             break;
         case SyncKind::EfWoke:
             std::fprintf(f, "%.3f %s ef-woke '%s' bits %llx ok %llu\n", ms, tn,
-                         static_cast<const EventFlag*>(e.obj)->name.c_str(), (unsigned long long)e.a,
+                         SyncNameOf(e.obj).c_str(), (unsigned long long)e.a,
                          (unsigned long long)e.b);
+            break;
+        case SyncKind::Gpu:
+            std::fprintf(f, "%.3f %s gpu %s %llx %llx\n", ms, tn, static_cast<const char*>(e.obj),
+                         (unsigned long long)e.a, (unsigned long long)e.b);
             break;
         case SyncKind::EqTrigger:
             std::fprintf(f, "%.3f %s equeue-trigger '%s' ident %llx filter %lld\n", ms, tn,
-                         static_cast<const Equeue*>(e.obj)->name.c_str(), (unsigned long long)e.a, (long long)(int64_t)e.b);
+                         SyncNameOf(e.obj).c_str(), (unsigned long long)e.a, (long long)(int64_t)e.b);
             break;
         case SyncKind::EfSet:
             std::fprintf(f, "%.3f %s ef-set '%s' |= %llx -> %llx from %s\n", ms, tn,
-                         static_cast<const EventFlag*>(e.obj)->name.c_str(), (unsigned long long)e.a,
+                         SyncNameOf(e.obj).c_str(), (unsigned long long)e.a,
                          (unsigned long long)e.b, site.c_str());
             break;
         }

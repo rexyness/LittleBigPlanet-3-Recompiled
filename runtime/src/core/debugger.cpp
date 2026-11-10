@@ -76,7 +76,7 @@ std::atomic<int> g_watchHits{0};
 
 struct WatchHit {
     int64_t qpc;
-    uint64_t rip, value, caller;
+    uint64_t rip, value, caller, caller2, caller3, caller4;
     uint32_t tid;
 };
 constexpr size_t kWatchRing = size_t{1} << 18;
@@ -161,7 +161,16 @@ LONG CALLBACK Handler(EXCEPTION_POINTERS* ep) {
             h.value = *reinterpret_cast<const uint64_t*>(g_watchAddr);
             const auto* fp = reinterpret_cast<const uint64_t*>(c.Rbp);
             MEMORY_BASIC_INFORMATION mbi;
-            h.caller = (fp && VirtualQuery(fp, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT) ? fp[1] : 0;
+            uint64_t chain[4] = {};
+            for (int k = 0; k < 4 && fp && VirtualQuery(fp, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT; ++k) {
+                chain[k] = fp[1];  // frame-pointer chain
+                if (fp[0] <= reinterpret_cast<uint64_t>(fp)) break;
+                fp = reinterpret_cast<const uint64_t*>(fp[0]);
+            }
+            h.caller = chain[0];
+            h.caller2 = chain[1];
+            h.caller3 = chain[2];
+            h.caller4 = chain[3];
             h.tid = GetCurrentThreadId();
         } else if (g_watchHits++ < maxHits) {
             const uint64_t base = reinterpret_cast<uint64_t>(g_watchModule->base);
@@ -263,7 +272,7 @@ struct PollChange {
 constexpr size_t kPollRing = size_t{1} << 18;
 PollChange g_pollRing[kPollRing];
 std::atomic<uint64_t> g_pollNext{0};
-struct PollSpec { uint64_t ptrOff, add; };
+struct PollSpec { uint64_t ptrOff, add; bool absolute; };  // absolute: "=hexaddr"
 std::vector<PollSpec> g_pollSpecs;
 
 void PollThread(const Module* eboot) {
@@ -276,7 +285,10 @@ void PollThread(const Module* eboot) {
                                                                      g_pollSpecs[i].ptrOff);
                 MEMORY_BASIC_INFORMATION mbi;
                 uint64_t a = 0;
-                if (VirtualQuery(slot, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT &&
+                if (g_pollSpecs[i].absolute) {
+                    a = g_pollSpecs[i].add & ~7ull;
+                    if (!VirtualQuery(reinterpret_cast<void*>(a), &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) a = 0;
+                } else if (VirtualQuery(slot, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT &&
                     !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && *slot) {
                     a = (*slot + g_pollSpecs[i].add) & ~7ull;
                     if (!VirtualQuery(reinterpret_cast<void*>(a), &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) a = 0;
@@ -320,7 +332,11 @@ void Arm(const std::vector<std::string>& specs, const std::vector<Module*>& modu
             const uint64_t off = std::strtoull(item.substr(0, plus).c_str(), nullptr, 16);
             const uint64_t add =
                 plus == std::string::npos ? 0 : std::strtoull(item.substr(plus + 1).c_str(), nullptr, 16);
-            g_pollSpecs.push_back({off, add});
+            if (!item.empty() && item[0] == '=') {
+                g_pollSpecs.push_back({0, std::strtoull(item.c_str() + 1, nullptr, 16), true});
+            } else {
+                g_pollSpecs.push_back({off, add, false});
+            }
             pos = comma + 1;
         }
         std::fprintf(stderr, "[pollwatch] watching %zu value(s)\n", g_pollSpecs.size());
@@ -440,13 +456,16 @@ void DumpWatchRing() {
             }
             it = names.emplace(h.tid, n).first;
         }
-        std::fprintf(f, "%.3f %s %016llx by %s from %s\n",
+        std::fprintf(f, "%.3f %s %016llx by %s from %s < %s < %s < %s\n",
                      1000.0 * static_cast<double>(h.qpc + 0 * t0) / static_cast<double>(freq.QuadPart),
                      it->second.c_str(), static_cast<unsigned long long>(h.value), DescribeAddress(h.rip).c_str(),
-                     h.caller ? DescribeAddress(h.caller).c_str() : "?");
+                     h.caller ? DescribeAddress(h.caller).c_str() : "?",
+                     h.caller2 ? DescribeAddress(h.caller2).c_str() : "?",
+                     h.caller3 ? DescribeAddress(h.caller3).c_str() : "?",
+                     h.caller4 ? DescribeAddress(h.caller4).c_str() : "?");
     }
     std::fclose(f);
-    std::fprintf(stderr, "[hwwatch] wrote %llu hits to analysis\hwwatch_ring.txt\n",
+    std::fprintf(stderr, "[hwwatch] wrote %llu hits to analysis\\hwwatch_ring.txt\n",
                  static_cast<unsigned long long>(next - first));
 }
 
