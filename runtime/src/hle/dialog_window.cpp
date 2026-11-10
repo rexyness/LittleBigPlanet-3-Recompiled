@@ -388,7 +388,13 @@ void Run(std::shared_ptr<Window> w) {
                 DispatchMessageW(&msg);
             }
         }
-        if (!dlg) std::fprintf(stderr, "[dialog] %s: couldn't create the window (%lu)\n", w->spec.logName, GetLastError());
+        // The game often closes a progress window at once (a quick export): WM_INITDIALOG then
+        // destroys it, and CreateDialog reports a failure (1400) that isn't one.
+        if (!dlg && w->closeRequested.load()) {
+            std::fprintf(stderr, "[dialog] %s: closed by the game before it appeared\n", w->spec.logName);
+        } else if (!dlg) {
+            std::fprintf(stderr, "[dialog] %s: couldn't create the window (%lu)\n", w->spec.logName, GetLastError());
+        }
     } else if (DialogBoxIndirectParamW(inst, t.Get(), nullptr, DialogProc, self) == -1) {
         std::fprintf(stderr, "[dialog] %s: couldn't create the window (%lu)\n", w->spec.logName, GetLastError());
     }

@@ -168,17 +168,17 @@ void PresenterThread() {
     SDL_GetRenderVSync(renderer, &vsync);
     std::fprintf(stderr, "[video] window renderer: %s, vsync %s (%d)\n", SDL_GetRendererName(renderer),
                  vsyncOk ? "on" : "FAILED", vsync);
-    auto readRefresh = [&] {
-        if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window))) {
-            // The exact rational when SDL has it (239.999 Hz shows as 240.00 in refresh_rate).
-            const double hz = mode->refresh_rate_numerator > 0 && mode->refresh_rate_denominator > 0
-                                  ? double(mode->refresh_rate_numerator) / double(mode->refresh_rate_denominator)
-                                  : double(mode->refresh_rate);
-            g_refreshHz = hz;
-            std::fprintf(stderr, "[video] display refresh %.3f Hz\n", hz);
-        }
+    // The rate the pacer divides by. Read again when the window changes display, when a
+    // display is added, removed or changes mode, and every 5 s: when a monitor is switched off,
+    // Windows moves the window to another one without SDL reporting a display change, and the
+    // pacer kept the old rate (240 Hz on a 165 Hz display gave 48.5 ms frames).
+    auto readRefresh = [&](bool always) {
+        const double hz = DisplayHz(SDL_GetDisplayForWindow(window));  // the exact rational when SDL has it
+        if (hz <= 0.0 || (!always && std::fabs(hz - g_refreshHz.load()) < 0.01)) return;
+        g_refreshHz = hz;
+        std::fprintf(stderr, "[video] display refresh %.3f Hz\n", hz);
     };
-    readRefresh();
+    readRefresh(true);
     const Pacing pacing = PacingMode();
     std::fprintf(stderr, "[video] pacing: %s\n", PacingName());
     if (pacing != Pacing::Present) {
@@ -202,7 +202,9 @@ void PresenterThread() {
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
                 if (auto handler = g_hotkeyHandler.load()) handler(static_cast<int>(e.key.key));
             }
-            if (e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED) readRefresh();
+            if (e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED || e.type == SDL_EVENT_DISPLAY_ADDED ||
+                e.type == SDL_EVENT_DISPLAY_REMOVED || e.type == SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED)
+                readRefresh(false);
             if (e.type == SDL_EVENT_QUIT) {
                 std::fprintf(stderr, "[video] window closed\n");
                 std::fflush(stderr);
@@ -258,6 +260,7 @@ void PresenterThread() {
         QueryPerformanceCounter(&now);
         const double secs = double(now.QuadPart - statsFrom.QuadPart) / double(qpf.QuadPart);
         if (secs >= 5.0) {
+            readRefresh(false);
             uint64_t vb;
             {
                 std::lock_guard lock(g_vblankMutex);
