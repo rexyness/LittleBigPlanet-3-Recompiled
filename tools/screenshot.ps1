@@ -11,9 +11,13 @@ using System.Runtime.InteropServices;
 public static class Win {
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out RECT r);
+    [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 }
 "@
+# Per-monitor DPI aware, so the client size is in physical pixels. Unaware, at 125% scaling the
+# bitmap came out 80% of the window's size and PrintWindow filled only its top-left part.
+[void][Win]::SetThreadDpiAwarenessContext([IntPtr](-4))
 
 if ($AutoPress) { $env:LBP3_AUTOPRESS = $AutoPress }
 $p = Start-Process -FilePath "$root\build\lbp3.exe" `
