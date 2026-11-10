@@ -28,6 +28,8 @@ add_library(hle STATIC
     src/hle/trophy.cpp
     src/hle/fiber.cpp
     src/hle/dialogs.cpp
+    src/hle/common_dialog.cpp
+    src/hle/dialog_window.cpp
     src/hle/ime_dialog.cpp
     src/hle/jpeg.cpp
     src/hle/modal.cpp
@@ -58,7 +60,7 @@ add_library(hle STATIC
 target_include_directories(hle PUBLIC src)
 target_link_libraries(hle PUBLIC shader_recompiler video_core)
 target_compile_definitions(hle PUBLIC _WIN32_WINNT=0x0A00 NOMINMAX _CRT_SECURE_NO_WARNINGS)
-target_link_libraries(hle PUBLIC SDL3::SDL3 bcrypt winmm dbghelp onecore advapi32 dxgi)
+target_link_libraries(hle PUBLIC SDL3::SDL3 bcrypt winmm dbghelp onecore advapi32 dxgi comctl32)
 
 add_executable(lbp3 src/main.cpp)
 target_link_libraries(lbp3 PRIVATE hle)
@@ -66,7 +68,11 @@ target_link_libraries(lbp3 PRIVATE hle)
 add_executable(padtest tests/padtest.cpp)
 target_link_libraries(padtest PRIVATE hle)
 
-foreach(exe lbp3 padtest)
+# System dialogs offline: drives MsgDialog/SaveDataDialog the way LBP3 does and answers the windows.
+add_executable(dialogtest tests/dialogtest.cpp)
+target_link_libraries(dialogtest PRIVATE hle)
+
+foreach(exe lbp3 padtest dialogtest)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()
