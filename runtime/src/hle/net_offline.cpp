@@ -331,11 +331,18 @@ int PS4_SYSV_ABI sceNetEpollControl(int ep, int op, int id, EpollEvent* ev) {
 int PS4_SYSV_ABI sceNetEpollWait(int ep, EpollEvent* events, int maxEvents, int timeoutUs) {
     kernel::SyncRecGpu("epoll wait", static_cast<uint64_t>(ep), static_cast<uint64_t>(static_cast<int64_t>(timeoutUs)));
     using SteadyClock = std::chrono::steady_clock;
-    // Microsecond timeouts, not truncated to whole milliseconds.
+    // Microsecond timeouts, not truncated to whole milliseconds (LBP3_EPOLL_PRECISE=off restores
+    // the old whole-millisecond timeout and 1 ms polling, for comparison).
+    static const bool precise = [] {
+        const char* v = std::getenv("LBP3_EPOLL_PRECISE");
+        return !v || std::string(v) != "off";
+    }();
     auto deadline = SteadyClock::now() +
                     (timeoutUs < 0 ? std::chrono::duration_cast<std::chrono::microseconds>(kEpollMaxSleep)
-                                   : std::min<std::chrono::microseconds>(std::chrono::microseconds(timeoutUs),
-                                                                         kEpollMaxSleep));
+                                   : std::min<std::chrono::microseconds>(
+                                         precise ? std::chrono::microseconds(timeoutUs)
+                                                 : std::chrono::microseconds(timeoutUs / 1000 * 1000),
+                                         kEpollMaxSleep));
     // LBP3 ticket 09 experiment (LBP3_HOST_TICK_PHASE=on): end the game host thread's ~1-frame
     // waits 10 ms before the next flip, phase-locking its simulation tick to the frames. It made
     // no measurable difference once the timeouts above were precise, so it is off by default.
@@ -373,7 +380,7 @@ int PS4_SYSV_ABI sceNetEpollWait(int ep, EpollEvent* events, int maxEvents, int 
             return n;
         }
         // Poll every millisecond, and finish the last stretch without oversleeping the deadline.
-        if (deadline - now > std::chrono::microseconds(1500)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (!precise || deadline - now > std::chrono::microseconds(1500)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
         else std::this_thread::yield();
     }
 }
