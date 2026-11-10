@@ -22,6 +22,7 @@
 #include "core/platform.h"
 #include "sdl_window.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/renderer_vulkan/lbp3_checkpoints.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -207,8 +208,21 @@ bool ReadbackDisplayBuffer(const DisplayBufferDesc& d, std::vector<uint8_t>& out
         .imageOffset = {0, 0, 0},
         .imageExtent = {width, height, 1},
     };
+    Vulkan::Lbp3Checkpoints::Mark(cmd, Vulkan::Lbp3Checkpoints::Kind::Readback, g_scheduler->CurrentTick(),
+                                  d.address, 0, width, height);
     cmd.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal, g_staging.buffer, region);
     g_scheduler->Finish();  // wait for the GPU; fine for a first version
+    // LBP3_TEST_DEVICE_LOST=<n>: run the device-lost report after n readbacks, to test it
+    // without a real GPU reset (the device isn't lost, so the checkpoint data is only indicative).
+    static const long testLostAt = [] {
+        const char* v = std::getenv("LBP3_TEST_DEVICE_LOST");
+        return v ? std::atol(v) : 0L;
+    }();
+    static long readbacks = 0;
+    if (testLostAt > 0 && ++readbacks == testLostAt) {
+        Vulkan::Lbp3Checkpoints::OnDeviceLost(g_instance->GetGraphicsQueue(), "LBP3_TEST_DEVICE_LOST",
+                                              g_scheduler->CurrentTick());
+    }
 
     vmaInvalidateAllocation(g_instance->GetAllocator(), g_staging.allocation, 0, bytes);
     out.resize(bytes);
