@@ -26,6 +26,7 @@
 
 namespace hle::kernel {
 void CommitWholeStack();  // kernel_pthread.cpp
+void SetGuestFpState();   // kernel_pthread.cpp
 void DumpSyncTrace();     // kernel_sync.cpp (LBP3_TRACE_SYNC=1)
 }
 
@@ -233,6 +234,7 @@ DWORD WINAPI MainThread(void*) {
     g_params.argv[0] = kArgv0;
     g_params.entryAddr = reinterpret_cast<uint64_t>(g_eboot->Addr(g_eboot->entry));
     std::fprintf(stderr, "[entry] jumping to %s\n", Describe(g_params.entryAddr).c_str());
+    hle::kernel::SetGuestFpState();
     JumpToEntry(&g_params);
 }
 

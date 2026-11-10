@@ -119,6 +119,22 @@ void CommitWholeStack() {
         tib->StackLimit = low;
 }
 
+// The PS4's floating-point control state for game code (gap 8; btsouth/lbp3-pc 45bb339): MXCSR
+// 0x9fc0 (all exceptions masked, flush-to-zero, denormals-are-zero) and x87 control word 0x037f.
+// Windows threads start with MXCSR 0x1f80, so denormals flowed through the game's physics and
+// cutscene code. Fibers already got 0x9fc0 (fiber.cpp). LBP3_GUEST_FPU=off keeps the host default.
+void SetGuestFpState() {
+    static const bool on = [] {
+        const char* v = std::getenv("LBP3_GUEST_FPU");
+        return !v || std::string(v) != "off";
+    }();
+    if (!on) return;
+    unsigned int mxcsr = 0x9fc0;
+    unsigned short fcw = 0x037f;
+    __asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
+    __asm__ volatile("fldcw %0" : : "m"(fcw));
+}
+
 namespace {
 
 DWORD WINAPI ThreadProc(void* p) {
@@ -132,6 +148,7 @@ DWORD WINAPI ThreadProc(void* p) {
     SetThreadStackGuarantee(&guarantee);
     core::SetupThreadTls();
     core::RegisterCurrentThread(t->name);
+    SetGuestFpState();
     t->ret = t->entry(t->arg);
     std::fprintf(stderr, "[thread] %s exited (returned %p)\n", t->name.c_str(), t->ret);
     FinishThread(t);
