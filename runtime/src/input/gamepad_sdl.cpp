@@ -2,6 +2,7 @@
 // DualSense with motion sensors, touch pad and light bar. Pads are hot-plugged;
 // player slots are filled in the order controllers are found.
 #include "input/gamepad.h"
+#include "hle/ime_dialog.h"
 #include "input/actions.h"
 #include "input/game_state.h"
 #include "video/presenter.h"
@@ -107,6 +108,9 @@ bool AutoPressCross(int slot, ps4::PadData& out);
 // "<button>[+<button>...] [ms]" (held that long, default 150), "lstick <x> <y> [ms]"
 // or "rstick <x> <y> [ms]" with x/y in -1..1, or "wait <ms>". Buttons: cross circle
 // square triangle options touchpad up down left right l1 r1 l2 r2 l3 r3.
+// Text entry: "ime <text>" puts <text> (UTF-8, the rest of the line as written) in the
+// open text-entry dialog, or the next one to open, in place of what's there and
+// confirms it; "ime-cancel" cancels it. Each line handles one dialog.
 namespace remote {
 
 struct Command {
@@ -155,6 +159,18 @@ void Parse(const std::string& line) {
         int n = 0;
         in >> n;
         video::RequestFrameDump(n);
+        return;
+    }
+    if (word == "ime") {  // "ime <text>": type into the text-entry dialog and confirm
+        std::string text;
+        std::getline(in, text);
+        if (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.erase(0, 1);  // the separator
+        while (!text.empty() && (text.back() == '\r' || text.back() == '\n')) text.pop_back();
+        hle::ime_dialog::ScriptConfirm(text);
+        return;
+    }
+    if (word == "ime-cancel") {
+        hle::ime_dialog::ScriptCancel();
         return;
     }
     if (word == "wait") {

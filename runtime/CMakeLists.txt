@@ -71,7 +71,10 @@ add_executable(jpegtest tests/jpegtest.cpp)
 target_link_libraries(jpegtest PRIVATE hle)
 target_include_directories(jpegtest PRIVATE ${SHADPS4_EXT}/stb)
 
-foreach(exe lbp3 padtest jpegtest)
+add_executable(imetest tests/imetest.cpp)
+target_link_libraries(imetest PRIVATE hle)
+
+foreach(exe lbp3 padtest jpegtest imetest)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()
