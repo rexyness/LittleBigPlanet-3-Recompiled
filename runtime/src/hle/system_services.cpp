@@ -2,6 +2,7 @@
 // signed in, and console settings that match a stock English PS4.
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #define WIN32_LEAN_AND_MEAN
@@ -98,6 +99,11 @@ int PS4_SYSV_ABI sceSystemServiceGetDisplaySafeAreaInfo(DisplaySafeAreaInfo* inf
     if (!info) return kErrorParameter;
     std::memset(info, 0, sizeof(*info));
     info->ratio = 1.0f;  // no overscan on a PC monitor
+    // Gap 7 experiment: LBP3_SAFE_AREA=<ratio> overrides it, to see whether the Popit pages follow it.
+    if (const char* v = std::getenv("LBP3_SAFE_AREA")) info->ratio = static_cast<float>(std::atof(v));
+    static std::atomic<int> calls{0};
+    if (calls.fetch_add(1) < 4)
+        std::fprintf(stderr, "[system] GetDisplaySafeAreaInfo -> ratio %.3f\n", info->ratio);
     return kernel::SCE_OK;
 }
 

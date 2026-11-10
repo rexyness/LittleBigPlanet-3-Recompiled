@@ -10,9 +10,13 @@ using System.Runtime.InteropServices;
 public static class WinCap {
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out RECT r);
+    [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 }
 "@
+# Per-monitor DPI aware, so the client size is in physical pixels. Unaware, at 125% scaling the
+# bitmap came out 80% of the window's size and PrintWindow filled only its top-left part.
+[void][WinCap]::SetThreadDpiAwarenessContext([IntPtr](-4))
 if ($Delay -gt 0) { Start-Sleep -Seconds $Delay }
 $p = Get-Process lbp3 -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $p -or $p.MainWindowHandle -eq [IntPtr]::Zero) { Write-Host "game not running"; exit 1 }
