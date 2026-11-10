@@ -2,16 +2,20 @@
 // stb_image_write. Milestone 2, gap 13. Notes: .scratch/lbp3-port/m2/jpeg.md.
 //
 // Who calls them:
-// - JpegEnc: the Popit camera. The game reads back the frame as B8G8R8A8,
-//   encodes it at half the screen size with quality 70 (plus a quality-90
-//   thumbnail at half that again when one of its settings asks for it) and
-//   keeps the JPEG as the photo's image. It later reads the photo back with the
-//   IJG libjpeg linked into the eboot, through a texture loader that only takes
-//   data starting FF D8 FF E0 (JFIF) or FF D8 FF EE; stb writes the JFIF header
-//   first. The grief-report screenshot (online only) uses the same encoder.
-// - JpegDec: only image files found through libSceContentSearch (the PS4
-//   capture gallery). Content search stays a stub, so offline play never gets
-//   here; it is implemented so the path works if that changes.
+// - JpegEnc: photos of the scene taken from the Popit (capture mode 1 of
+//   eboot.bin+0x702c80; Capture Object, mode 2, saves a texture instead). The
+//   game reads back the frame as B8G8R8A8, encodes it at half the render size
+//   with quality 70 and keeps the JPEG as the photo's image. A quality-90
+//   thumbnail is also encoded when a state byte the cross-play code keeps
+//   equals 5, which offline play presumably never sees. The game reads photos
+//   back with the IJG libjpeg linked into the eboot, through a texture loader
+//   that only takes data starting FF D8 FF E0 (JFIF) or FF D8 FF EE; stb
+//   writes the JFIF header first. The PlayStation Camera snapshot (quality 50)
+//   and the grief-report screenshot (online) use the same encoder.
+// - JpegDec: its one caller loads image files by path, and the paths come from
+//   libSceContentSearch results (the PS4 capture gallery). Content search stays
+//   a stub that finds nothing, so offline play never gets here; it is
+//   implemented so the path works if that changes.
 //
 // Memory: Create gets memory the game sized with QueryMemorySize. The handle
 // header sits at its start (32-byte aligned and pointing at itself, as in
