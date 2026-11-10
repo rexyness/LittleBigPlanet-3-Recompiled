@@ -20,6 +20,7 @@
 #include "core/libraries/gnmdriver/gnm_error.h"
 #include "core/libraries/gnmdriver/gnmdriver_init.h"
 #include "core/platform.h"
+#include "core/debugger.h"
 #include "sdl_window.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/lbp3_checkpoints.h"
@@ -43,6 +44,10 @@ void* ProcParam();  // runtime/src/core/runner.h (not included: shadPS4 has its 
 namespace Core {
 void ClearCommittedRangeCache();  // video_core_glue.cpp
 void InitElfInfo(const char* serial, u32 sdkVersion);  // shadps4_glue.cpp
+}
+
+namespace hle::kernel {
+void DumpSyncTrace();
 }
 
 namespace gpu {
@@ -85,6 +90,11 @@ uint32_t SdkVersion() {
 
 bool Init() {
     if (g_instance) return true;
+    // A lost device ends the process: write the in-memory traces first (when enabled).
+    Vulkan::Lbp3Checkpoints::g_beforeExit = [] {
+        hle::kernel::DumpSyncTrace();
+        core::debugger::DumpWatchRing();
+    };
     g_instance = new Vulkan::Instance(g_headless, EmulatorSettings.GetGpuId(),
                                       EmulatorSettings.IsVkValidationEnabled(),
                                       EmulatorSettings.IsVkCrashDiagnosticEnabled());

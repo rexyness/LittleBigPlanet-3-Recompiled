@@ -13,4 +13,7 @@ namespace core::debugger {
 // "module+0xoffset" specs; resolved and armed once modules are loaded.
 void Arm(const std::vector<std::string>& specs, const std::vector<Module*>& modules);
 
+// LBP3_HWWATCH_RING=1: writes the recorded watchpoint hits to analysis\hwwatch_ring.txt (F10).
+void DumpWatchRing();
+
 }  // namespace core::debugger

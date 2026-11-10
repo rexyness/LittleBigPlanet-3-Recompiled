@@ -56,7 +56,7 @@ bool SyncTraceOn() {
     return on;
 }
 
-enum class SyncKind : uint8_t { SemaWait, SemaWoke, SemaSignal, EfWait, EfWoke, EfSet };
+enum class SyncKind : uint8_t { SemaWait, SemaWoke, SemaSignal, EfWait, EfWoke, EfSet, EqTrigger };
 
 struct SyncEvent {
     int64_t qpc;
@@ -157,6 +157,7 @@ struct Equeue {
 struct TimerContext { Equeue* eq; uint64_t ident; };
 
 void Trigger(Equeue* eq, uint64_t ident, int16_t filter, int64_t data, bool accumulate) {
+    if (SyncTraceOn()) SyncRec(SyncKind::EqTrigger, eq, ident, static_cast<uint64_t>(static_cast<int64_t>(filter)), 0, nullptr);
     std::lock_guard lk(eq->m);
     const Registration* reg = nullptr;
     for (const auto& r : eq->regs)
@@ -483,7 +484,9 @@ void DumpSyncTrace() {
     };
     for (uint64_t i = first; i < next; ++i) {
         const SyncEvent& e = g_syncRing[i % kSyncRing];
-        const double ms = 1000.0 * static_cast<double>(e.qpc - t0) / static_cast<double>(freq.QuadPart);
+        // Absolute QPC milliseconds, so this lines up with analysis\\pollwatch.txt.
+        const double ms = 1000.0 * static_cast<double>(e.qpc) / static_cast<double>(freq.QuadPart);
+        (void)t0;
         const char* tn = threadName(e.tid).c_str();
         const std::string site = e.site ? core::DescribeAddress(reinterpret_cast<uint64_t>(e.site)) : "";
         switch (e.kind) {
@@ -510,6 +513,10 @@ void DumpSyncTrace() {
             std::fprintf(f, "%.3f %s ef-woke '%s' bits %llx ok %llu\n", ms, tn,
                          static_cast<const EventFlag*>(e.obj)->name.c_str(), (unsigned long long)e.a,
                          (unsigned long long)e.b);
+            break;
+        case SyncKind::EqTrigger:
+            std::fprintf(f, "%.3f %s equeue-trigger '%s' ident %llx filter %lld\n", ms, tn,
+                         static_cast<const Equeue*>(e.obj)->name.c_str(), (unsigned long long)e.a, (long long)(int64_t)e.b);
             break;
         case SyncKind::EfSet:
             std::fprintf(f, "%.3f %s ef-set '%s' |= %llx -> %llx from %s\n", ms, tn,

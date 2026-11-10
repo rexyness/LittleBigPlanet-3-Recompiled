@@ -1,5 +1,6 @@
 ﻿// Entry sequence adapted from shadPS4 (GPL-2.0-or-later), src/core/linker.cpp.
 #include "core/runner.h"
+#include "core/debugger.h"
 #include "core/linker.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -618,6 +619,7 @@ void RequestPerfReport() {
         std::snprintf(name, sizeof(name), "analysis\\perf\\perf%02d.txt", ++n);
         // Where every thread is right now first (into the log): shows what a stuck game waits on.
         hle::kernel::DumpSyncTrace();
+        debugger::DumpWatchRing();
         std::fprintf(stderr, "[perf] all threads:\n");
         DumpAllThreads();
         std::fprintf(stderr, "[perf] sampling main and GPU threads for %s\n", name);

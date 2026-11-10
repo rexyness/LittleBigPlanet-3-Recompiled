@@ -1,16 +1,20 @@
-﻿#include "core/debugger.h"
+#include "core/debugger.h"
+#include "core/runner.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <intrin.h>
 #include <tlhelp32.h>
 
 #include <atomic>
 #include <cstdlib>
+#include <string>
 #include <thread>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 namespace core::debugger {
 namespace {
@@ -69,6 +73,15 @@ void DumpQwords(const char* reg, uint64_t p) {
 uint64_t g_watchAddr = 0;
 const Module* g_watchModule = nullptr;
 std::atomic<int> g_watchHits{0};
+
+struct WatchHit {
+    int64_t qpc;
+    uint64_t rip, value, caller;
+    uint32_t tid;
+};
+constexpr size_t kWatchRing = size_t{1} << 18;
+WatchHit g_watchRing[kWatchRing];
+std::atomic<uint64_t> g_watchRingNext{0};
 
 // "*off+add": the watched address is (pointer stored at eboot+off) + add,
 // resolved once the game has set the pointer (and again if it changes).
@@ -136,7 +149,21 @@ LONG CALLBACK Handler(EXCEPTION_POINTERS* ep) {
             const char* v = std::getenv("LBP3_HWWATCH_HITS");
             return v ? std::atoi(v) : 60;
         }();
-        if (g_watchHits++ < maxHits) {
+        // LBP3_HWWATCH_RING=1: record every hit in memory instead (cheap); F10 writes them out.
+        static const bool ring = std::getenv("LBP3_HWWATCH_RING") != nullptr;
+        if (ring) {
+            const uint64_t i = g_watchRingNext.fetch_add(1, std::memory_order_relaxed);
+            WatchHit& h = g_watchRing[i % kWatchRing];
+            LARGE_INTEGER t;
+            QueryPerformanceCounter(&t);
+            h.qpc = t.QuadPart;
+            h.rip = c.Rip;
+            h.value = *reinterpret_cast<const uint64_t*>(g_watchAddr);
+            const auto* fp = reinterpret_cast<const uint64_t*>(c.Rbp);
+            MEMORY_BASIC_INFORMATION mbi;
+            h.caller = (fp && VirtualQuery(fp, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT) ? fp[1] : 0;
+            h.tid = GetCurrentThreadId();
+        } else if (g_watchHits++ < maxHits) {
             const uint64_t base = reinterpret_cast<uint64_t>(g_watchModule->base);
             const uint64_t value = *reinterpret_cast<const uint64_t*>(g_watchAddr);
             std::fprintf(stderr, "[hwwatch] write to eboot+0x%llx (now %016llx) by eboot+0x%llx, thread %lu\n",
@@ -223,6 +250,57 @@ LONG CALLBACK Handler(EXCEPTION_POINTERS* ep) {
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
+
+// LBP3_POLLWATCH="*off+add[,*off+add...]": a background thread re-reads each 8-byte value
+// (pointer stored at eboot+off, plus add) about every 20 us and records every change with a
+// timestamp, without touching the game's threads. F10 (or a lost GPU device) writes the
+// changes to analysis\pollwatch.txt.
+struct PollChange {
+    int64_t qpc;
+    uint64_t value;
+    uint32_t slot;
+};
+constexpr size_t kPollRing = size_t{1} << 18;
+PollChange g_pollRing[kPollRing];
+std::atomic<uint64_t> g_pollNext{0};
+struct PollSpec { uint64_t ptrOff, add; };
+std::vector<PollSpec> g_pollSpecs;
+
+void PollThread(const Module* eboot) {
+    std::vector<uint64_t> last(g_pollSpecs.size(), ~0ull);
+    std::vector<uint64_t> addrs(g_pollSpecs.size(), 0);
+    for (uint64_t iter = 0;; ++iter) {
+        if (iter % 4096 == 0) {  // re-resolve the pointers now and then
+            for (size_t i = 0; i < g_pollSpecs.size(); ++i) {
+                const auto* slot = reinterpret_cast<const uint64_t*>(reinterpret_cast<uint64_t>(eboot->base) +
+                                                                     g_pollSpecs[i].ptrOff);
+                MEMORY_BASIC_INFORMATION mbi;
+                uint64_t a = 0;
+                if (VirtualQuery(slot, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT &&
+                    !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && *slot) {
+                    a = (*slot + g_pollSpecs[i].add) & ~7ull;
+                    if (!VirtualQuery(reinterpret_cast<void*>(a), &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) a = 0;
+                }
+                if (a != addrs[i]) {
+                    addrs[i] = a;
+                    std::fprintf(stderr, "[pollwatch] slot %zu now at %016llx\n", i, static_cast<unsigned long long>(a));
+                }
+            }
+        }
+        for (size_t i = 0; i < addrs.size(); ++i) {
+            if (!addrs[i]) continue;
+            const uint64_t v = *reinterpret_cast<const volatile uint64_t*>(addrs[i]);
+            if (v != last[i]) {
+                last[i] = v;
+                LARGE_INTEGER t;
+                QueryPerformanceCounter(&t);
+                g_pollRing[g_pollNext.fetch_add(1, std::memory_order_relaxed) % kPollRing] =
+                    PollChange{t.QuadPart, v, static_cast<uint32_t>(i)};
+            }
+        }
+        for (int k = 0; k < 64; ++k) _mm_pause();
+    }
+}
 }  // namespace
 
 void ArmNow(const std::vector<std::string>& specs, const std::vector<Module*>& modules);
@@ -230,6 +308,24 @@ void ArmNow(const std::vector<std::string>& specs, const std::vector<Module*>& m
 // LBP3_BREAK_DELAY=<seconds> arms the breakpoints later (from a background
 // thread), so their 200 logged hits cover a stall rather than the boot.
 void Arm(const std::vector<std::string>& specs, const std::vector<Module*>& modules) {
+    if (const char* pw = std::getenv("LBP3_POLLWATCH"); pw && !modules.empty()) {
+        const std::string list = pw;
+        size_t pos = 0;
+        while (pos < list.size()) {
+            size_t comma = list.find_first_of(",/", pos);  // ',' or '/' (PowerShell splits on commas)
+            if (comma == std::string::npos) comma = list.size();
+            std::string item = list.substr(pos, comma - pos);
+            if (!item.empty() && item[0] == '*') item.erase(0, 1);
+            const size_t plus = item.find('+');
+            const uint64_t off = std::strtoull(item.substr(0, plus).c_str(), nullptr, 16);
+            const uint64_t add =
+                plus == std::string::npos ? 0 : std::strtoull(item.substr(plus + 1).c_str(), nullptr, 16);
+            g_pollSpecs.push_back({off, add});
+            pos = comma + 1;
+        }
+        std::fprintf(stderr, "[pollwatch] watching %zu value(s)\n", g_pollSpecs.size());
+        std::thread(PollThread, modules[0]).detach();
+    }
     if (const char* w = std::getenv("LBP3_HWWATCH"); w && !modules.empty()) {
         g_watchModule = modules[0];  // eboot.bin is loaded first
         if (w[0] == '*') {
@@ -294,6 +390,64 @@ void ArmNow(const std::vector<std::string>& specs, const std::vector<Module*>& m
             std::fprintf(stderr, "[break] armed %s\n", spec.c_str());
         }
     }
+}
+
+
+void DumpPollWatch() {
+    const uint64_t next = g_pollNext.load();
+    if (!next) return;
+    FILE* f = std::fopen("analysis\\pollwatch.txt", "w");
+    if (!f) return;
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    const uint64_t first = next > kPollRing ? next - kPollRing : 0;
+    const int64_t t0 = g_pollRing[first % kPollRing].qpc;
+    for (uint64_t i = first; i < next; ++i) {
+        const PollChange& c = g_pollRing[i % kPollRing];
+        std::fprintf(f, "%.3f slot%u %016llx\n", 1000.0 * static_cast<double>(c.qpc + 0 * t0) / static_cast<double>(freq.QuadPart),
+                     c.slot, static_cast<unsigned long long>(c.value));
+    }
+    std::fclose(f);
+    std::fprintf(stderr, "[pollwatch] wrote %llu changes to analysis\\pollwatch.txt\n",
+                 static_cast<unsigned long long>(next - first));
+}
+
+void DumpWatchRing() {
+    DumpPollWatch();
+    const uint64_t next = g_watchRingNext.load();
+    if (!next) return;
+    FILE* f = std::fopen("analysis\\hwwatch_ring.txt", "w");
+    if (!f) return;
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    const uint64_t first = next > kWatchRing ? next - kWatchRing : 0;
+    const int64_t t0 = g_watchRing[first % kWatchRing].qpc;
+    std::unordered_map<uint32_t, std::string> names;
+    for (uint64_t i = first; i < next; ++i) {
+        const WatchHit& h = g_watchRing[i % kWatchRing];
+        auto it = names.find(h.tid);
+        if (it == names.end()) {
+            std::string n = std::to_string(h.tid);
+            if (HANDLE th = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, h.tid)) {
+                PWSTR w = nullptr;
+                if (SUCCEEDED(GetThreadDescription(th, &w)) && w && *w) {
+                    n.clear();
+                    for (const wchar_t* c = w; *c; ++c)
+                        if (*c != L'\n') n += static_cast<char>(*c < 128 ? *c : '?');
+                }
+                if (w) LocalFree(w);
+                CloseHandle(th);
+            }
+            it = names.emplace(h.tid, n).first;
+        }
+        std::fprintf(f, "%.3f %s %016llx by %s from %s\n",
+                     1000.0 * static_cast<double>(h.qpc + 0 * t0) / static_cast<double>(freq.QuadPart),
+                     it->second.c_str(), static_cast<unsigned long long>(h.value), DescribeAddress(h.rip).c_str(),
+                     h.caller ? DescribeAddress(h.caller).c_str() : "?");
+    }
+    std::fclose(f);
+    std::fprintf(stderr, "[hwwatch] wrote %llu hits to analysis\hwwatch_ring.txt\n",
+                 static_cast<unsigned long long>(next - first));
 }
 
 }  // namespace core::debugger
