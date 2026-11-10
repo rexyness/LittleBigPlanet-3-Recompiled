@@ -27,7 +27,7 @@
 #include "video/presenter.h"
 
 namespace VideoCore {
-extern std::atomic<uint32_t> g_lbp3ImageCreates, g_lbp3ImageExpands;  // texture_cache.cpp
+extern std::atomic<uint32_t> g_lbp3ImageCreates, g_lbp3ImageExpands, g_lbp3ImageReadbacks;  // texture_cache.cpp
 }
 
 namespace hle::kernel {
@@ -147,10 +147,11 @@ void SignalFlip(int64_t flipArg) {
     if (++g_flipCount % kFlipsPerStatus == 0) {
         std::fprintf(stderr,
                      "[video] %llu frames flipped (avg %.1f ms, worst %.1f ms, %d over 40 ms; %u new images, "
-                     "%u expanded; %u early releases, %u wait addresses learned; work %.1f ms, slot wait %.1f ms, "
+                     "%u expanded, %u read back; %u early releases, %u wait addresses learned; work %.1f ms, slot wait %.1f ms, "
                      "%d on timer)\n",
                      static_cast<unsigned long long>(g_flipCount), sumMs / kFlipsPerStatus, worstMs, slow,
                      VideoCore::g_lbp3ImageCreates.exchange(0), VideoCore::g_lbp3ImageExpands.exchange(0),
+                     VideoCore::g_lbp3ImageReadbacks.exchange(0),
                      gpu::TakeEarlyReleases(), gpu::LearnedWaits(), g_paceWorkMs / kFlipsPerStatus,
                      g_paceWaitMs / kFlipsPerStatus, g_paceTimerFlips);
         sumMs = worstMs = 0;

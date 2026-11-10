@@ -23,6 +23,9 @@ struct ShimEmulatorSettings {
         if (!v) return GpuReadbacksMode::Disabled;
         return std::string(v) == "precise" ? GpuReadbacksMode::Precise : GpuReadbacksMode::Relaxed;
     }
+    // LBP3_READBACK_IMAGES=1 copies every linear image the GPU writes back for the CPU, at each
+    // submit and fence. Without it only linear 32-bit colour targets drawn while the game has a
+    // capture queued are: its photos and icons (texture_cache.cpp, IsCpuReadRenderTarget).
     bool IsReadbackLinearImagesEnabled() const { return std::getenv("LBP3_READBACK_IMAGES") != nullptr; }
     bool IsDirectMemoryAccessEnabled() const { return false; }
     bool IsDumpShaders() const { return std::getenv("LBP3_DUMP_SHADERS") != nullptr; }  // analysis/shaders/
