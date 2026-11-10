@@ -590,6 +590,9 @@ void WaitGpu() {
 
 uint32_t TakeEarlyReleases() { return g_liverpool ? g_liverpool->early_releases.exchange(0) : 0; }
 uint32_t LearnedWaits() { return g_liverpool ? g_liverpool->learned_waits.load() : 0; }
+uint32_t TakeSubmitsWhileGfxBlocked() {
+    return g_liverpool ? g_liverpool->TakeSubmitsWhileGfxBlocked() : 0;
+}
 
 void WaitIdle() {
     if (g_liverpool) WaitGpu();

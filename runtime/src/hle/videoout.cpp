@@ -148,11 +148,11 @@ void SignalFlip(int64_t flipArg) {
         std::fprintf(stderr,
                      "[video] %llu frames flipped (avg %.1f ms, worst %.1f ms, %d over 40 ms; %u new images, "
                      "%u expanded; %u early releases, %u wait addresses learned; work %.1f ms, slot wait %.1f ms, "
-                     "%d on timer)\n",
+                     "%d on timer; %u submits while gfx blocked)\n",
                      static_cast<unsigned long long>(g_flipCount), sumMs / kFlipsPerStatus, worstMs, slow,
                      VideoCore::g_lbp3ImageCreates.exchange(0), VideoCore::g_lbp3ImageExpands.exchange(0),
                      gpu::TakeEarlyReleases(), gpu::LearnedWaits(), g_paceWorkMs / kFlipsPerStatus,
-                     g_paceWaitMs / kFlipsPerStatus, g_paceTimerFlips);
+                     g_paceWaitMs / kFlipsPerStatus, g_paceTimerFlips, gpu::TakeSubmitsWhileGfxBlocked());
         sumMs = worstMs = 0;
         slow = 0;
         g_paceWaitMs = g_paceWorkMs = 0;

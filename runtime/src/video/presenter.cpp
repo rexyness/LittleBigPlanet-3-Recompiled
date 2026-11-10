@@ -112,6 +112,17 @@ void PresenterThread() {
     }
     SDL_Window* window = SDL_CreateWindow("LittleBigPlanet 3 (native)", kWindowWidth, kWindowHeight,
                                           SDL_WINDOW_RESIZABLE);
+    // LBP3_DISPLAY=<n>: open the window centred on display n (1 = the first SDL lists).
+    if (const char* d = std::getenv("LBP3_DISPLAY"); d && window) {
+        int count = 0;
+        SDL_DisplayID* ids = SDL_GetDisplays(&count);
+        const int n = std::atoi(d);
+        if (ids && n >= 1 && n <= count) {
+            SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED_DISPLAY(ids[n - 1]),
+                                  SDL_WINDOWPOS_CENTERED_DISPLAY(ids[n - 1]));
+        }
+        SDL_free(ids);
+    }
     SDL_Renderer* renderer = window ? SDL_CreateRenderer(window, nullptr) : nullptr;
     if (!renderer) {
         std::fprintf(stderr, "[video] window creation failed: %s\n", SDL_GetError());

@@ -28,6 +28,8 @@ void WaitIdle();
 uint32_t TakeEarlyReleases();
 // How many wait addresses were found to be written by the guest after its submit (total).
 uint32_t LearnedWaits();
+// Graphics submits that arrived while the graphics queue was blocked on a wait (since last call).
+uint32_t TakeSubmitsWhileGfxBlocked();
 
 // Async compute rings (sceGnmMapComputeQueue / sceGnmDingDong). MapComputeQueue returns
 // the 1-based virtual queue id, or a negative error.
