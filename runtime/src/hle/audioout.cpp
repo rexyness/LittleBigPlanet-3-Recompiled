@@ -191,7 +191,9 @@ int PS4_SYSV_ABI sceAudioOutOutput(int32_t handle, const void* buffer) {
         bytes = p->scratch.size() * sizeof(float);
         if (buffer) {
             // An empty queue here (after start-up) means the speaker ran dry: an audible gap.
-            if (++p->outputs > 8 && SDL_GetAudioStreamQueued(stream) == 0 && (++p->underruns % 50) == 1)
+            // Logged every 1000th time: the voice port (3) runs dry routinely between lines,
+            // which the port's gap list found harmless (gap 11), and every 50th filled long logs.
+            if (++p->outputs > 8 && SDL_GetAudioStreamQueued(stream) == 0 && (++p->underruns % 1000) == 1)
                 std::fprintf(stderr, "[audio] port %d underrun (%llu so far)\n", handle,
                              static_cast<unsigned long long>(p->underruns));
             Convert(*p, buffer, p->scratch.data());
