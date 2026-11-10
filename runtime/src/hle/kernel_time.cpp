@@ -172,7 +172,16 @@ void NoteTimeCall(const char* fn, void* caller, void* frame) {
 
 }  // namespace
 
-void NoteFlip(int64_t steadyNs) { g_lastFlipNs.store(steadyNs, std::memory_order_relaxed); }
+// For the net layer (ticket 09): whether this thread steps the simulation on the frame clock
+// (main or game host thread), and the steady_clock time of the last flip (0: none yet).
+bool IsFrameClockThread() { return FrameClockEnabled() && OnFrameClock(); }
+int64_t LastFlipSteadyNs() { return g_lastFlipNs.load(std::memory_order_relaxed); }
+
+void SyncRecGpu(const char* what, uint64_t a, uint64_t b);  // kernel_sync.cpp
+void NoteFlip(int64_t steadyNs) {
+    g_lastFlipNs.store(steadyNs, std::memory_order_relaxed);
+    SyncRecGpu("flip shown", static_cast<uint64_t>(steadyNs), 0);
+}
 void NoteMainThread() { g_mainThread.store(GetCurrentThreadId(), std::memory_order_relaxed); }
 
 int PS4_SYSV_ABI sceKernelClockGettime(int clock, Timespec* tp) {

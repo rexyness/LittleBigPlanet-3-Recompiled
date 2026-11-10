@@ -33,6 +33,7 @@ extern std::atomic<uint32_t> g_lbp3ImageCreates, g_lbp3ImageExpands;  // texture
 namespace hle::kernel {
 void NoteFlip(int64_t steadyNs);  // kernel_time.cpp: the main thread's frame-steady clock
 void NoteMainThread();
+void SyncRecGpu(const char* what, uint64_t a, uint64_t b);  // kernel_sync.cpp: LBP3_TRACE_SYNC ring
 }  // namespace hle::kernel
 
 namespace hle::videoout {
@@ -420,6 +421,7 @@ void TraceSimSteps() {
     using Counter = int(PS4_SYSV_ABI*)();
     const int sim = reinterpret_cast<Counter>(base + 0x7c79e0)();
     const int game = reinterpret_cast<Counter>(base + 0x7c79f0)();
+    kernel::SyncRecGpu("submit+flip sim/game", static_cast<uint64_t>(sim), static_cast<uint64_t>(game));
     static int lastSim = sim, lastGame = game;
     static std::string simSteps, gameSteps;
     using SimClock = std::chrono::steady_clock;

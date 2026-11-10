@@ -22,6 +22,12 @@
 #include "hle/net_delay.h"
 #include "hle/register.h"
 
+namespace hle::kernel {
+void SyncRecGpu(const char* what, uint64_t a, uint64_t b);  // LBP3_TRACE_SYNC ring
+bool IsFrameClockThread();   // kernel_time.cpp
+int64_t LastFlipSteadyNs();  // kernel_time.cpp
+}
+
 namespace hle::net {
 namespace {
 
@@ -134,6 +140,7 @@ void BindSocket(int s, const void* addr) {
 // the destination isn't on this machine.
 bool SendLocal(int s, const void* data, size_t len, const void* to) {
     if (!IsLoopback(to)) return false;
+    kernel::SyncRecGpu("net send", static_cast<uint64_t>(s), len);
     std::lock_guard lk(g_netMutex);
     Socket& from = g_sockets[s];
     if (from.port == 0) from.port = g_nextEphemeral++;  // implicit bind, like a real stack
@@ -198,6 +205,7 @@ int64_t RecvLocal(int s, void* buf, size_t len, void* from, uint32_t* fromLen) {
     auto it = g_sockets.find(s);
     if (it == g_sockets.end() || it->second.inbox.empty()) return -1;
     ++g_recvData;
+    kernel::SyncRecGpu("net recv", static_cast<uint64_t>(s), it->second.inbox.size());
     Datagram d = std::move(it->second.inbox.front());
     it->second.inbox.pop_front();
     static int logged = 0;
@@ -321,10 +329,32 @@ int PS4_SYSV_ABI sceNetEpollControl(int ep, int op, int id, EpollEvent* ev) {
 // Reports sockets with queued datagrams as readable. Long or infinite waits
 // are capped so the caller keeps looping.
 int PS4_SYSV_ABI sceNetEpollWait(int ep, EpollEvent* events, int maxEvents, int timeoutUs) {
-    const auto deadline = std::chrono::steady_clock::now() +
-                          (timeoutUs < 0 ? kEpollMaxSleep
-                                         : std::min<std::chrono::milliseconds>(
-                                               std::chrono::milliseconds(timeoutUs / 1000), kEpollMaxSleep));
+    kernel::SyncRecGpu("epoll wait", static_cast<uint64_t>(ep), static_cast<uint64_t>(static_cast<int64_t>(timeoutUs)));
+    using SteadyClock = std::chrono::steady_clock;
+    // Microsecond timeouts, not truncated to whole milliseconds.
+    auto deadline = SteadyClock::now() +
+                    (timeoutUs < 0 ? std::chrono::duration_cast<std::chrono::microseconds>(kEpollMaxSleep)
+                                   : std::min<std::chrono::microseconds>(std::chrono::microseconds(timeoutUs),
+                                                                         kEpollMaxSleep));
+    // LBP3 ticket 09 experiment (LBP3_HOST_TICK_PHASE=on): end the game host thread's ~1-frame
+    // waits 10 ms before the next flip, phase-locking its simulation tick to the frames. It made
+    // no measurable difference once the timeouts above were precise, so it is off by default.
+    static const bool phaseLock = [] {
+        const char* v = std::getenv("LBP3_HOST_TICK_PHASE");
+        return v && std::string(v) == "on";
+    }();
+    if (phaseLock && timeoutUs >= 20000 && timeoutUs <= 50000 && kernel::IsFrameClockThread()) {
+        const int64_t flip = kernel::LastFlipSteadyNs();
+        if (flip) {
+            constexpr int64_t kPeriodNs = 33'333'333, kLeadNs = 10'000'000;
+            const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      SteadyClock::now().time_since_epoch()).count();
+            int64_t target = flip + kPeriodNs - kLeadNs;
+            while (target <= nowNs + 1'000'000) target += kPeriodNs;
+            deadline = SteadyClock::time_point(std::chrono::duration_cast<SteadyClock::duration>(
+                std::chrono::nanoseconds(target)));
+        }
+    }
     for (;;) {
         int n = 0;
         {
@@ -337,8 +367,14 @@ int PS4_SYSV_ABI sceNetEpollWait(int ep, EpollEvent* events, int maxEvents, int 
                 ++n;
             }
         }
-        if (n > 0 || std::chrono::steady_clock::now() >= deadline) return n;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        const auto now = SteadyClock::now();
+        if (n > 0 || now >= deadline) {
+            kernel::SyncRecGpu("epoll ret", static_cast<uint64_t>(ep), static_cast<uint64_t>(n));
+            return n;
+        }
+        // Poll every millisecond, and finish the last stretch without oversleeping the deadline.
+        if (deadline - now > std::chrono::microseconds(1500)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        else std::this_thread::yield();
     }
 }
 
