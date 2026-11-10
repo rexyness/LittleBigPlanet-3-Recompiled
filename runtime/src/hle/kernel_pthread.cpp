@@ -198,6 +198,13 @@ int LockMutex(Mutex* m, const Clock::time_point* deadline, void* site) {
         if (m->type == kRecursive) { ++m->depth; return SCE_OK; }
         // Like FreeBSD: a timed self-lock waits out the timeout, an untimed one fails.
         if (deadline) {
+            static std::atomic<int> told{0};
+            if (told++ < 20)
+                std::fprintf(stderr, "[kernel] timed self-lock at %s by '%s' (type %d): sleeping %lld ms, then ETIMEDOUT\n",
+                             core::DescribeAddress(reinterpret_cast<uint64_t>(site)).c_str(),
+                             core::ThreadName(me).c_str(), m->type,
+                             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 *deadline - Clock::now()).count()));
             std::this_thread::sleep_until(*deadline);
             return SceErr(kETIMEDOUT);
         }
@@ -234,7 +241,7 @@ struct Rwlock {
     std::atomic<DWORD> writer{0};
 };
 
-int CondWait(void* cond, void* mutex, const DWORD timeoutMs) {
+int CondWait(void* cond, void* mutex, const DWORD timeoutMs, void* site = nullptr) {
     if (!cond || !mutex) return SceErr(kEINVAL);
     Cond* c = Lazy<Cond>(cond);
     Mutex* m = Lazy<Mutex>(mutex);
@@ -243,6 +250,14 @@ int CondWait(void* cond, void* mutex, const DWORD timeoutMs) {
     m->owner.store(0, std::memory_order_relaxed);
     BOOL ok = SleepConditionVariableSRW(&c->cv, &m->lock, timeoutMs, 0);
     TakeOwnership(m, depth);
+    if (!ok && timeoutMs != INFINITE && timeoutMs >= 500) {
+        static std::atomic<int> told{0};
+        if (told++ < 20)
+            std::fprintf(stderr, "[kernel] cond timedwait of %lu ms timed out at %s on '%s'\n",
+                         static_cast<unsigned long>(timeoutMs),
+                         core::DescribeAddress(reinterpret_cast<uint64_t>(site)).c_str(),
+                         core::ThreadName(GetCurrentThreadId()).c_str());
+    }
     return ok ? SCE_OK : SceErr(kETIMEDOUT);
 }
 
@@ -609,7 +624,7 @@ int PS4_SYSV_ABI scePthreadCondBroadcast(void** cond) {
 int PS4_SYSV_ABI scePthreadCondWait(void** cond, void** mutex) { return CondWait(cond, mutex, INFINITE); }
 
 int PS4_SYSV_ABI scePthreadCondTimedwait(void** cond, void** mutex, uint32_t usec) {
-    return CondWait(cond, mutex, UsecToMs(usec));
+    return CondWait(cond, mutex, UsecToMs(usec), GAME_CALLER());
 }
 
 // --- read/write locks -----------------------------------------------------------

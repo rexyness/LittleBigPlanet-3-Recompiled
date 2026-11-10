@@ -246,13 +246,25 @@ int PS4_SYSV_ABI sceKernelGettimezone(Timezone* tz) {
     return SCE_OK;
 }
 
+// Diag (gap 10): sleeps of half a second or more, with the game's call site.
+void NoteLongSleep(uint64_t usec, void* site) {
+    if (usec < 500'000) return;
+    static std::atomic<int> told{0};
+    if (told++ < 20)
+        std::fprintf(stderr, "[kernel] sleep of %llu ms at %s on '%s'\n", static_cast<unsigned long long>(usec / 1000),
+                     core::DescribeAddress(reinterpret_cast<uint64_t>(site)).c_str(),
+                     core::ThreadName(GetCurrentThreadId()).c_str());
+}
+
 int PS4_SYSV_ABI sceKernelUsleep(uint32_t usec) {
     NOTE_TIME_CALL();
+    NoteLongSleep(usec, __builtin_return_address(0));
     SleepUs(usec);
     return SCE_OK;
 }
 
 int PS4_SYSV_ABI sceKernelSleep(uint32_t sec) {
+    NoteLongSleep(uint64_t{sec} * 1'000'000, __builtin_return_address(0));
     SleepUs(uint64_t{sec} * 1'000'000);
     return SCE_OK;
 }
@@ -260,6 +272,8 @@ int PS4_SYSV_ABI sceKernelSleep(uint32_t sec) {
 int PS4_SYSV_ABI nanosleep(const Timespec* req, Timespec* rem) {
     NOTE_TIME_CALL();
     if (!req || req->nsec < 0 || req->nsec >= 1'000'000'000) return PosixResult(SceErr(kEINVAL));
+    NoteLongSleep(static_cast<uint64_t>(req->sec) * 1'000'000 + static_cast<uint64_t>(req->nsec) / 1000,
+                  __builtin_return_address(0));
     SleepUs(static_cast<uint64_t>(req->sec) * 1'000'000 + static_cast<uint64_t>(req->nsec) / 1000);
     if (rem) *rem = {};
     return 0;
