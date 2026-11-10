@@ -43,7 +43,7 @@ std::string Bounded(const char* s, size_t max) { return s ? std::string(s, strnl
 fs::path SaveFolder(const char* titleId, const std::string& dirName) {
     std::string title = Bounded(titleId, kTitleIdSize);
     if (title.empty()) title = kDefaultTitleId;
-    return core::vfs::UserRoot() / "savedata" / title / fs::u8path(dirName);
+    return core::vfs::UserRoot() / "savedata" / title / fs::path(std::u8string(dirName.begin(), dirName.end()));
 }
 
 }  // namespace
@@ -155,12 +155,27 @@ int PS4_SYSV_ABI sceSaveDataUmount(const MountPoint* point) {
 
 int PS4_SYSV_ABI sceSaveDataUmountWithBackup(const MountPoint* point) { return sceSaveDataUmount(point); }
 
-// '%' in a pattern matches any run of characters, like the console.
+// '%' in a pattern matches any run of characters, anywhere, like the console.
+// LBP3's import lists search for "%xPBACKUPx%" (profiles), "%LEVEL%" and "%ADV%".
 static bool Matches(const std::string& name, const std::string& pattern) {
     if (pattern.empty()) return true;
-    const size_t pct = pattern.find('%');
-    if (pct == std::string::npos) return name == pattern;
-    return name.compare(0, pct, pattern, 0, pct) == 0;
+    size_t n = 0, p = 0, star = std::string::npos, mark = 0;
+    while (n < name.size()) {
+        if (p < pattern.size() && pattern[p] == '%') {
+            star = p++;
+            mark = n;
+        } else if (p < pattern.size() && pattern[p] == name[n]) {
+            ++p;
+            ++n;
+        } else if (star != std::string::npos) {
+            p = star + 1;
+            n = ++mark;
+        } else {
+            return false;
+        }
+    }
+    while (p < pattern.size() && pattern[p] == '%') ++p;
+    return p == pattern.size();
 }
 
 int PS4_SYSV_ABI sceSaveDataDirNameSearch(const DirNameSearchCond* cond, DirNameSearchResult* result) {

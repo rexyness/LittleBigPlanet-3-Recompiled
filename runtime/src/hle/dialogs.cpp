@@ -1,5 +1,6 @@
 // System dialogs. On a PS4 these are drawn by the system over the game; here
-// they're native Windows message boxes, so they work outside the game window.
+// they're native Windows windows, so they work outside the game window. The
+// common dialogs (messages and saved data) are in hle/common_dialog.cpp.
 //
 // libSceErrorDialog: the game passes an error code (e.g. after failing to
 // reach its servers) and polls until the player dismisses it. Dismissed by
@@ -11,9 +12,12 @@
 #include <string>
 #include <thread>
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 
+#include "hle/common_dialog.h"
 #include "hle/kernel_errors.h"
 #include "hle/register.h"
 #include "input/gamepad.h"
@@ -121,6 +125,10 @@ void RegisterDialogs(core::Linker& linker) {
     HLE_REG(linker, e, sceErrorDialogGetStatus);
     HLE_REG(linker, e, sceErrorDialogClose);
     HLE_REG(linker, e, sceErrorDialogTerminate);
+
+    size_t count = 0;
+    const common_dialog::Export* exports = common_dialog::Exports(count);
+    for (size_t i = 0; i < count; ++i) linker.RegisterHle(exports[i].lib, exports[i].name, exports[i].fn);
 }
 
 }  // namespace hle
