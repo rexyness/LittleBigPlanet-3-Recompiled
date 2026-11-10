@@ -84,13 +84,15 @@ const uint8_t* CutSceneManager() {
 }  // namespace
 
 void CutSceneWatchdog() {
-    // The Legend of Bunkum (a cutscene level) never ends by itself here: its last cutscene
-    // camera finishes and the level sits on a white screen (cause unknown, see NOTES.md).
-    // Pause -> skip works, so once a cutscene level has had a camera and then none for a
-    // few seconds, ask for the same skip. LBP3_CUTSCENE_AUTOSKIP=off disables.
+    // The Legend of Bunkum (a cutscene level) used to end on a white screen: its last cutscene
+    // camera finished and the level sat there. Pause -> skip works, so once a cutscene level
+    // has had a camera and then none for a few seconds, this asks for the same skip.
+    // The cause was the guest floating-point state (MXCSR/x87 not set on game threads); with
+    // that fixed the cutscene plays to its end and hands over to Needlepoint Peaks, so the
+    // skip is now off by default. LBP3_CUTSCENE_AUTOSKIP=on brings it back as a fallback.
     static const bool enabled = [] {
         const char* v = std::getenv("LBP3_CUTSCENE_AUTOSKIP");
-        return !v || std::string_view(v) != "off";
+        return v && std::string_view(v) == "on";
     }();
     static const uint8_t* manager = nullptr;
     static bool hadCamera = false;
