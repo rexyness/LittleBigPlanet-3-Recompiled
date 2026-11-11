@@ -601,6 +601,81 @@ void MouseChecks() {
     MouseMove(5.f, 5.f);
 }
 
+// Review fixes: a Space that answers a dialog types nothing into the keyboard under it, and a
+// change of window brings the dialog and the keyboard back up instead of dropping them.
+void ReviewFixChecks(SDL_Renderer* renderer) {
+    std::printf("review fixes\n");
+    ui::osk::testing::SetPad(&g_pad);
+    ui::osk::testing::SetClock(Clock);
+    const auto text = [] {
+        std::u16string t;
+        ui::osk::testing::WithKeyboard([&](ui::osk::Keyboard& kb) { t = kb.text(); });
+        return t;
+    };
+    const auto key = [](SDL_EventType type, SDL_Keycode k, SDL_Scancode sc) {
+        SDL_Event e = KeyEvent(type, k);
+        e.key.scancode = sc;
+        return ui::overlay::HandleEvent(e);
+    };
+    SDL_Event space{};
+    space.type = SDL_EVENT_TEXT_INPUT;
+    space.text.text = " ";
+
+    ui::osk::Request kreq;
+    kreq.title = u"Level Name";
+    kreq.text = u"ab";
+    kreq.maxLength = 20;
+    int kAnswers = 0;
+    std::u16string kText;
+    const uint64_t kid = ui::osk::Show(kreq, [&](const ui::osk::Answer& a) {
+        ++kAnswers;
+        kText = a.text;
+    });
+    Pad(0);
+    Answers d;
+    Show(OkOnly(), Recorder(d));
+    Pad(0);
+    CHECK(key(SDL_EVENT_KEY_DOWN, SDLK_SPACE, SDL_SCANCODE_SPACE));  // answers the dialog
+    CHECK_EQ(d.count, 1);
+    CHECK(ui::overlay::HandleEvent(space));  // its text: swallowed, not typed
+    CHECK(text() == u"ab");
+    key(SDL_EVENT_KEY_UP, SDLK_SPACE, SDL_SCANCODE_SPACE);
+    Pad(0);
+    CHECK(ui::overlay::HandleEvent(space));  // a fresh space after the release types
+    CHECK(text() == u"ab ");
+
+    // A new window: the keyboard (with what was typed) and a dialog come back up on it.
+    Answers d2;
+    Show(SaveList(4, 2), Recorder(d2));
+    Pad(0);
+    Pad(ps4::PAD_DOWN);  // selection 2 -> 3
+    Pad(0);
+    SDL_Window* other = SDL_CreateWindow("dlgtest 2", 1280, 720, SDL_WINDOW_HIDDEN);
+    SDL_Renderer* otherRenderer = other ? SDL_CreateRenderer(other, nullptr) : nullptr;
+    CHECK(otherRenderer != nullptr);
+    if (otherRenderer) {
+        ui::overlay::Attach(other, otherRenderer);
+        Pad(0);
+        CHECK(Visible());
+        CHECK_EQ(Top().selected, 3);  // the dialog came back where it was
+        Pad(ps4::PAD_CROSS);
+        CHECK_EQ(d2.count, 1);
+        CHECK_EQ(d2.item, 3);
+        Pad(0);
+        CHECK(text() == u"ab ");  // the keyboard came back with its text
+        Pad(ps4::PAD_R2);
+        CHECK_EQ(kAnswers, 1);
+        CHECK(kText == u"ab ");
+        Pad(0);
+        ui::overlay::Attach(g_window, renderer);
+        SDL_DestroyRenderer(otherRenderer);
+    }
+    if (other) SDL_DestroyWindow(other);
+    (void)kid;
+    ui::osk::testing::SetPad(nullptr);
+    ui::osk::testing::SetClock(nullptr);
+}
+
 void Checks() {
     g_window = SDL_CreateWindow("dlgtest", 1280, 720, SDL_WINDOW_HIDDEN);
     SDL_Renderer* renderer = g_window ? SDL_CreateRenderer(g_window, nullptr) : nullptr;
@@ -627,6 +702,7 @@ void Checks() {
     KeyboardTogetherChecks();
     EventChecks();
     MouseChecks();
+    ReviewFixChecks(renderer);
 
     testing::SetPad(nullptr);
     testing::SetClock(nullptr);

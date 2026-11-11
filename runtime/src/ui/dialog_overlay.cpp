@@ -76,6 +76,10 @@ struct Live {
     bool stickIgnored = false;
     Repeater up, down, left, right;
     bool enterHeld = false, escHeld = false;
+    // Navigation keys (arrows, Tab, Home/End, Page Up/Down) held when the dialog came up, for
+    // instance still auto-repeating from the game's menu: ignored until released, or one could
+    // move the focus from No to Yes before the player sees the question.
+    std::vector<SDL_Scancode> navHeld;
     std::vector<SDL_Texture*> icons;  // per list entry; nullptr = none. Freed in EndLive.
     ImVec2 lastMouse{-1.f, -1.f};
     bool mouseSeen = false;
@@ -143,6 +147,10 @@ void Rearm(Live& l) {
     const bool* keys = SDL_GetKeyboardState(nullptr);
     l.enterHeld = keys && (keys[SDL_SCANCODE_RETURN] || keys[SDL_SCANCODE_KP_ENTER] || keys[SDL_SCANCODE_SPACE]);
     l.escHeld = keys && keys[SDL_SCANCODE_ESCAPE];
+    l.navHeld.clear();
+    for (SDL_Scancode c : {SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT, SDL_SCANCODE_TAB,
+                           SDL_SCANCODE_HOME, SDL_SCANCODE_END, SDL_SCANCODE_PAGEUP, SDL_SCANCODE_PAGEDOWN})
+        if (keys && keys[c]) l.navHeld.push_back(c);
 }
 
 void EnsureVisible(Live& l) {
@@ -821,13 +829,18 @@ bool Event(const SDL_Event& e) {
         case SDLK_RETURN:
         case SDLK_KP_ENTER:
         case SDLK_SPACE:
-            if (e.key.repeat || l.enterHeld) break;  // still held from the game: not an answer
+            if (e.key.repeat || l.enterHeld) return true;  // still held from the game: not an answer
             Press(l, FocusedButton(l));
-            break;
+            return true;  // the press may have ended the dialog: `l` is no longer valid
         case SDLK_ESCAPE:
-            if (e.key.repeat || l.escHeld) break;
+            if (e.key.repeat || l.escHeld) return true;
             Press(l, l.request.cancelButton);
-            break;
+            return true;
+        default: break;
+        }
+        // Navigation: not while the key is still held from before the dialog came up.
+        if (std::find(l.navHeld.begin(), l.navHeld.end(), e.key.scancode) != l.navHeld.end()) return true;
+        switch (key) {
         case SDLK_UP:
             if (list) {
                 MoveSelection(l, -1);
@@ -871,6 +884,7 @@ bool Event(const SDL_Event& e) {
         if (e.key.key >= SDLK_F1 && e.key.key <= SDLK_F12) return false;
         if (e.key.key == SDLK_RETURN || e.key.key == SDLK_KP_ENTER || e.key.key == SDLK_SPACE) l.enterHeld = false;
         if (e.key.key == SDLK_ESCAPE) l.escHeld = false;
+        std::erase(l.navHeld, e.key.scancode);
         return true;
     default: return false;
     }
@@ -896,7 +910,18 @@ void Frame(bool top, ImVec2 display) {
 }
 
 void Reset() {
+    // A new window: the dialogs that are up go back to pending, so they come up again on it
+    // (their icons are loaded again for its renderer) and still get answered.
+    std::vector<Pending> back;
+    for (Live& l : g_live) {
+        Request r = l.request;
+        r.progress = l.progress;
+        r.focus = l.selected >= 0 ? l.selected : r.focus;
+        back.push_back({l.id, l.stamp, std::move(r), std::move(l.onAnswer)});
+    }
     while (!g_live.empty()) EndLive(g_live.size() - 1);
+    std::lock_guard lock(g_mutex);
+    g_pending.insert(g_pending.begin(), std::make_move_iterator(back.begin()), std::make_move_iterator(back.end()));
 }
 
 }  // namespace layer
