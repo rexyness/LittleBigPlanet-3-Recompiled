@@ -52,8 +52,9 @@ bool AnswerHeld(uint32_t realButtons) {
     return ((GetAsyncKeyState(VK_RETURN) | GetAsyncKeyState(VK_ESCAPE) | GetAsyncKeyState(VK_BACK)) & 0x8000) != 0;
 }
 
-bool HoldsPad(uint32_t realButtons) {
+bool HoldsPad(uint32_t realButtons, int slot) {
     if (g_open.load() > 0) return true;
+    if (slot != 0) return false;
     const int64_t until = g_releaseUntil.load();
     if (!until) return false;
     if (AnswerHeld(realButtons) && Now() < until) return true;

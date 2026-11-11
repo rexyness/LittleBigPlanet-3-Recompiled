@@ -2,8 +2,10 @@
 // the player is signed out of PSN and the console is disconnected. LBP3
 // handles that the way it does on a console without a connection: it says it
 // can't connect and carries on offline. Error codes follow shadPS4.
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <deque>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -16,6 +18,7 @@
 
 #include "hle/kernel_errors.h"
 #include "hle/register.h"
+#include "hle/users.h"
 
 namespace hle::np {
 namespace {
@@ -31,7 +34,7 @@ using StateCallback = void(PS4_SYSV_ABI*)(int32_t userId, int32_t state, void* n
 std::mutex g_mutex;
 StateCallback g_stateCallback = nullptr;
 void* g_stateUserdata = nullptr;
-bool g_statePending = false;  // the initial state notification hasn't been delivered yet
+std::deque<int32_t> g_pendingUsers;  // users whose state notification hasn't been delivered yet
 std::atomic<int32_t> g_nextRequest{kRequestIdBase + 1};
 
 // "Signed out" answer for calls that need PSN; logs each function once.
@@ -64,7 +67,9 @@ int PS4_SYSV_ABI sceNpRegisterStateCallback(StateCallback cb, void* userdata) {
     if (g_stateCallback) return kErrorCallbackAlreadyRegistered;
     g_stateCallback = cb;
     g_stateUserdata = userdata;
-    g_statePending = true;
+    // User 1 first; co-op guests who signed in before the callback existed follow.
+    std::erase(g_pendingUsers, 1);
+    g_pendingUsers.push_front(1);
     return kernel::SCE_OK;
 }
 
@@ -74,26 +79,40 @@ int PS4_SYSV_ABI sceNpUnregisterStateCallback() {
     return kernel::SCE_OK;
 }
 
-// Like the console (and shadPS4), the user's sign-in state is reported once
-// after login, delivered on the game's next sceNpCheckCallback. LBP3's connect
-// flow waits for it before deciding to carry on offline. Offline it's
-// "signed out" with no NpId; nothing changes after that.
+// Like the console (and shadPS4), each user's sign-in state is reported once after
+// they log in, delivered on the game's next sceNpCheckCallback: user 1 once the callback
+// is registered, co-op guests as they sign in (hle/users.h). LBP3's connect flow waits for
+// it before deciding to carry on offline. Offline it's "signed out" with no NpId; nothing
+// changes after that.
 int PS4_SYSV_ABI sceNpCheckCallback() {
-    StateCallback cb = nullptr;
-    void* userdata = nullptr;
-    {
-        std::lock_guard lk(g_mutex);
-        if (!g_statePending || !g_stateCallback) return kernel::SCE_OK;
-        g_statePending = false;
-        cb = g_stateCallback;
-        userdata = g_stateUserdata;
+    for (;;) {
+        StateCallback cb = nullptr;
+        void* userdata = nullptr;
+        int32_t user = 0;
+        {
+            std::lock_guard lk(g_mutex);
+            if (g_pendingUsers.empty() || !g_stateCallback) return kernel::SCE_OK;
+            user = g_pendingUsers.front();
+            g_pendingUsers.pop_front();
+            cb = g_stateCallback;
+            userdata = g_stateUserdata;
+        }
+        int32_t state = kSignedOut;
+        sceNpGetState(user, &state);
+        std::fprintf(stderr, "[np] reporting sign-in state %d of user %d to the game\n", state, user);
+        cb(user, state, nullptr, userdata);
     }
-    constexpr int32_t kUserId = 1;  // matches system_services.cpp
-    int32_t state = kSignedOut;
-    sceNpGetState(kUserId, &state);
-    std::fprintf(stderr, "[np] reporting sign-in state %d to the game\n", state);
-    cb(kUserId, state, nullptr, userdata);
-    return kernel::SCE_OK;
+}
+
+void DropStateNotice(int32_t userId) {
+    std::lock_guard lk(g_mutex);
+    std::erase(g_pendingUsers, userId);
+}
+
+void QueueStateNotice(int32_t userId) {
+    std::lock_guard lk(g_mutex);
+    if (std::find(g_pendingUsers.begin(), g_pendingUsers.end(), userId) == g_pendingUsers.end())
+        g_pendingUsers.push_back(userId);
 }
 
 // The account is linked to PSN, so its online ID is known locally even while
@@ -146,17 +165,42 @@ void FillOnlineId(OnlineId& id) {
     else std::memcpy(id.data, kOfflinePlayer, sizeof(kOfflinePlayer) - 1);
 }
 
-int PS4_SYSV_ABI sceNpGetOnlineId(int32_t, OnlineId* out) {
-    if (!out) return kErrorInvalidArgument;
-    FillOnlineId(*out);
+// Co-op guests (users 2-4) have no PSN identity on a console without a connection: like a
+// signed-out PS4 user, their GetNpId/GetOnlineId fail with SIGNED_OUT and the game keeps a zero
+// NpId for them (coop/re.md). LBP3_COOP_NPID=distinct gives each guest a placeholder of its own
+// ("OfflinePlayer2".."OfflinePlayer4") instead, in case the local session needs every player
+// to have an ID (eboot+0x36c150's "is the player in the session?" check). User 1 is unchanged.
+bool DistinctGuestIds() {
+    static const bool distinct = [] {
+        const char* v = std::getenv("LBP3_COOP_NPID");
+        return v && std::strcmp(v, "distinct") == 0;
+    }();
+    return distinct;
+}
+
+// OK with the user's ID in `id`, or SIGNED_OUT for a guest without one.
+int FillUserOnlineId(int32_t userId, OnlineId& id, const char* fn) {
+    if (userId < 2) {
+        FillOnlineId(id);
+        return kernel::SCE_OK;
+    }
+    if (!DistinctGuestIds()) return SignedOut(fn);
+    std::memset(&id, 0, sizeof(id));
+    char name[kOnlineIdMax + 1];
+    const int n = std::snprintf(name, sizeof(name), "%s%d", kOfflinePlayer, userId);
+    std::memcpy(id.data, name, static_cast<size_t>(std::min<int>(n, kOnlineIdMax)));
     return kernel::SCE_OK;
 }
 
-int PS4_SYSV_ABI sceNpGetNpId(int32_t, NpId* out) {
+int PS4_SYSV_ABI sceNpGetOnlineId(int32_t userId, OnlineId* out) {
+    if (!out) return kErrorInvalidArgument;
+    return FillUserOnlineId(userId, *out, "sceNpGetOnlineId (co-op guest)");
+}
+
+int PS4_SYSV_ABI sceNpGetNpId(int32_t userId, NpId* out) {
     if (!out) return kErrorInvalidArgument;
     std::memset(out, 0, sizeof(*out));
-    FillOnlineId(out->handle);
-    return kernel::SCE_OK;
+    return FillUserOnlineId(userId, out->handle, "sceNpGetNpId (co-op guest)");
 }
 
 int PS4_SYSV_ABI sceNpGetAccountId(const void*, uint64_t* id) {

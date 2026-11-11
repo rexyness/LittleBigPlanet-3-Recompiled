@@ -1,6 +1,6 @@
 // SDL3 backend: XInput, DirectInput and generic HID pads, plus DualShock 4 /
 // DualSense with motion sensors, touch pad and light bar. Pads are hot-plugged;
-// player slots are filled in the order controllers are found.
+// a new controller takes the lowest free player slot (see gamepad.h).
 #include "input/gamepad.h"
 #include "hle/ime_dialog.h"
 #include "input/actions.h"
@@ -19,6 +19,8 @@
 
 #include <SDL3/SDL.h>
 
+#include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -29,7 +31,17 @@ namespace input {
 namespace {
 
 SDL_Gamepad* g_pads[kMaxPads] = {};
+bool g_virtual[kMaxPads] = {};  // slots held by a virtual controller (test runs); never slot 0
+uint32_t g_slotGen[kMaxPads] = {};  // bumped whenever a slot's occupant changes (user service)
+// Player 1's controller, once one has been in slot 0: "vendor:product[:serial]". While it is
+// away, slot 0 stays free for it (player 1 keeps the keyboard), so another pad, e.g. a remote
+// guest's virtual pad, can't become player 1 by connecting in that moment.
+std::string g_player1Id;
+std::string g_player1Name;
 bool g_ready = false;
+// One slot reader at a time: RefreshSlots closes and reopens g_pads entries, and the game, the
+// system dialogs, the overlays and the user service all look at the slots from their threads.
+std::mutex g_slotMutex;
 
 struct ButtonMap { SDL_GamepadButton sdl; uint32_t ps4; };
 // Positional mapping: south/east/west/north = Cross/Circle/Square/Triangle on any pad.
@@ -65,46 +77,183 @@ bool InUse(SDL_JoystickID id) {
     return false;
 }
 
-// Drops unplugged pads and puts newly plugged ones into free slots.
+std::string Lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+std::string PadIdentity(SDL_Gamepad* p) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%04x:%04x", SDL_GetGamepadVendor(p), SDL_GetGamepadProduct(p));
+    std::string id = buf;
+    // A DualSense or DualShock 4 reports its MAC as the serial over USB and Bluetooth alike.
+    if (const char* serial = SDL_GetGamepadSerial(p); serial && *serial) id += std::string(":") + serial;
+    return id;
+}
+
+bool IsPlayStation(SDL_Gamepad* p) {
+    switch (SDL_GetGamepadType(p)) {
+    case SDL_GAMEPAD_TYPE_PS3:
+    case SDL_GAMEPAD_TYPE_PS4:
+    case SDL_GAMEPAD_TYPE_PS5: return true;
+    default: return false;
+    }
+}
+
+// LBP3_PLAYER1_PAD=<text>: a controller whose name contains it (any case) is player 1's.
+bool PinnedPlayer1(SDL_Gamepad* p) {
+    static const std::string pin = [] {
+        const char* v = std::getenv("LBP3_PLAYER1_PAD");
+        return v ? Lower(v) : std::string();
+    }();
+    if (pin.empty()) return false;
+    const char* name = SDL_GetGamepadName(p);
+    return name && Lower(name).find(pin) != std::string::npos;
+}
+
+bool PinSet() {
+    const char* v = std::getenv("LBP3_PLAYER1_PAD");
+    return v && *v;
+}
+
+void Place(int slot, SDL_Gamepad* p) {
+    g_pads[slot] = p;
+    ++g_slotGen[slot];
+    SDL_SetGamepadSensorEnabled(p, SDL_SENSOR_ACCEL, true);  // false and harmless without sensors
+    SDL_SetGamepadSensorEnabled(p, SDL_SENSOR_GYRO, true);
+    const char* name = SDL_GetGamepadName(p);
+    if (slot == 0 && g_player1Id.empty()) {
+        g_player1Id = PadIdentity(p);
+        g_player1Name = name ? name : "controller";
+        std::fprintf(stderr, "[input] player 1's controller: %s (%s)\n", g_player1Name.c_str(), g_player1Id.c_str());
+    }
+    std::fprintf(stderr, "[input] slot %d: %s connected\n", slot, name ? name : "controller");
+}
+
+// Under g_slotMutex. Drops unplugged pads and seats newly plugged ones:
+// - player 1's own controller (or one LBP3_PLAYER1_PAD names) goes to slot 0;
+// - before player 1 has a controller, the first pad to arrive becomes theirs, PlayStation
+//   pads first when several arrive together (SDL lists HIDAPI and XInput pads in no fixed
+//   order at startup, so an emulated Xbox pad could otherwise come first);
+// - any other pad takes the lowest free slot from 1, and slot 0 only if 1..3 are all taken.
 void RefreshSlots() {
-    for (SDL_Gamepad*& p : g_pads) {
+    for (int s = 0; s < kMaxPads; ++s) {
+        SDL_Gamepad*& p = g_pads[s];
         if (p && !SDL_GamepadConnected(p)) {
+            std::fprintf(stderr, "[input] slot %d: controller disconnected\n", s);
             SDL_CloseGamepad(p);
             p = nullptr;
+            ++g_slotGen[s];
         }
     }
     int count = 0;
     SDL_JoystickID* ids = SDL_GetGamepads(&count);
     if (!ids) return;
-    for (int i = 0; i < count; ++i) {
+    struct Fresh { SDL_Gamepad* pad; int rank; };
+    std::vector<Fresh> fresh;
+    int free = 0;
+    for (int s = 0; s < kMaxPads; ++s) free += !g_pads[s] && !g_virtual[s];
+    for (int i = 0; i < count && static_cast<int>(fresh.size()) < free; ++i) {
         if (InUse(ids[i])) continue;
-        for (SDL_Gamepad*& p : g_pads) {
-            if (p) continue;
-            p = SDL_OpenGamepad(ids[i]);
-            if (p) {
-                SDL_SetGamepadSensorEnabled(p, SDL_SENSOR_ACCEL, true);
-                SDL_SetGamepadSensorEnabled(p, SDL_SENSOR_GYRO, true);
-            }
-            break;
-        }
+        SDL_Gamepad* p = SDL_OpenGamepad(ids[i]);
+        if (!p) continue;
+        const int rank = PadIdentity(p) == g_player1Id ? 0 : PinnedPlayer1(p) ? 1 : IsPlayStation(p) ? 2 : 3;
+        fresh.push_back({p, rank});
     }
     SDL_free(ids);
+    std::stable_sort(fresh.begin(), fresh.end(), [](const Fresh& a, const Fresh& b) { return a.rank < b.rank; });
+    for (const Fresh& f : fresh) {
+        const bool slot0Free = !g_pads[0];
+        // Slot 0 is player 1's: their own pad, a pinned one, or the first pad of the session
+        // (not one the pin rules out).
+        const bool mayTake0 = slot0Free && (f.rank <= 1 || (g_player1Id.empty() && !PinSet()));
+        int slot = -1;
+        if (mayTake0) {
+            slot = 0;
+        } else {
+            for (int s = 1; s < kMaxPads && slot < 0; ++s)
+                if (!g_pads[s] && !g_virtual[s]) slot = s;
+            if (slot < 0 && slot0Free) slot = 0;  // every other seat is taken
+        }
+        if (slot < 0) {
+            SDL_CloseGamepad(f.pad);
+            continue;
+        }
+        Place(slot, f.pad);
+    }
+}
+
+// Under g_slotMutex.
+void SetVirtualLocked(int players) {
+    int want = std::clamp(players, 1, kMaxPads) - 1;
+    for (int s = 1; s < kMaxPads; ++s) {
+        if (g_virtual[s] && want > 0) {
+            --want;  // keep the ones already placed where they are
+        } else if (g_virtual[s]) {
+            g_virtual[s] = false;
+            ++g_slotGen[s];
+            std::fprintf(stderr, "[input] slot %d: virtual pad removed\n", s);
+        }
+    }
+    for (int s = 1; s < kMaxPads && want > 0; ++s) {
+        if (g_virtual[s] || g_pads[s]) continue;
+        g_virtual[s] = true;
+        ++g_slotGen[s];
+        --want;
+        std::fprintf(stderr, "[input] slot %d: virtual pad added\n", s);
+    }
 }
 
 }  // namespace
 
 void Init() {
+    std::lock_guard lock(g_slotMutex);
     if (g_ready) return;
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     g_ready = SDL_Init(SDL_INIT_GAMEPAD);
+    if (const char* v = std::getenv("LBP3_VIRTUAL_PADS")) SetVirtualLocked(std::atoi(v));
     if (g_ready) RefreshSlots();
     actions::Init();
+}
+
+bool SlotPresent(int slot, uint32_t* generation) {
+    if (slot < 0 || slot >= kMaxPads) return false;
+    std::lock_guard lock(g_slotMutex);
+    if (generation) *generation = g_slotGen[slot];
+    return slot == 0 || g_pads[slot] || g_virtual[slot];
+}
+
+std::string SlotName(int slot) {
+    if (slot < 0 || slot >= kMaxPads) return "nothing";
+    std::lock_guard lock(g_slotMutex);
+    if (g_pads[slot]) {
+        const char* name = SDL_GetGamepadName(g_pads[slot]);
+        return name ? name : "controller";
+    }
+    if (g_virtual[slot]) return "virtual pad";
+    return slot == 0 ? "keyboard" : "nothing";
+}
+
+void Refresh() {
+    std::lock_guard lock(g_slotMutex);
+    if (!g_ready) return;
+    SDL_UpdateGamepads();
+    RefreshSlots();
+}
+
+void SetVirtualPlayers(int players) {
+    std::lock_guard lock(g_slotMutex);
+    SetVirtualLocked(players);
 }
 
 bool AutoPressCross(int slot, ps4::PadData& out);
 
 // Test-run remote control (LBP3_REMOTE_INPUT=1 only): every 50 ms the game looks
-// for analysis\input_cmd.txt, queues its lines and deletes it. A line is
+// for analysis\input_cmd.txt, queues its lines and deletes it. A press or wait line may
+// start with a player, "p1".."p4" (default p1), and goes to that player's own queue, so
+// players run their sequences side by side: "p2 cross 100", "p3 lstick 1 0 500",
+// "p2 wait 300". "pads <n>" sets the number of players with virtual controllers
+// (gamepad.h, SetVirtualPlayers). A line is
 // "<button>[+<button>...] [ms]" (held that long, default 150), "lstick <x> <y> [ms]"
 // or "rstick <x> <y> [ms]" with x/y in -1..1, or "wait <ms>". Buttons: cross circle
 // square triangle options touchpad up down left right l1 r1 l2 r2 l3 r3.
@@ -121,10 +270,10 @@ struct Command {
 };
 
 std::mutex g_mutex;
-std::deque<Command> g_queue;
-uint64_t g_activeUntil = 0;
-Command g_active;
-bool g_hasActive = false;
+std::deque<Command> g_queue[kMaxPads];  // per player slot
+uint64_t g_activeUntil[kMaxPads] = {};
+Command g_active[kMaxPads];
+bool g_hasActive[kMaxPads] = {};
 
 uint32_t ButtonBit(const std::string& name) {
     static const std::pair<const char*, uint32_t> names[] = {
@@ -143,6 +292,17 @@ void Parse(const std::string& line) {
     std::istringstream in(line);
     std::string word;
     if (!(in >> word)) return;
+    int slot = 0;
+    if (word.size() == 2 && word[0] == 'p' && word[1] >= '1' && word[1] <= '0' + kMaxPads) {
+        slot = word[1] - '1';
+        if (!(in >> word)) return;
+    }
+    if (word == "pads") {  // "pads <n>": players 2..n get virtual controllers
+        int n = 1;
+        in >> n;
+        SetVirtualPlayers(n);
+        return;
+    }
     Command c;
     if (word == "f9" || word == "f10") {  // the debug hotkeys (dump / perf report)
         video::TriggerHotkey(word == "f9" ? SDLK_F9 : SDLK_F10);
@@ -193,7 +353,7 @@ void Parse(const std::string& line) {
         in >> c.ms;
     }
     std::lock_guard lock(g_mutex);
-    g_queue.push_back(c);
+    g_queue[slot].push_back(c);
 }
 
 void Poller() {
@@ -216,38 +376,34 @@ bool Apply(int slot, ps4::PadData& out) {
         std::thread(Poller).detach();
         return true;
     }();
-    if (!enabled || slot != 0) return false;
+    if (!enabled || slot < 0 || slot >= kMaxPads) return false;
     std::lock_guard lock(g_mutex);
     const uint64_t now = SDL_GetTicks();
-    if (!g_hasActive || now >= g_activeUntil) {
-        g_hasActive = false;
+    Command& active = g_active[slot];
+    if (!g_hasActive[slot] || now >= g_activeUntil[slot]) {
+        g_hasActive[slot] = false;
         // A short release between consecutive presses, so repeated buttons register.
-        if (now < g_activeUntil + 60) return true;
-        if (!g_queue.empty()) {
-            g_active = g_queue.front();
-            g_queue.pop_front();
-            g_activeUntil = now + g_active.ms;
-            g_hasActive = true;
+        if (g_activeUntil[slot] && now < g_activeUntil[slot] + 60) return true;
+        if (!g_queue[slot].empty()) {
+            active = g_queue[slot].front();
+            g_queue[slot].pop_front();
+            g_activeUntil[slot] = now + active.ms;
+            g_hasActive[slot] = true;
         }
     }
-    if (g_hasActive) {
-        out.buttons |= g_active.buttons;
+    if (g_hasActive[slot]) {
+        out.buttons |= active.buttons;
         auto axis = [](float v) { return static_cast<uint8_t>(std::clamp(128.f + v * 127.f, 0.f, 255.f)); };
-        if (g_active.left) out.leftStick = {axis(g_active.lx), axis(g_active.ly)};
-        if (g_active.right) out.rightStick = {axis(g_active.rx), axis(g_active.ry)};
+        if (active.left) out.leftStick = {axis(active.lx), axis(active.ly)};
+        if (active.right) out.rightStick = {axis(active.rx), axis(active.ry)};
     }
-    out.connected = true;
-    out.connectedCount = 1;
     return true;
 }
 
 }  // namespace remote
 
 bool Read(int slot, ps4::PadData& out, bool keyboard) {
-    // The game reads pads on its own threads and system dialogs poll from theirs; RefreshSlots
-    // closes and reopens g_pads entries, so one reader at a time.
-    static std::mutex readMutex;
-    std::lock_guard readLock(readMutex);
+    std::lock_guard readLock(g_slotMutex);
     std::memset(&out, 0, sizeof(out));
     out.leftStick = out.rightStick = {128, 128};
     out.orientation = {0.f, 0.f, 0.f, 1.f};
@@ -259,10 +415,16 @@ bool Read(int slot, ps4::PadData& out, bool keyboard) {
     RefreshSlots();
     SDL_Gamepad* p = g_pads[slot];
     if (!p) {
-        const bool remote = remote::Apply(slot, out) | AutoPressCross(slot, out);
-        if (slot != 0) return remote;
-        // Player 1 always has the keyboard, so the game sees a player without a pad.
-        actions::ApplyToFrame(out, keyboard);
+        if (slot == 0) {
+            // Player 1 always has the keyboard, so the game sees a player without a pad.
+            remote::Apply(0, out);
+            AutoPressCross(0, out);
+            actions::ApplyToFrame(out, keyboard);
+        } else if (g_virtual[slot]) {
+            remote::Apply(slot, out);  // a virtual controller: neutral unless a script presses
+        } else {
+            return false;  // nobody in this slot: disconnected
+        }
         out.connected = true;
         out.connectedCount = 1;
         return true;
@@ -340,12 +502,14 @@ bool AutoPressCross(int slot, ps4::PadData& out) {
 }
 
 void SetVibration(int slot, uint8_t largeMotor, uint8_t smallMotor) {
+    std::lock_guard lock(g_slotMutex);
     if (slot < 0 || slot >= kMaxPads || !g_pads[slot]) return;
     // The PS4 holds a rumble level until it's changed; SDL needs a duration, so use a long one.
     SDL_RumbleGamepad(g_pads[slot], largeMotor * 257, smallMotor * 257, 10000);
 }
 
 void SetLightBar(int slot, uint8_t r, uint8_t g, uint8_t b) {
+    std::lock_guard lock(g_slotMutex);
     if (slot < 0 || slot >= kMaxPads || !g_pads[slot]) return;
     SDL_SetGamepadLED(g_pads[slot], r, g, b);
 }

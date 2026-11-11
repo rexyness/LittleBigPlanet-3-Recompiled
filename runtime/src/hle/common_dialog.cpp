@@ -38,6 +38,7 @@
 #include "hle/dialog_window.h"
 #include "hle/kernel_errors.h"
 #include "hle/modal.h"
+#include "hle/savedata.h"
 
 namespace hle::common_dialog {
 namespace {
@@ -251,9 +252,9 @@ std::string DirNameString(const SaveDirName& d) { return std::string(d.data, str
 
 // The save folder, as hle/savedata.cpp lays them out.
 std::filesystem::path SaveFolder(const SaveItems* items, const std::string& dirName) {
-    std::string title = items && items->titleId ? std::string(items->titleId->data, strnlen(items->titleId->data, 10)) : "";
-    if (title.empty()) title = "CUSA00473";
-    return core::vfs::UserRoot() / "savedata" / title / std::filesystem::path(std::u8string(dirName.begin(), dirName.end()));
+    const std::string title = items && items->titleId ? std::string(items->titleId->data, strnlen(items->titleId->data, 10)) : "";
+    return savedata::SaveRoot(items ? items->userId : 1, title.c_str()) /
+           std::filesystem::path(std::u8string(dirName.begin(), dirName.end()));
 }
 
 struct SaveEntry {

@@ -96,6 +96,10 @@ target_include_directories(jpegtest PRIVATE ${SHADPS4_EXT}/stb)
 add_executable(imetest tests/imetest.cpp)
 target_link_libraries(imetest PRIVATE hle)
 
+# Local co-op offline: user service events, pads per player, seating, remote input per player.
+add_executable(cooptest tests/cooptest.cpp)
+target_link_libraries(cooptest PRIVATE hle)
+
 # System dialogs offline: drives MsgDialog/SaveDataDialog the way LBP3 does and answers the windows.
 add_executable(dialogtest tests/dialogtest.cpp)
 target_link_libraries(dialogtest PRIVATE hle)
@@ -110,7 +114,7 @@ target_link_libraries(osktest PRIVATE hle)
 add_executable(dlgtest tests/dlgtest.cpp)
 target_link_libraries(dlgtest PRIVATE hle)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest)
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()
