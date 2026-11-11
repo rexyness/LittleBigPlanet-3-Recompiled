@@ -39,7 +39,9 @@ struct Answer {
     std::u16string text;     // the confirmed text, at most maxLength units
 };
 
-// Runs once, on the presenter thread, when the player confirms or cancels. Never after Close.
+// Runs at most once, on the presenter thread, when the player confirms or cancels. Not for a
+// keyboard already closed or replaced; but a Close that races the player's answer can return
+// just before this runs, so a caller that closed must ignore a late answer (ime_dialog does).
 using AnswerFn = std::function<void(const Answer&)>;
 
 // True once a game window is presenting (Attach ran).

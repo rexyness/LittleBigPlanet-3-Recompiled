@@ -155,6 +155,10 @@ bool ReadPad(ps4::PadData& pad) {
 void EndLive() {
     if (!g_live) return;
     if (g_window) SDL_StopTextInput(g_window);
+    // A click that answered leaves its button down in ImGui and the mouse captured (the SDL3
+    // backend captures while a button is down); the release comes after the keyboard is gone.
+    if (g_imgui) ImGui::GetIO().ClearInputMouse();
+    SDL_CaptureMouse(false);
     g_live.reset();
 }
 
@@ -665,8 +669,9 @@ void DrawPanel(Live& l, const Geometry& g, ImVec2 display, bool closeHover) {
     const float titleMax = g.title.Size().x - cs.x - 24.f * s;
     if (TextSize(g_font, titleSize, title.c_str()).x > titleMax) {
         while (!title.empty() && TextSize(g_font, titleSize, (title + "...").c_str()).x > titleMax) {
-            title.pop_back();
+            // One whole UTF-8 character: its continuation bytes, then its lead byte.
             while (!title.empty() && (static_cast<unsigned char>(title.back()) & 0xC0) == 0x80) title.pop_back();
+            if (!title.empty()) title.pop_back();
         }
         title += "...";
     }
@@ -735,7 +740,12 @@ void Attach(SDL_Window* window, SDL_Renderer* renderer) {
 }
 
 bool HandleEvent(const SDL_Event& e) {
-    if (g_current.load() == 0 && !g_live) return false;
+    if (g_current.load() == 0 && !g_live) {
+        // The release of a click that closed the keyboard: the SDL3 backend still counts the
+        // button as down until it sees it.
+        if (g_imgui && e.type == SDL_EVENT_MOUSE_BUTTON_UP) ImGui_ImplSDL3_ProcessEvent(&e);
+        return false;
+    }
     Sync();
     if (!g_live) return false;
     ImGui_ImplSDL3_ProcessEvent(&e);  // the mouse

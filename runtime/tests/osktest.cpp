@@ -199,6 +199,15 @@ void TextChecks() {
     CHECK_EQ(multi.cursor(), size_t(2));
     multi.CursorDown();
     CHECK_EQ(multi.cursor(), size_t(5));
+    // Up and down never stop between the halves of a surrogate pair.
+    Keyboard pair(u"\U0001F600\nx", 30, true);  // an emoji (2 units) on line 1, the cursor after "x"
+    pair.CursorUp();                              // column 1 would be inside the pair
+    CHECK_EQ(pair.cursor(), size_t(0));
+    Keyboard pairDown(u"x\n\U0001F600", 30, true);
+    pairDown.CursorUp();                          // from the end of line 2 to after "x" (column 1)
+    CHECK_EQ(pairDown.cursor(), size_t(1));
+    pairDown.CursorDown();
+    CHECK_EQ(pairDown.cursor(), size_t(2));       // the start of line 2, not inside the pair
     multi.CursorHome();
     CHECK_EQ(multi.cursor(), size_t(3));
     multi.NewLine();
@@ -324,6 +333,19 @@ void ModeChecks() {
     sym.Activate();
     CHECK_EQ(sym.page(), 0);
     CHECK(SelAction(sym) == Action::PageNext);
+    // Up and down leave the two-row page key past both of its rows.
+    {
+        Keyboard pk(u"", 50);
+        pk.ToggleSymbols();
+        const KeySpec* pn = Find(pk.layout(), Action::PageNext);  // ">" over rows 2 and 3, column 9
+        CHECK(pk.Select(pn->row + 1, pn->col));                    // entered from its second row
+        pk.Move(-1, 0, false);
+        CHECK_EQ(pk.row(), pn->row - 1);                           // the row above it ("&")
+        CHECK(pk.Select(pn->row, pn->col));
+        pk.Move(1, 0, false);
+        CHECK_EQ(pk.row(), pn->row + 2);                           // the row below it
+        CHECK(SelAction(pk) == Action::Backspace);
+    }
     sym.ToggleSymbols();  // L2+Triangle back to letters, from a typing key
     CHECK(sym.family() == Family::Latin);
     CHECK(Enabled(sym.selected()));
