@@ -41,15 +41,22 @@ void End() {
 
 bool Active() { return g_open.load() > 0; }
 
+bool AnswerHeld(uint32_t realButtons) {
+    constexpr uint32_t kAnyButton = ps4::PAD_L3 | ps4::PAD_R3 | ps4::PAD_OPTIONS | ps4::PAD_UP | ps4::PAD_RIGHT |
+                                    ps4::PAD_DOWN | ps4::PAD_LEFT | ps4::PAD_L2 | ps4::PAD_R2 | ps4::PAD_L1 |
+                                    ps4::PAD_R1 | ps4::PAD_TRIANGLE | ps4::PAD_CIRCLE | ps4::PAD_CROSS |
+                                    ps4::PAD_SQUARE | ps4::PAD_TOUCH_PAD;
+    if (realButtons & kAnyButton) return true;
+    // Enter and Esc confirm and cancel the dialogs; once the game window has the focus
+    // again they are keyboard actions (Confirm, Back) too, and so is Backspace (Back).
+    return ((GetAsyncKeyState(VK_RETURN) | GetAsyncKeyState(VK_ESCAPE) | GetAsyncKeyState(VK_BACK)) & 0x8000) != 0;
+}
+
 bool HoldsPad(uint32_t realButtons) {
     if (g_open.load() > 0) return true;
     const int64_t until = g_releaseUntil.load();
     if (!until) return false;
-    // Enter and Esc confirm and cancel the dialog windows; once the game window has the
-    // focus again they are keyboard actions (Confirm, Back) too.
-    const bool keys = ((GetAsyncKeyState(VK_RETURN) | GetAsyncKeyState(VK_ESCAPE)) & 0x8000) != 0;
-    const bool held = (realButtons & (ps4::PAD_CROSS | ps4::PAD_CIRCLE)) != 0 || keys;
-    if (held && Now() < until) return true;
+    if (AnswerHeld(realButtons) && Now() < until) return true;
     int64_t expected = until;
     g_releaseUntil.compare_exchange_strong(expected, 0);  // a dialog that closed since keeps its own wait
     return false;

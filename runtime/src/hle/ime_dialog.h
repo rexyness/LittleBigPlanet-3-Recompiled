@@ -1,13 +1,17 @@
 // libSceImeDialog: the system text-entry dialog (naming things, chat, notes...). On a
-// PS4 the system draws a keyboard over the game; here it's a native Windows window
-// with an edit box, so the PC keyboard and Windows' own IME (CJK) work. See
-// ime_dialog.cpp for how LittleBigPlanet 3 drives it.
+// PS4 the system draws a keyboard over the game. Here each dialog gets one of two front
+// ends: the on-screen keyboard over the game window (ui/osk_overlay.h), played with the
+// pad like the PS4's, whenever a game window is presenting; otherwise (the test
+// programs, or LBP3_IME=window) a native Windows window with an edit box, where the PC
+// keyboard and Windows' own IME (CJK) work. See ime_dialog.cpp for how LittleBigPlanet 3
+// drives it.
 #pragma once
 #include <cstddef>
 #include <cstdint>
 #include <string>
 
 #include "hle/abi.h"
+#include "ui/osk_overlay.h"
 
 namespace hle::ime_dialog {
 
@@ -74,5 +78,14 @@ inline constexpr wchar_t kWindowClass[] = L"LBP3ImeDialog";
 // pressed; ScriptCancel cancels. Safe from any thread.
 void ScriptConfirm(const std::string& utf8);
 void ScriptCancel();
+
+// Test seam: the on-screen keyboard as the dialog sees it. nullptr (the default) means the
+// real one in ui/osk_overlay.h. Set it before opening a dialog, not while one is open.
+struct KeyboardHooks {
+    bool (*available)();
+    uint64_t (*show)(::ui::osk::Request request, ::ui::osk::AnswerFn onAnswer);
+    void (*close)(uint64_t id);
+};
+void SetKeyboardForTest(const KeyboardHooks* hooks);
 
 }  // namespace hle::ime_dialog
