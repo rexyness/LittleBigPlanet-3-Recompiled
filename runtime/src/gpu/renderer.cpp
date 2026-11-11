@@ -23,6 +23,7 @@
 #include "core/platform.h"
 #include "sdl_window.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/lbp3_perf.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -232,6 +233,7 @@ bool ReadbackDisplayBuffer(const DisplayBufferDesc& d, std::vector<uint8_t>& out
     split::Mark(split::FinishBegin);
     g_scheduler->Finish();  // wait for the GPU; fine for a first version
     split::Mark(split::FinishEnd);
+    Lbp3Perf::CollectGpu();  // milestone 5: the frame's GPU timestamps (LBP3_FIRST_FRAME only)
 
     vmaInvalidateAllocation(g_instance->GetAllocator(), g_staging.allocation, 0, bytes);
     out.resize(bytes);
@@ -635,6 +637,14 @@ PerfCounters ReadPerfCounters() {
     c.shaderUs = Vulkan::g_lbp3ShaderCompileUs.load();
     c.pipelineCompiles = Vulkan::g_lbp3PipelineCompiles.load();
     c.pipelineUs = Vulkan::g_lbp3PipelineCompileUs.load();
+    static_assert(PerfCounters::kFfKinds == Lbp3Perf::kKinds, "PerfCounters::kFfKinds must match Lbp3Perf::Kind");
+    if (Lbp3Perf::g_on) {
+        for (int k = 0; k < Lbp3Perf::kKinds; ++k) {
+            c.ffN[k] = Lbp3Perf::g_counters[k].n.load(std::memory_order_relaxed);
+            c.ffUs[k] = Lbp3Perf::g_counters[k].us.load(std::memory_order_relaxed);
+            c.ffBytes[k] = Lbp3Perf::g_counters[k].bytes.load(std::memory_order_relaxed);
+        }
+    }
     return c;
 }
 

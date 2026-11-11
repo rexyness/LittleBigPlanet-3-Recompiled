@@ -44,6 +44,10 @@ struct PerfCounters {
     uint64_t shaderUs = 0;
     uint32_t pipelineCompiles = 0;  // first-sight Vulkan pipelines (after boot's warm-up)
     uint64_t pipelineUs = 0;
+    // The video core's first-frame counters (shadPS4's video_core/lbp3_perf.h, Lbp3Perf::Kind
+    // order), counted only with LBP3_FRAME_SPLIT or LBP3_FIRST_FRAME: count, us, bytes.
+    static constexpr int kFfKinds = 20;
+    uint64_t ffN[kFfKinds] = {}, ffUs[kFfKinds] = {}, ffBytes[kFfKinds] = {};
 };
 PerfCounters ReadPerfCounters();
 // Early releases per call site, totals since start: [0] the main thread's WaitIdle before a

@@ -25,6 +25,33 @@
 //   period_us         flip to flip (this frame's on-screen period as the game sees it)
 //   pipelines, pipeline_us, shaders, shader_us
 //                     first-sight compiles between the hand-over and the flip, and their time
+//   flip_buffers, flip_dwords, first_to_last_enq_us, pre_submits, pre_buffers, pre_dwords,
+//   pre_submit_us     the flip submit's command buffers and their hand-overs; earlier submits
+//
+// First-frame columns (milestone 5, perf/intro_stalls.md), over the WHOLE frame: from the first
+// command buffer's hand-over to the flip (all of the frame's buffers, its Finish and readback),
+// from the video core's Lbp3Perf counters (shadPS4 video_core/lbp3_perf.h). _n counts, _us
+// microseconds of CPU time on the command processor unless named gpu, _kb kilobytes:
+//   ff_record_us      first hand-over to the flip packet: recording every buffer of the frame
+//   ff_draws, ff_dispatches      draws and dispatches that reached resource binding
+//   ff_bufsync_*      buffer cache uploads of CPU-written guest memory (memcpy to staging + copy)
+//   ff_staging_*      staging pool requests (may wait for the GPU); _new: new blocks, their KB
+//   ff_resident_*     device memory allocated to back sparse arenas
+//   ff_arena_*        new sparse arenas
+//   ff_img_new*       new images created and registered by the texture cache
+//   ff_img_alloc_*    vmaCreateImage; ff_buf_alloc_*: vmaCreateBuffer
+//   ff_vma_mem_*      vkAllocateMemory calls made by VMA (count, KB)
+//   ff_img_refresh_*  image uploads (RefreshImage: buffer sync + detile + copy; nests the above)
+//   ff_detile_*       detile dispatches recorded; ff_expand_*: image expansions
+//   ff_res_bind_us    resource binding per draw/dispatch (nests the caches above);
+//   ff_desc_bind_us   descriptor writes/pushes
+//   ff_gpu_copy_*, ff_gpu_upload_*, ff_gpu_detile_*
+//                     GPU time of buffer copies, buffer-to-image uploads and detile dispatches
+//                     (timestamp pairs; LBP3_FIRST_FRAME only, else 0); ff_gpu_overflow: pairs
+//                     skipped because the timestamp pool was full
+// LBP3_FIRST_FRAME=1 turns all of this on (and the GPU timestamps); LBP3_FRAME_SPLIT=1 alone
+// gives the CPU counters. A frame whose ff_record_us exceeds 50 ms also prints a one-line
+// "[first-frame] ..." breakdown to stderr.
 //
 // A missing point (e.g. no readback) shows as -1. The file is flushed every 60 rows and when
 // the status line prints; kill the game and the last few rows may be lost.
@@ -56,6 +83,7 @@ struct Slot {
     std::atomic<int> waitIdleResult{-1}, submitResult{-1};
     std::atomic<int64_t> mainCpuUs{-1}, periodUs{-1};
     PerfCounters at0{}, at1{};  // counters at Enqueued (main) and at Flipped (command processor)
+    PerfCounters atFirst{};     // counters at the frame's first hand-over (whole-frame columns)
     std::atomic<int> parts{0};  // 1: released, 2: flipped
     // The flip submit's buffers, the first buffer's hand-over, and the frame's earlier
     // sceGnmSubmitCommandBuffers calls (no flip) since the previous flip submit.
@@ -74,9 +102,46 @@ int64_t g_lastFlippedUs = -1;   // command-processor thread only
 int64_t g_preUs = 0;
 uint32_t g_preCalls = 0, g_preBufs = 0, g_preDw = 0;
 
+// The first-frame columns (whole frame: first hand-over to the flip), from the video core's
+// Lbp3Perf counters (PerfCounters::ff*, Lbp3Perf::Kind order). N = count, US = microseconds,
+// KB = bytes / 1024.
+enum Field { N, US, KB };
+struct FfColumn {
+    const char* name;
+    int kind;
+    Field field;
+};
+constexpr FfColumn kFfColumns[] = {
+    {"ff_draws", 14, N},          {"ff_dispatches", 15, N},
+    {"ff_bufsync_n", 0, N},       {"ff_bufsync_us", 0, US},       {"ff_bufsync_kb", 0, KB},
+    {"ff_staging_n", 1, N},       {"ff_staging_us", 1, US},       {"ff_staging_new", 2, N},
+    {"ff_staging_new_kb", 2, KB}, {"ff_resident_n", 3, N},        {"ff_resident_us", 3, US},
+    {"ff_resident_kb", 3, KB},    {"ff_arena_new", 4, N},         {"ff_arena_us", 4, US},
+    {"ff_img_new", 5, N},         {"ff_img_new_us", 5, US},       {"ff_img_alloc_n", 6, N},
+    {"ff_img_alloc_us", 6, US},   {"ff_img_alloc_kb", 6, KB},     {"ff_buf_alloc_n", 7, N},
+    {"ff_buf_alloc_us", 7, US},   {"ff_buf_alloc_kb", 7, KB},     {"ff_vma_mem_n", 8, N},
+    {"ff_vma_mem_kb", 8, KB},     {"ff_img_refresh_n", 9, N},     {"ff_img_refresh_us", 9, US},
+    {"ff_img_refresh_kb", 9, KB}, {"ff_detile_n", 10, N},         {"ff_detile_us", 10, US},
+    {"ff_expand_n", 11, N},       {"ff_expand_us", 11, US},       {"ff_res_bind_us", 12, US},
+    {"ff_desc_bind_us", 13, US},  {"ff_gpu_copy_n", 16, N},       {"ff_gpu_copy_us", 16, US},
+    {"ff_gpu_upload_n", 17, N},   {"ff_gpu_upload_us", 17, US},   {"ff_gpu_detile_n", 18, N},
+    {"ff_gpu_detile_us", 18, US}, {"ff_gpu_overflow", 19, N},
+};
+
+uint64_t FfValue(const PerfCounters& a, const PerfCounters& b, int kind, Field f) {
+    switch (f) {
+    case N: return b.ffN[kind] - a.ffN[kind];
+    case US: return b.ffUs[kind] - a.ffUs[kind];
+    default: return (b.ffBytes[kind] - a.ffBytes[kind]) / 1024;
+    }
+}
+
+// Frames whose recording (first hand-over to the flip packet) is longer get a [first-frame] line.
+constexpr int64_t kFirstFrameLogUs = 50000;
+
 bool Open() {
     static const bool on = [] {
-        if (!std::getenv("LBP3_FRAME_SPLIT")) return false;
+        if (!std::getenv("LBP3_FRAME_SPLIT") && !std::getenv("LBP3_FIRST_FRAME")) return false;
         g_csv = std::fopen("analysis\\frame_split.csv", "w");
         if (!g_csv) {
             std::fprintf(stderr, "[split] can't write analysis\\frame_split.csv\n");
@@ -86,8 +151,10 @@ bool Open() {
                      "frame,submit_ms,main_cpu_us,waitidle_us,waitidle_rel,prep_us,record_us,gfx_blocked_us,"
                      "gfx_blocked_waits,finish_us,copy_us,slot_us,present_us,release_after_flip_us,submit_rel,"
                      "period_us,pipelines,pipeline_us,shaders,shader_us,flip_buffers,flip_dwords,"
-                     "first_to_last_enq_us,pre_submits,pre_buffers,pre_dwords,pre_submit_us\n");
-        std::fprintf(stderr, "[split] writing analysis\\frame_split.csv (LBP3_FRAME_SPLIT)\n");
+                     "first_to_last_enq_us,pre_submits,pre_buffers,pre_dwords,pre_submit_us,ff_record_us");
+        for (const FfColumn& c : kFfColumns) std::fprintf(g_csv, ",%s", c.name);
+        std::fprintf(g_csv, "\n");
+        std::fprintf(stderr, "[split] writing analysis\\frame_split.csv (LBP3_FRAME_SPLIT / LBP3_FIRST_FRAME)\n");
         return true;
     }();
     return on;
@@ -113,7 +180,7 @@ void WriteRow(uint64_t frame, Slot& s) {
     const int64_t firstToLast =
         s.firstEnq.load() && s.t[Enqueued].load() ? s.t[Enqueued].load() - s.firstEnq.load() : -1;
     std::fprintf(g_csv, "%llu,%.3f,%lld,%lld,%d,%lld,%lld,%lld,%u,%lld,%lld,%lld,%lld,%lld,%d,%lld,%u,%llu,%u,%llu,"
-                        "%u,%u,%lld,%u,%u,%u,%lld\n",
+                        "%u,%u,%lld,%u,%u,%u,%lld",
                  static_cast<unsigned long long>(frame), s.t[SubmitEnter].load() / 1000.0,
                  static_cast<long long>(s.mainCpuUs.load()), static_cast<long long>(Span(s, SubmitEnter, WaitIdleEnd)),
                  s.waitIdleResult.load(), static_cast<long long>(Span(s, WaitIdleEnd, Enqueued)),
@@ -128,6 +195,31 @@ void WriteRow(uint64_t frame, Slot& s) {
                  static_cast<unsigned long long>(s.at1.shaderUs - s.at0.shaderUs), s.flipBufs.load(), s.flipDw.load(),
                  static_cast<long long>(firstToLast), s.preCalls.load(), s.preBufs.load(), s.preDw.load(),
                  static_cast<long long>(s.preUs.load()));
+    // The whole frame's recording and the video core's counters over it (first hand-over to flip).
+    const bool haveFirst = s.firstEnq.load() != 0;
+    const int64_t ffRecordUs = haveFirst && s.t[FlipIrq].load() ? s.t[FlipIrq].load() - s.firstEnq.load() : -1;
+    const PerfCounters& from = haveFirst ? s.atFirst : s.at0;
+    std::fprintf(g_csv, ",%lld", static_cast<long long>(ffRecordUs));
+    for (const FfColumn& c : kFfColumns)
+        std::fprintf(g_csv, ",%llu", static_cast<unsigned long long>(FfValue(from, s.at1, c.kind, c.field)));
+    std::fprintf(g_csv, "\n");
+    if (ffRecordUs > kFirstFrameLogUs) {
+        auto v = [&](int kind, Field f) { return static_cast<unsigned long long>(FfValue(from, s.at1, kind, f)); };
+        std::fprintf(stderr,
+                     "[first-frame] frame %llu: recording %.1f ms over %u buffers, GPU %.1f ms, %llu draws, "
+                     "%llu dispatches | buffer sync %llu x %.1f ms %llu KB | staging %.1f ms, %llu new | resident "
+                     "%llu x %.1f ms %llu KB | arenas %llu | new images %llu x %.1f ms | image alloc %llu x %.1f ms "
+                     "%llu KB | buffer alloc %llu x %.1f ms | VMA memory %llu x %llu KB | refresh %llu x %.1f ms "
+                     "%llu KB | detile %llu x %.1f ms | expand %llu x %.1f ms | bind %.1f ms, descriptors %.1f ms | "
+                     "GPU copy %llu x %.1f ms, upload %llu x %.1f ms, detile %llu x %.1f ms (overflow %llu)\n",
+                     static_cast<unsigned long long>(frame), ffRecordUs / 1000.0, s.flipBufs.load(),
+                     Span(s, FinishBegin, FinishEnd) / 1000.0, v(14, N), v(15, N), v(0, N), v(0, US) / 1000.0,
+                     v(0, KB), v(1, US) / 1000.0, v(2, N), v(3, N), v(3, US) / 1000.0, v(3, KB), v(4, N), v(5, N),
+                     v(5, US) / 1000.0, v(6, N), v(6, US) / 1000.0, v(6, KB), v(7, N), v(7, US) / 1000.0, v(8, N),
+                     v(8, KB), v(9, N), v(9, US) / 1000.0, v(9, KB), v(10, N), v(10, US) / 1000.0, v(11, N),
+                     v(11, US) / 1000.0, v(12, US) / 1000.0, v(13, US) / 1000.0, v(16, N), v(16, US) / 1000.0,
+                     v(17, N), v(17, US) / 1000.0, v(18, N), v(18, US) / 1000.0, v(19, N));
+    }
     static unsigned rows = 0;
     if (++rows % 60 == 0) std::fflush(g_csv);
 }
@@ -148,7 +240,7 @@ uint64_t BeginFrame() {
     for (auto& t : s.t) t = 0;
     s.waitIdleResult = s.submitResult = -1;
     s.periodUs = -1;
-    s.at0 = s.at1 = PerfCounters{};
+    s.at0 = s.at1 = s.atFirst = PerfCounters{};
     s.parts = 0;
     s.firstEnq = 0;
     s.flipBufs = s.flipDw = 0;
@@ -176,7 +268,10 @@ void Mark(Point p) {
     Slot* s = SlotFor(frame);
     if (!s) return;
     const int64_t now = NowUs();
-    if (p == Enqueued && !s->firstEnq.load()) s->firstEnq = now;
+    if (p == Enqueued && !s->firstEnq.load()) {
+        s->firstEnq = now;
+        s->atFirst = ReadPerfCounters();
+    }
     s->t[p] = now;
     switch (p) {
     case Enqueued: s->at0 = ReadPerfCounters(); break;

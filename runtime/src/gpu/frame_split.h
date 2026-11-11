@@ -1,6 +1,7 @@
-// Milestone 5 measurement: where each frame's time goes. With LBP3_FRAME_SPLIT=1 every flipped
-// frame becomes one row of analysis\frame_split.csv (columns: frame_split.cpp). Off, every
-// call is a branch on a static bool.
+// Milestone 5 measurement: where each frame's time goes. With LBP3_FRAME_SPLIT=1 (or
+// LBP3_FIRST_FRAME=1, which adds GPU timestamps around uploads) every flipped frame becomes one
+// row of analysis\frame_split.csv (columns: frame_split.cpp). Off, every call is a branch on a
+// static bool.
 //
 // A frame is followed by an id from the game's main thread, which starts it in
 // sceGnmSubmitAndFlipCommandBuffers (BeginFrame), to the command-processor thread, which
