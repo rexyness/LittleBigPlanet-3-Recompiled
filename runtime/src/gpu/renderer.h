@@ -17,17 +17,39 @@ bool Active();
 void MapMemory(uint64_t addr, uint64_t size);
 void UnmapMemory(uint64_t addr, uint64_t size);
 
-// Queues one graphics command buffer pair (sizes in bytes) for the GPU model.
-// The first call also sends the SDK's hardware init sequence, like the Gnm driver.
-void SubmitGfx(const uint32_t* dcb, uint32_t dcbBytes, const uint32_t* ccb, uint32_t ccbBytes);
+// How a wait for the GPU model returned (shadPS4's Liverpool::WaitResult): idle, released
+// early because the queue blocked on an address the guest is known to write after its
+// submit, released after the 20 ms grace, or not waited for (LBP3_GPU_ASYNC).
+enum WaitResult : int { kWaitNone = -1, kWaitIdle = 0, kWaitReleasedKnown = 1, kWaitReleasedGrace = 2 };
 
-// Blocks until the GPU model has processed everything submitted so far.
-void WaitIdle();
+// Queues one graphics command buffer pair (sizes in bytes) for the GPU model and waits for
+// the graphics queue (idle or blocked). The first call also sends the SDK's hardware init
+// sequence, like the Gnm driver.
+int SubmitGfx(const uint32_t* dcb, uint32_t dcbBytes, const uint32_t* ccb, uint32_t ccbBytes);
+
+// Blocks until the GPU model has processed everything submitted so far (or every queue
+// still busy is blocked on a wait).
+int WaitIdle();
 // How often a submit returned before the GPU finished (it stayed blocked on a wait), since
 // the last call.
 uint32_t TakeEarlyReleases();
 // How many wait addresses were found to be written by the guest after its submit (total).
 uint32_t LearnedWaits();
+
+// Milestone 5 measurement: totals since start (read with deltas).
+struct PerfCounters {
+    uint64_t gfxBlockedNs = 0;      // graphics queue blocked on WAIT_REG_MEM / MEM_SEMAPHORE
+    uint32_t gfxBlockedWaits = 0;
+    uint32_t shaderCompiles = 0;    // first-sight GCN -> SPIR-V -> shader module
+    uint64_t shaderUs = 0;
+    uint32_t pipelineCompiles = 0;  // first-sight Vulkan pipelines (after boot's warm-up)
+    uint64_t pipelineUs = 0;
+};
+PerfCounters ReadPerfCounters();
+// Early releases per call site, totals since start: [0] the main thread's WaitIdle before a
+// submit, [1] the async compute submit (DingDong), [2] the graphics submit's wait; [site][0]
+// released on a known address, [site][1] after the 20 ms grace.
+void ReadReleaseCounts(uint32_t out[3][2]);
 
 // Async compute rings (sceGnmMapComputeQueue / sceGnmDingDong). MapComputeQueue returns
 // the 1-based virtual queue id, or a negative error.

@@ -23,6 +23,7 @@
 #include "hle/kernel_sync.h"
 #include "hle/pm4.h"
 #include "hle/register.h"
+#include "gpu/frame_split.h"
 #include "gpu/renderer.h"
 #include "video/presenter.h"
 
@@ -56,7 +57,7 @@ gpu::DisplayBufferDesc g_displayBuffers[16];
 
 // With the GPU model active, a flip completes when the command processor
 // reaches the frame's flip packet (GfxFlip interrupt), not at submit time.
-struct PendingFlip { int buffer; int64_t arg; };
+struct PendingFlip { int buffer; int64_t arg; uint64_t splitFrame = 0; };  // splitFrame: gpu/frame_split.h
 std::mutex g_pendingMutex;
 std::deque<PendingFlip> g_pendingFlips;
 constexpr uint32_t kIrqGfxFlip = 0x08;
@@ -108,7 +109,9 @@ int g_paceTimerFlips = 0;
 void WaitFlipSlot() {
     static Clock::time_point lastEnd = Clock::now();
     const auto start = Clock::now();
+    gpu::split::Mark(gpu::split::SlotBegin);
     const bool vsynced = WaitFlipSlotInner();
+    gpu::split::Mark(gpu::split::SlotEnd);
     const auto end = Clock::now();
     const double waitMs = std::chrono::duration<double, std::milli>(end - start).count();
     const double workMs = std::chrono::duration<double, std::milli>(start - lastEnd).count();
@@ -129,6 +132,32 @@ void WaitFlipSlot() {
                      vsynced ? 'v' : 't', static_cast<unsigned long long>(video::VBlankCount()));
         if (n % 300 == 0) std::fflush(csv);
     }
+}
+
+// Milestone 5 measurement, printed after each [video] line (always on; counters only):
+// first-sight compiles in the window and their time, the graphics queue's blocked time per
+// frame and the number of blocked waits, and early releases per call site (released on a
+// known address + after the 20 ms grace): the main thread's wait before a submit, the async
+// compute submit, the graphics submit.
+void PrintPerfLine() {
+    static gpu::PerfCounters last{};
+    static uint32_t lastRel[3][2] = {};
+    const gpu::PerfCounters now = gpu::ReadPerfCounters();
+    uint32_t rel[3][2];
+    gpu::ReadReleaseCounts(rel);
+    std::fprintf(stderr,
+                 "[perf] compiled %u pipelines (%.0f ms), %u shaders (%.0f ms); gfx blocked %.1f ms/frame in %u waits; "
+                 "early releases: wait-idle %u+%u, compute %u+%u, submit %u+%u (known+grace)\n",
+                 now.pipelineCompiles - last.pipelineCompiles, (now.pipelineUs - last.pipelineUs) / 1000.0,
+                 now.shaderCompiles - last.shaderCompiles, (now.shaderUs - last.shaderUs) / 1000.0,
+                 static_cast<double>(now.gfxBlockedNs - last.gfxBlockedNs) / 1e6 / kFlipsPerStatus,
+                 now.gfxBlockedWaits - last.gfxBlockedWaits, rel[0][0] - lastRel[0][0], rel[0][1] - lastRel[0][1],
+                 rel[1][0] - lastRel[1][0], rel[1][1] - lastRel[1][1], rel[2][0] - lastRel[2][0],
+                 rel[2][1] - lastRel[2][1]);
+    last = now;
+    for (int s = 0; s < 3; ++s)
+        for (int k = 0; k < 2; ++k) lastRel[s][k] = rel[s][k];
+    gpu::split::Flush();
 }
 
 // Reports a completed flip to the game.
@@ -154,6 +183,7 @@ void SignalFlip(int64_t flipArg) {
                      VideoCore::g_lbp3ImageReadbacks.exchange(0),
                      gpu::TakeEarlyReleases(), gpu::LearnedWaits(), g_paceWorkMs / kFlipsPerStatus,
                      g_paceWaitMs / kFlipsPerStatus, g_paceTimerFlips);
+        PrintPerfLine();
         sumMs = worstMs = 0;
         slow = 0;
         g_paceWaitMs = g_paceWorkMs = 0;
@@ -187,7 +217,7 @@ int PS4_SYSV_ABI sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index,
         // GPU interrupts fire the game's sceGnmAddEqEvent registrations with that id.
         gpu::SetInterruptHandler([](uint32_t irq) {
             if (irq == kIrqGfxFlip) {
-                PendingFlip f{-1, 0};
+                PendingFlip f{-1, 0, 0};
                 {
                     std::lock_guard pl(g_pendingMutex);
                     if (!g_pendingFlips.empty()) {
@@ -196,6 +226,8 @@ int PS4_SYSV_ABI sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index,
                     }
                 }
                 if (f.buffer >= 0) {
+                    gpu::split::SetCpFrame(f.splitFrame);
+                    gpu::split::Mark(gpu::split::FlipIrq);
                     video::PresentBuffer(f.buffer);
                     // Pull the rendered image back for our window (on the GPU thread).
                     static std::vector<uint8_t> pixels;  // recycled through the presenter
@@ -208,6 +240,8 @@ int PS4_SYSV_ABI sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index,
                     WaitFlipSlot();
                     if (got) video::PresentPixels(pixels, w, h);
                     SignalFlip(f.arg);
+                    gpu::split::Mark(gpu::split::Flipped);
+                    gpu::split::SetCpFrame(0);
                 }
                 return;
             }
@@ -345,7 +379,8 @@ bool PatchFlipRequest(uint32_t* cmd, uint32_t sizeDw, uint32_t bufferIndex) {
 
 // Runs the memory-writing packets of each buffer, then raises the GPU
 // interrupts the game listens for.
-void Process(uint32_t count, void* const* dcbs, const uint32_t* dcbSizes, void* const* ccbs, const uint32_t* ccbSizes) {
+// Returns how the last graphics submit's wait returned (gpu::WaitResult), or kWaitNone.
+int Process(uint32_t count, void* const* dcbs, const uint32_t* dcbSizes, void* const* ccbs, const uint32_t* ccbSizes) {
     if (gpu::Active()) {
         // shadPS4's command processor executes the buffers and raises the interrupts.
         for (uint32_t i = 0; i < count; ++i) {
@@ -358,10 +393,11 @@ void Process(uint32_t count, void* const* dcbs, const uint32_t* dcbSizes, void* 
                 std::fprintf(stderr, "\n");
             }
         }
+        int result = gpu::kWaitNone;
         for (uint32_t i = 0; i < count; ++i)
-            gpu::SubmitGfx(static_cast<const uint32_t*>(dcbs[i]), dcbSizes[i],
-                           ccbs ? static_cast<const uint32_t*>(ccbs[i]) : nullptr, ccbSizes ? ccbSizes[i] : 0);
-        return;
+            result = gpu::SubmitGfx(static_cast<const uint32_t*>(dcbs[i]), dcbSizes[i],
+                                    ccbs ? static_cast<const uint32_t*>(ccbs[i]) : nullptr, ccbSizes ? ccbSizes[i] : 0);
+        return result;
     }
     bool irq = false;
     static std::atomic<int> submits{0};
@@ -377,6 +413,7 @@ void Process(uint32_t count, void* const* dcbs, const uint32_t* dcbSizes, void* 
                          static_cast<unsigned long long>(d.lastColorTarget), d.interrupt ? ", irq" : "");
     }
     if (irq) videoout::SignalGpuEvents();
+    return gpu::kWaitNone;
 }
 
 }  // namespace
@@ -452,14 +489,18 @@ int PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void* const* 
     (void)noted;
     TraceSimSteps();
     if (count && gpu::Active()) {
+        const uint64_t splitFrame = gpu::split::BeginFrame();  // LBP3_FRAME_SPLIT measurement
         // Like the real driver: the previous frame must be done before this one is patched.
-        gpu::WaitIdle();
+        const int idleResult = gpu::WaitIdle();
+        gpu::split::Mark(gpu::split::WaitIdleEnd);
         if (PatchFlipRequest(static_cast<uint32_t*>(dcbs[count - 1]), dcbSizes[count - 1] / 4, displayBufferIndex)) {
             {
                 std::lock_guard pl(videoout::g_pendingMutex);
-                videoout::g_pendingFlips.push_back({static_cast<int>(displayBufferIndex), flipArg});
+                videoout::g_pendingFlips.push_back({static_cast<int>(displayBufferIndex), flipArg, splitFrame});
             }
-            Process(count, dcbs, dcbSizes, ccbs, ccbSizes);
+            const int submitResult = Process(count, dcbs, dcbSizes, ccbs, ccbSizes);
+            gpu::split::SetResults(idleResult, submitResult);
+            gpu::split::Mark(gpu::split::Released);
             return kernel::SCE_OK;  // flip completes on the GfxFlip interrupt
         }
     }
