@@ -260,11 +260,14 @@ struct SaveEntry {
     std::string dirName;
     std::wstring label;
     int64_t modified = 0;  // seconds since 1970, 0 = unknown
+    std::wstring icon;     // the save's ICON0.PNG if it has one (the overlay draws it beside the label)
 };
 
 SaveEntry DescribeSave(const SaveItems* items, const std::string& dirName) {
     SaveEntry e{dirName, Wide(dirName.c_str(), 32), 0};
     std::error_code ec;
+    const std::filesystem::path icon = SaveFolder(items, dirName) / "ICON0.PNG";
+    if (std::filesystem::is_regular_file(icon, ec)) e.icon = icon.wstring();
     const auto t = std::filesystem::last_write_time(SaveFolder(items, dirName), ec);
     if (ec) return e;
     const auto sys = std::chrono::clock_cast<std::chrono::system_clock>(t);
@@ -439,7 +442,10 @@ int32_t OpenList(const SaveDataDialogParam& p, Spec& s, std::function<void(const
     s.button2 = L"Cancel";
     s.cancelButton = 2;
     s.autoAnswer = 2;  // loading replaces what's in memory; saving could overwrite: cancel changes nothing
-    for (const auto& e : entries) s.items.push_back(e.label);
+    for (const auto& e : entries) {
+        s.items.push_back(e.label);
+        s.itemIcons.push_back(e.icon);
+    }
     s.focus = focus;
     std::fprintf(stderr, "[dialog] savedata: list (%s), %u saved data%s\n",
                  p.dispType == kSaveDispLoad ? "load" : p.dispType == kSaveDispDelete ? "delete" : "save",

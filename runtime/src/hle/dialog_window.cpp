@@ -37,6 +37,13 @@ public:
     uint32_t prevButtons = ~0u;  // so a button already held when the dialog opens doesn't count
     uint64_t lastPadMs = 0;
     bool autoAnswered = false;
+
+    // The ImGui overlay (ui/dialog_overlay.h) instead of a window. Its answer arrives on the
+    // presenter thread, the game's Close and LBP3_AUTOPRESS on game threads: `outcome` and
+    // `done` are written under answerMutex, first writer wins.
+    bool overlay = false;               // set before Show returns, then read-only
+    std::atomic<uint64_t> overlayId{0};
+    std::mutex answerMutex;
 };
 
 namespace {
@@ -60,6 +67,76 @@ bool AutoPressOn() {
     if (mode >= 0) return mode == 1;
     static const bool env = std::getenv("LBP3_AUTOPRESS") != nullptr;
     return env;
+}
+
+// ---- the overlay front end
+
+std::atomic<const OverlayForTest*> g_overlayHooks{nullptr};
+std::atomic<int> g_frontEndMode{-1};
+
+bool OverlayAvailable() {
+    const OverlayForTest* h = g_overlayHooks.load();
+    return h ? h->available() : ui::dialog::Available();
+}
+uint64_t OverlayShow(ui::dialog::Request r, ui::dialog::AnswerFn fn) {
+    const OverlayForTest* h = g_overlayHooks.load();
+    return h ? h->show(std::move(r), std::move(fn)) : ui::dialog::Show(std::move(r), std::move(fn));
+}
+void OverlayProgress(uint64_t id, uint32_t percent) {
+    const OverlayForTest* h = g_overlayHooks.load();
+    h ? h->setProgress(id, percent) : ui::dialog::SetProgress(id, percent);
+}
+void OverlayClose(uint64_t id) {
+    const OverlayForTest* h = g_overlayHooks.load();
+    h ? h->close(id) : ui::dialog::Close(id);
+}
+
+// LBP3_DIALOGS=window keeps the native windows even with a game window up.
+bool WindowsForced() {
+    const int mode = g_frontEndMode.load();
+    if (mode >= 0) return mode == 1;
+    static const bool env = [] {
+        const char* v = std::getenv("LBP3_DIALOGS");
+        return v && std::strcmp(v, "window") == 0;
+    }();
+    return env;
+}
+
+ui::dialog::Request ToRequest(const Spec& s, bool padIgnored) {
+    ui::dialog::Request r;
+    switch (s.kind) {
+    case Kind::Message: r.kind = ui::dialog::Kind::Message; break;
+    case Kind::List: r.kind = ui::dialog::Kind::List; break;
+    case Kind::Progress: r.kind = ui::dialog::Kind::Progress; break;
+    }
+    switch (s.icon) {
+    case Icon::None: r.icon = ui::dialog::Icon::None; break;
+    case Icon::Info: r.icon = ui::dialog::Icon::Info; break;
+    case Icon::Question: r.icon = ui::dialog::Icon::Question; break;
+    case Icon::Warning: r.icon = ui::dialog::Icon::Warning; break;
+    case Icon::Error: r.icon = ui::dialog::Icon::Error; break;
+    }
+    r.text = s.text;
+    r.button1 = s.button1;
+    r.button2 = s.button2;
+    r.defaultButton = s.defaultButton;
+    r.cancelButton = s.cancelButton;  // kDismiss is -1 in both
+    for (size_t i = 0; i < s.items.size(); ++i)
+        r.items.push_back({s.items[i], i < s.itemIcons.size() ? s.itemIcons[i] : std::wstring()});
+    r.focus = s.focus;
+    r.progress = 0;  // SetProgress follows
+    r.padIgnored = padIgnored;
+    r.logName = s.logName;
+    return r;
+}
+
+// Overlay mode: the first answer stands (the player's, LBP3_AUTOPRESS's or the game's Close).
+bool Record(Window& w, Outcome o) {
+    std::lock_guard lock(w.answerMutex);
+    if (w.done.load()) return false;
+    w.outcome = o;
+    w.done.store(true);
+    return true;
 }
 
 bool ReadPad(uint32_t& buttons) {
@@ -408,11 +485,50 @@ void Run(std::shared_ptr<Window> w) {
 
 std::shared_ptr<Window> Show(Spec spec) {
     auto w = std::make_shared<Window>(std::move(spec));
+    if (!WindowsForced() && OverlayAvailable()) {
+        w->overlay = true;
+        std::fprintf(stderr, "[dialog] %s: on the overlay\n", w->spec.logName);
+        // The answer comes on the presenter thread, possibly after the game is done with the
+        // dialog (common_dialog drops its Window on Close): hence the weak pointer.
+        std::weak_ptr<Window> weak = w;
+        const uint64_t id = OverlayShow(ToRequest(w->spec, AutoPressOn()), [weak](const ui::dialog::Answer& a) {
+            if (auto self = weak.lock()) Record(*self, {a.button, a.item});
+        });
+        w->overlayId.store(id);
+        if (!id) {  // as a window that failed: don't leave the game waiting
+            std::fprintf(stderr, "[dialog] %s: the overlay didn't take the dialog\n", w->spec.logName);
+            Record(*w, {w->spec.cancelButton ? w->spec.cancelButton : 0, -1});
+        }
+        return w;
+    }
+    std::fprintf(stderr, "[dialog] %s: on a window\n", w->spec.logName);
     std::thread(Run, w).detach();
     return w;
 }
 
 bool Poll(Window& w, Outcome& out) {
+    if (w.overlay) {
+        // The overlay reads the pad itself; only LBP3_AUTOPRESS is answered here.
+        if (!w.done.load() && AutoPressOn() && w.spec.autoAnswer) {
+            std::lock_guard lock(w.padMutex);
+            const int b = w.spec.autoAnswer;
+            const uint64_t id = w.overlayId.load();
+            if (!w.autoAnswered && id && GetTickCount64() - w.openedMs >= g_autoAnswerMs.load() &&
+                (b == kDismiss || HasButton(w.spec, b))) {
+                w.autoAnswered = true;
+                std::fprintf(stderr, "[dialog] %s: LBP3_AUTOPRESS answers \"%s\"\n", w.spec.logName,
+                             ButtonName(w.spec, b).c_str());
+                int item = -1;  // as the window: button 1 of a list takes the selected (first-focused) entry
+                if (w.spec.kind == Kind::List && b == 1 && !w.spec.items.empty())
+                    item = std::clamp<int>(w.spec.focus, 0, static_cast<int>(w.spec.items.size()) - 1);
+                if (Record(w, {b, item})) OverlayClose(id);
+            }
+        }
+        if (!w.done.load()) return false;
+        std::lock_guard lock(w.answerMutex);
+        out = w.outcome;
+        return true;
+    }
     if (w.done.load()) {
         out = w.outcome;
         return true;
@@ -452,17 +568,29 @@ bool Poll(Window& w, Outcome& out) {
 
 void SetProgress(Window& w, uint32_t percent) {
     w.progress.store(std::min<uint32_t>(percent, 100));
+    if (w.overlay) {
+        if (const uint64_t id = w.overlayId.load()) OverlayProgress(id, w.progress.load());
+        return;
+    }
     if (HWND h = w.hwnd.load()) PostMessageW(h, kMsgProgress, w.progress.load(), 0);
 }
 
 void Close(Window& w) {
     w.closeRequested.store(true);
+    if (w.overlay) {
+        Record(w, {0, -1});  // closed by the game, unless already answered
+        if (const uint64_t id = w.overlayId.load()) OverlayClose(id);
+        return;
+    }
     if (HWND h = w.hwnd.load()) PostMessageW(h, kMsgClose, 0, 0);
 }
 
 void* NativeHandle(const Window& w) { return w.hwnd.load(); }
+bool OnOverlay(const Window& w) { return w.overlay; }
 void SetPadReaderForTest(PadReader reader) { g_padReader.store(reader); }
 void SetAutoPressForTest(int mode) { g_autoPressMode.store(mode); }
 void SetAutoAnswerDelayForTest(uint32_t ms) { g_autoAnswerMs.store(ms); }
+void SetOverlayForTest(const OverlayForTest* overlay) { g_overlayHooks.store(overlay); }
+void SetFrontEndForTest(int mode) { g_frontEndMode.store(mode); }
 
 }  // namespace hle::dialog_ui

@@ -10,11 +10,20 @@
 // ignore the pad then and, after a moment, press Spec::autoAnswer instead: the
 // caller sets it to the choice that changes nothing (No, Cancel, or OK where
 // OK is the only answer).
+//
+// Front end: while the game window is presenting, a dialog is drawn over it with
+// Dear ImGui instead (ui/dialog_overlay.h), with the same buttons and controls;
+// LBP3_DIALOGS=window keeps the native windows. The overlay reads the pad itself,
+// and its answer is recorded here for Poll to hand to the game thread. Each
+// dialog logs which one it opened on ("[dialog] <name>: on the overlay" or
+// "... on a window").
 #pragma once
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
+
+#include "ui/dialog_overlay.h"
 
 namespace hle::dialog_ui {
 
@@ -32,6 +41,8 @@ struct Spec {
     int defaultButton = 1;          // 1 or 2: focused at first, so Cross and Enter press it
     int cancelButton = 0;           // what Circle, Esc and the close box do: 1, 2, kDismiss or 0 (nothing)
     std::vector<std::wstring> items;  // Kind::List entries
+    std::vector<std::wstring> itemIcons;  // Kind::List: a PNG per entry (the save's ICON0.PNG), parallel
+                                          // to items; empty = none. Only the overlay draws them.
     int focus = 0;                    // Kind::List: entry selected at first
     int autoAnswer = 0;  // under LBP3_AUTOPRESS: 1, 2 or kDismiss, pressed after a moment; 0 = leave it to the game
     const char* logName = "dialog";   // e.g. "msg", "savedata"
@@ -55,10 +66,21 @@ void SetProgress(Window& w, uint32_t percent);
 void Close(Window& w);
 
 // For tests.
-void* NativeHandle(const Window& w);              // HWND, once the window exists
+void* NativeHandle(const Window& w);              // HWND, once the window exists; nullptr on the overlay
+bool OnOverlay(const Window& w);                  // true if this dialog went to the ImGui overlay
 using PadReader = bool (*)(uint32_t& buttons);    // returns false if no pad
 void SetPadReaderForTest(PadReader reader);       // nullptr = the real pad (input::Read)
 void SetAutoPressForTest(int mode);               // -1 = from LBP3_AUTOPRESS, 0 = off, 1 = on
 void SetAutoAnswerDelayForTest(uint32_t ms);
+// Stand-ins for ui::dialog's functions, so the overlay path runs without a game window;
+// nullptr = the real ones. Every member must be set.
+struct OverlayForTest {
+    bool (*available)();
+    uint64_t (*show)(ui::dialog::Request request, ui::dialog::AnswerFn onAnswer);
+    void (*setProgress)(uint64_t id, uint32_t percent);
+    void (*close)(uint64_t id);
+};
+void SetOverlayForTest(const OverlayForTest* overlay);
+void SetFrontEndForTest(int mode);  // -1 = from LBP3_DIALOGS, 0 = the overlay when available, 1 = windows
 
 }  // namespace hle::dialog_ui

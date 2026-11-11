@@ -4,6 +4,7 @@
 // scripted pad, and checks the state machines, results and error codes.
 // Run it from the build folder; it opens and closes a few dozen small windows
 // by itself. Exit code 0 = everything passed.
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -11,6 +12,7 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -33,7 +35,7 @@
 #include <SDL3/SDL.h>
 
 using namespace hle::common_dialog;
-namespace ui = hle::dialog_ui;
+namespace dui = hle::dialog_ui;
 
 // hle/savedata.cpp's search, as the import flows call it (eboot.bin+0x4f48e0).
 namespace hle::savedata {
@@ -719,8 +721,8 @@ void TestBootSaveMessages() {
 void TestAutoPress(bool fromEnv) {
     Section(fromEnv ? "LBP3_AUTOPRESS from the environment: each dialog answers itself with the choice that changes nothing"
                     : "LBP3_AUTOPRESS: each dialog answers itself with the choice that changes nothing");
-    if (!fromEnv) ui::SetAutoPressForTest(1);
-    ui::SetAutoAnswerDelayForTest(150);
+    if (!fromEnv) dui::SetAutoPressForTest(1);
+    dui::SetAutoAnswerDelayForTest(150);
     Result res;
 
     CHECK_EQ(sceSaveDataDialogInitialize(), 0);
@@ -781,7 +783,7 @@ void TestAutoPress(bool fromEnv) {
     CHECK_EQ(sceMsgDialogTerminate(), 0);
     CHECK(WaitNoDialogs());
 
-    if (!fromEnv) ui::SetAutoPressForTest(0);
+    if (!fromEnv) dui::SetAutoPressForTest(0);
     CHECK(!hle::modal::Active());
 }
 
@@ -900,6 +902,280 @@ void TestRegistration() {
     hle::RegisterDialogs(linker);  // must not throw
 }
 
+// ---- the ImGui overlay front end, through a stand-in for ui/dialog_overlay
+struct FakeOverlay {
+    std::mutex m;
+    bool available = true;
+    uint64_t nextId = 1;
+    std::vector<ui::dialog::Request> shown;
+    std::vector<uint64_t> ids;
+    ui::dialog::AnswerFn answer;  // the latest dialog's
+    std::vector<uint64_t> closed;
+    std::vector<std::pair<uint64_t, uint32_t>> progress;
+};
+FakeOverlay g_fake;
+
+const dui::OverlayForTest kFakeOverlay{
+    [] {
+        std::lock_guard l(g_fake.m);
+        return g_fake.available;
+    },
+    [](ui::dialog::Request r, ui::dialog::AnswerFn fn) -> uint64_t {
+        std::lock_guard l(g_fake.m);
+        g_fake.shown.push_back(std::move(r));
+        g_fake.answer = std::move(fn);
+        g_fake.ids.push_back(g_fake.nextId);
+        return g_fake.nextId++;
+    },
+    [](uint64_t id, uint32_t percent) {
+        std::lock_guard l(g_fake.m);
+        g_fake.progress.push_back({id, percent});
+    },
+    [](uint64_t id) {
+        std::lock_guard l(g_fake.m);
+        g_fake.closed.push_back(id);
+    },
+};
+
+void ResetFake(bool available = true) {
+    std::lock_guard l(g_fake.m);
+    g_fake.available = available;
+    g_fake.shown.clear();
+    g_fake.ids.clear();
+    g_fake.answer = nullptr;
+    g_fake.closed.clear();
+    g_fake.progress.clear();
+}
+size_t ShownCount() {
+    std::lock_guard l(g_fake.m);
+    return g_fake.shown.size();
+}
+ui::dialog::Request LastShown() {
+    std::lock_guard l(g_fake.m);
+    return g_fake.shown.empty() ? ui::dialog::Request{} : g_fake.shown.back();
+}
+uint64_t LastId() {
+    std::lock_guard l(g_fake.m);
+    return g_fake.ids.empty() ? 0 : g_fake.ids.back();
+}
+bool WasClosed(uint64_t id) {
+    std::lock_guard l(g_fake.m);
+    return std::find(g_fake.closed.begin(), g_fake.closed.end(), id) != g_fake.closed.end();
+}
+// The player answers, on another thread as the presenter would.
+void AnswerFromPresenter(int button, int item = -1) {
+    ui::dialog::AnswerFn fn;
+    {
+        std::lock_guard l(g_fake.m);
+        fn = g_fake.answer;
+    }
+    if (fn) std::thread([fn, button, item] { fn({button, item}); }).join();
+}
+bool NoWindowAppears() {
+    Wait(200);
+    return OurDialogs().empty();
+}
+
+void TestOverlayFrontEnd() {
+    Section("overlay front end: the dialogs go to the ImGui overlay while a game window presents");
+    dui::SetOverlayForTest(&kFakeOverlay);
+    dui::SetFrontEndForTest(0);
+    ResetFake();
+    Result res;
+
+    // The overwrite question: the request carries the spec, the player's Yes is the answer.
+    CHECK_EQ(sceSaveDataDialogInitialize(), 0);
+    std::unique_ptr<SaveParam> ow(System(kSaveDispSave, kSaveSysOverwrite, "LBPxPROFILExBACKUP00000001"));
+    CHECK_EQ(sceSaveDataDialogOpen(&ow->p), 0);
+    CHECK(NoWindowAppears());
+    CHECK_EQ(ShownCount(), 1);
+    ui::dialog::Request r = LastShown();
+    CHECK(r.kind == ui::dialog::Kind::Message);
+    CHECK(r.icon == ui::dialog::Icon::Warning);
+    CHECK(r.button1 == L"Yes" && r.button2 == L"No");
+    CHECK_EQ(r.defaultButton, 2);
+    CHECK_EQ(r.cancelButton, 2);
+    CHECK(!r.padIgnored);
+    CHECK(std::strcmp(r.logName, "savedata") == 0);
+    CHECK(Contains(r.text, L"overwrite"));
+    CHECK_EQ(SaveUpdate(), kStatusRunning);
+    AnswerFromPresenter(1);
+    CHECK_EQ(PollUntil(SaveUpdate, kStatusFinished), kStatusFinished);
+    CHECK_EQ(GetResult(res, false), 0);
+    CHECK_EQ(res.r.result, kResultOk);
+    CHECK_EQ(res.r.buttonId, kSaveButtonYes);
+    AnswerFromPresenter(2);  // a second answer is dropped
+    CHECK_EQ(GetResult(res, false), 0);
+    CHECK_EQ(res.r.buttonId, kSaveButtonYes);
+    CHECK(!hle::modal::Active());
+
+    // Circle on the same question: No, as cancelButton says.
+    std::unique_ptr<SaveParam> ow2(System(kSaveDispSave, kSaveSysOverwrite, "LBPxPROFILExBACKUP00000001"));
+    CHECK_EQ(sceSaveDataDialogOpen(&ow2->p), 0);
+    AnswerFromPresenter(2);
+    CHECK_EQ(PollUntil(SaveUpdate, kStatusFinished), kStatusFinished);
+    CHECK_EQ(GetResult(res, false), 0);
+    CHECK(!(res.r.result == kResultOk && res.r.buttonId == kSaveButtonYes));
+
+    // A load list: entries, focus and the save icons reach the request; the item answered is the one loaded.
+    namespace fs = std::filesystem;
+    wchar_t tmp[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    const fs::path root = fs::path(tmp) / ("lbp3_dialogtest_overlay_" + std::to_string(GetCurrentProcessId()));
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    core::vfs::Init({}, root);
+    const fs::path saves = root / "savedata" / "CUSA00473";
+    fs::create_directories(saves / "LBPxPROFILExBACKUP00000001", ec);
+    fs::create_directories(saves / "LBPxPROFILExBACKUP00000002", ec);
+    if (FILE* f = _wfopen((saves / "LBPxPROFILExBACKUP00000002" / "ICON0.PNG").c_str(), L"wb")) {
+        std::fputs("not really a png", f);
+        std::fclose(f);
+    }
+    std::unique_ptr<SaveParam> load(List(kSaveDispLoad, 2, true));
+    CHECK_EQ(sceSaveDataDialogOpen(&load->p), 0);
+    CHECK(NoWindowAppears());
+    r = LastShown();
+    CHECK(r.kind == ui::dialog::Kind::List);
+    CHECK_EQ(r.items.size(), 3);  // the new entry and two saves
+    if (r.items.size() == 3) {
+        CHECK(Contains(r.items[0].label, L"New saved data"));
+        CHECK(r.items[0].iconPath.empty());
+        CHECK(Contains(r.items[1].label, L"00000001"));
+        CHECK(r.items[1].iconPath.empty());  // no ICON0.PNG in that folder
+        CHECK(Contains(r.items[2].label, L"00000002"));
+        CHECK(Contains(r.items[2].iconPath, L"LBPxPROFILExBACKUP00000002") && Contains(r.items[2].iconPath, L"ICON0.PNG"));
+    }
+    CHECK(r.button1 == L"Load" && r.button2 == L"Cancel");
+    AnswerFromPresenter(1, 2);
+    CHECK_EQ(PollUntil(SaveUpdate, kStatusFinished), kStatusFinished);
+    CHECK_EQ(GetResult(res), 0);
+    CHECK_EQ(res.r.result, kResultOk);
+    CHECK(DirName(res) == "LBPxPROFILExBACKUP00000002");
+    fs::remove_all(root, ec);
+
+    // A progress bar: the game's progress reaches the overlay, the game's Close takes it down,
+    // and an answer racing that Close is ignored.
+    std::unique_ptr<SaveParam> bar(Progress(kSaveDispSave, "LBPxPROFILExBACKUP00000001"));
+    CHECK_EQ(sceSaveDataDialogOpen(&bar->p), 0);
+    const uint64_t barId = LastId();
+    CHECK(LastShown().kind == ui::dialog::Kind::Progress);
+    CHECK_EQ(sceSaveDataDialogProgressBarSetValue(0, 40), 0);
+    {
+        std::lock_guard l(g_fake.m);
+        CHECK(!g_fake.progress.empty() && g_fake.progress.back().first == barId && g_fake.progress.back().second == 40);
+    }
+    CHECK_EQ(SaveUpdate(), kStatusRunning);
+    CHECK_EQ(sceSaveDataDialogClose(nullptr), 0);
+    CHECK(WasClosed(barId));
+    AnswerFromPresenter(1);  // too late: the game already has its result
+    CHECK_EQ(SaveUpdate(), kStatusFinished);
+    CHECK_EQ(sceSaveDataDialogTerminate(), 0);
+    CHECK(!hle::modal::Active());
+
+    // LBP3_AUTOPRESS: the overlay ignores the pad and the dialog answers the safe choice itself.
+    dui::SetAutoPressForTest(1);
+    dui::SetAutoAnswerDelayForTest(150);
+    CHECK_EQ(sceSaveDataDialogInitialize(), 0);
+    std::unique_ptr<SaveParam> ow3(System(kSaveDispSave, kSaveSysOverwrite, "LBPxPROFILExBACKUP00000001"));
+    CHECK_EQ(sceSaveDataDialogOpen(&ow3->p), 0);
+    const uint64_t autoId = LastId();
+    CHECK(LastShown().padIgnored);
+    CHECK_EQ(PollUntil(SaveUpdate, kStatusFinished), kStatusFinished);
+    CHECK(WasClosed(autoId));
+    CHECK_EQ(GetResult(res, false), 0);
+    CHECK(!(res.r.result == kResultOk && res.r.buttonId == kSaveButtonYes));
+    CHECK_EQ(sceSaveDataDialogTerminate(), 0);
+    dui::SetAutoPressForTest(0);
+
+    // MsgDialog goes the same way.
+    CHECK_EQ(sceMsgDialogInitialize(), 0);
+    MsgUser u(kMsgButtonsYesNo, "Keep this?");
+    CHECK_EQ(sceMsgDialogOpen(&u.p), 0);
+    CHECK(NoWindowAppears());
+    CHECK(std::strcmp(LastShown().logName, "msg") == 0);
+    AnswerFromPresenter(1);
+    CHECK_EQ(PollUntil(MsgUpdate, kStatusFinished), kStatusFinished);
+    MsgDialogResult mr{};
+    CHECK_EQ(sceMsgDialogGetResult(&mr), 0);
+    CHECK_EQ(mr.buttonId, kMsgButton1);
+    CHECK_EQ(sceMsgDialogTerminate(), 0);
+
+    // No game window presenting: the native window, as before.
+    ResetFake(false);
+    CHECK_EQ(sceMsgDialogInitialize(), 0);
+    MsgSystem m(kMsgSysPsnChatRestriction);
+    CHECK_EQ(sceMsgDialogOpen(&m.p), 0);
+    HWND dlg = FindDialog();
+    CHECK(dlg != nullptr);
+    CHECK_EQ(ShownCount(), 0);
+    if (dlg) PressEsc(dlg);
+    CHECK_EQ(PollUntil(MsgUpdate, kStatusFinished), kStatusFinished);
+    CHECK_EQ(sceMsgDialogTerminate(), 0);
+    CHECK(WaitNoDialogs());
+
+    // LBP3_DIALOGS=window: windows even with a game window up.
+    ResetFake(true);
+    dui::SetFrontEndForTest(1);
+    CHECK_EQ(sceMsgDialogInitialize(), 0);
+    MsgSystem m2(kMsgSysPsnChatRestriction);
+    CHECK_EQ(sceMsgDialogOpen(&m2.p), 0);
+    dlg = FindDialog();
+    CHECK(dlg != nullptr);
+    CHECK_EQ(ShownCount(), 0);
+    if (dlg) PressEsc(dlg);
+    CHECK_EQ(PollUntil(MsgUpdate, kStatusFinished), kStatusFinished);
+    CHECK_EQ(sceMsgDialogTerminate(), 0);
+    CHECK(WaitNoDialogs());
+
+    dui::SetFrontEndForTest(-1);
+    dui::SetOverlayForTest(nullptr);
+    CHECK(!hle::modal::Active());
+}
+
+// Child of RunDialogsWindowFromEnvironment: LBP3_DIALOGS=window read from the environment.
+void TestDialogsWindowEnv() {
+    Section("LBP3_DIALOGS=window from the environment: a window although the overlay is available");
+    dui::SetOverlayForTest(&kFakeOverlay);
+    ResetFake(true);
+    CHECK_EQ(sceMsgDialogInitialize(), 0);
+    MsgSystem m(kMsgSysPsnChatRestriction);
+    CHECK_EQ(sceMsgDialogOpen(&m.p), 0);
+    HWND dlg = FindDialog();
+    CHECK(dlg != nullptr);
+    CHECK_EQ(ShownCount(), 0);
+    if (dlg) PressEsc(dlg);
+    CHECK_EQ(PollUntil(MsgUpdate, kStatusFinished), kStatusFinished);
+    CHECK_EQ(sceMsgDialogTerminate(), 0);
+    CHECK(WaitNoDialogs());
+    dui::SetOverlayForTest(nullptr);
+}
+
+// Runs this exe again with `name`=`value` set, as `arg`; the child's checks must all pass.
+void RunChild(const wchar_t* name, const wchar_t* value, const wchar_t* arg) {
+    wchar_t self[MAX_PATH];
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    std::wstring cmd = L"\"" + std::wstring(self) + L"\" " + arg;
+    SetEnvironmentVariableW(name, value);
+    std::fflush(stdout);
+    STARTUPINFOW si{sizeof(si)};
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    PROCESS_INFORMATION pi{};
+    const bool started = CreateProcessW(self, cmd.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi);
+    SetEnvironmentVariableW(name, nullptr);
+    CHECK(started);
+    if (!started) return;
+    WaitForSingleObject(pi.hProcess, 120000);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    CHECK_EQ(code, 0);
+}
+
 }  // namespace
 
 // The gate after a dialog closes: the game keeps a neutral pad until the press that
@@ -925,7 +1201,7 @@ void TestGateWaitsForRelease() {
 }
 
 int main(int argc, char** argv) {
-    ui::SetPadReaderForTest(TestPad);
+    dui::SetPadReaderForTest(TestPad);
     if (argc == 2 && std::strcmp(argv[1], "--autopress-env") == 0) {  // child of RunAutoPressFromEnvironment
         CHECK(std::getenv("LBP3_AUTOPRESS") != nullptr);
         TestInitialization();
@@ -933,8 +1209,16 @@ int main(int argc, char** argv) {
         std::printf("  (autopress child: %d checks, %d failed)\n", g_checks, g_failures);
         return g_failures ? 1 : 0;
     }
+    if (argc == 2 && std::strcmp(argv[1], "--dialogs-env") == 0) {  // child: LBP3_DIALOGS=window
+        CHECK(std::getenv("LBP3_DIALOGS") != nullptr);
+        dui::SetAutoPressForTest(0);
+        TestInitialization();
+        TestDialogsWindowEnv();
+        std::printf("  (LBP3_DIALOGS child: %d checks, %d failed)\n", g_checks, g_failures);
+        return g_failures ? 1 : 0;
+    }
     if (argc == 3 && std::strcmp(argv[1], "--capture") == 0) g_captureDir = argv[2];
-    ui::SetAutoPressForTest(0);
+    dui::SetAutoPressForTest(0);
     TestInitialization();
     TestBusyAndNotInitialized();
     TestMsgDialogQueue();
@@ -948,7 +1232,9 @@ int main(int argc, char** argv) {
     TestGameCustomData();
     TestGateWaitsForRelease();
     TestRegistration();
+    TestOverlayFrontEnd();
     RunAutoPressFromEnvironment();
+    RunChild(L"LBP3_DIALOGS", L"window", L"--dialogs-env");
     std::printf("\n%d checks, %d failed: %s\n", g_checks, g_failures, g_failures ? "FAIL" : "PASS");
     return g_failures ? 1 : 0;
 }
