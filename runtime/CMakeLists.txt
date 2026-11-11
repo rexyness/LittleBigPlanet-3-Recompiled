@@ -74,6 +74,7 @@ add_library(hle STATIC
     src/video/presenter.cpp
     src/ui/osk_model.cpp
     src/ui/osk_overlay.cpp
+    src/ui/dialog_overlay.cpp
 )
 target_include_directories(hle PUBLIC src)
 target_include_directories(hle PRIVATE ${SHADPS4_EXT}/stb)  # hle/jpeg.cpp
