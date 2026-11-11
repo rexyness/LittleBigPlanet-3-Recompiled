@@ -243,7 +243,7 @@ bool Apply(int slot, ps4::PadData& out) {
 
 }  // namespace remote
 
-bool Read(int slot, ps4::PadData& out) {
+bool Read(int slot, ps4::PadData& out, bool keyboard) {
     // The game reads pads on its own threads and system dialogs poll from theirs; RefreshSlots
     // closes and reopens g_pads entries, so one reader at a time.
     static std::mutex readMutex;
@@ -262,7 +262,7 @@ bool Read(int slot, ps4::PadData& out) {
         const bool remote = remote::Apply(slot, out) | AutoPressCross(slot, out);
         if (slot != 0) return remote;
         // Player 1 always has the keyboard, so the game sees a player without a pad.
-        actions::ApplyToFrame(out);
+        if (keyboard) actions::ApplyToFrame(out);
         out.connected = true;
         out.connectedCount = 1;
         return true;
@@ -302,7 +302,7 @@ bool Read(int slot, ps4::PadData& out) {
 
     AutoPressCross(slot, out);
     remote::Apply(slot, out);
-    if (slot == 0) actions::ApplyToFrame(out);  // keyboard works alongside a pad
+    if (slot == 0 && keyboard) actions::ApplyToFrame(out);  // keyboard works alongside a pad
     out.connected = true;
     out.connectedCount = 1;
     return true;

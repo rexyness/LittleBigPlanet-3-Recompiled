@@ -1,4 +1,5 @@
 #include "video/presenter.h"
+#include "ui/osk_overlay.h"
 
 #include <SDL3/SDL.h>
 
@@ -168,6 +169,7 @@ void PresenterThread() {
     SDL_GetRenderVSync(renderer, &vsync);
     std::fprintf(stderr, "[video] window renderer: %s, vsync %s (%d)\n", SDL_GetRendererName(renderer),
                  vsyncOk ? "on" : "FAILED", vsync);
+    ui::osk::Attach(window, renderer);  // the on-screen keyboard draws over the game here
     // The rate the pacer divides by. Read again when the window changes display, when a
     // display is added, removed or changes mode, and every 5 s: when a monitor is switched off,
     // Windows moves the window to another one without SDL reporting a display change, and the
@@ -199,7 +201,8 @@ void PresenterThread() {
     for (;;) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
+            const bool keyboardUsed = ui::osk::HandleEvent(e);  // typing into the on-screen keyboard
+            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && !keyboardUsed) {
                 if (auto handler = g_hotkeyHandler.load()) handler(static_cast<int>(e.key.key));
             }
             if (e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED || e.type == SDL_EVENT_DISPLAY_ADDED ||
@@ -251,6 +254,7 @@ void PresenterThread() {
                 SDL_UpdateTexture(texture, nullptr, buf.address, static_cast<int>(buf.pitchPixels * 4));
             SDL_RenderTexture(renderer, texture, nullptr, nullptr);
         }
+        ui::osk::Draw();
         SDL_RenderPresent(renderer);  // paced by vsync, unless a driver forces it off
         ++g_presents;
         if (pacing == Pacing::Present) CountVBlank();

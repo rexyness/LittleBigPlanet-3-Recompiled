@@ -13,6 +13,22 @@ find_package(SDL3 REQUIRED CONFIG PATHS "${CMAKE_CURRENT_SOURCE_DIR}/../third_pa
 include(cmake/shader_recompiler.cmake)
 include(cmake/video_core.cmake)
 
+# Dear ImGui (MIT; shadPS4's copy) for the on-screen keyboard, drawn on the presenter's SDL
+# renderer. Built with the stock imconfig.h: nothing else here compiles ImGui (video_core
+# only sees stand-ins in runtime/shim/imgui).
+set(IMGUI_DIR ${SHADPS4_EXT}/imgui)
+add_library(imgui STATIC
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_sdl3.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer3.cpp
+)
+target_include_directories(imgui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
+target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
+target_link_libraries(imgui PUBLIC SDL3::SDL3)
+
 add_library(hle STATIC
     src/core/debugger.cpp
     src/core/linker.cpp
@@ -56,12 +72,13 @@ add_library(hle STATIC
     src/input/game_state.cpp
     src/core/native_trace.cpp
     src/video/presenter.cpp
+    src/ui/osk_overlay.cpp
 )
 target_include_directories(hle PUBLIC src)
 target_include_directories(hle PRIVATE ${SHADPS4_EXT}/stb)  # hle/jpeg.cpp
 target_link_libraries(hle PUBLIC shader_recompiler video_core)
 target_compile_definitions(hle PUBLIC _WIN32_WINNT=0x0A00 NOMINMAX _CRT_SECURE_NO_WARNINGS)
-target_link_libraries(hle PUBLIC SDL3::SDL3 bcrypt winmm dbghelp onecore advapi32 dxgi comctl32)
+target_link_libraries(hle PUBLIC imgui SDL3::SDL3 bcrypt winmm dbghelp onecore advapi32 dxgi comctl32)
 
 add_executable(lbp3 src/main.cpp)
 target_link_libraries(lbp3 PRIVATE hle)
