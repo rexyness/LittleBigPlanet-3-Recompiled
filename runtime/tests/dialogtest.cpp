@@ -914,8 +914,10 @@ void TestGateWaitsForRelease() {
     CHECK(!hle::modal::Active());
     CHECK(hle::modal::HoldsPad(ps4::PAD_CROSS));   // Cross still down from answering
     CHECK(hle::modal::HoldsPad(ps4::PAD_CIRCLE));
-    CHECK(!hle::modal::HoldsPad(ps4::PAD_SQUARE));  // released: the game gets the pad back
-    CHECK(!hle::modal::HoldsPad(ps4::PAD_CROSS));   // and a new Cross is the game's
+    CHECK(hle::modal::HoldsPad(ps4::PAD_SQUARE));  // any button: the on-screen keyboard types with them
+    CHECK(hle::modal::HoldsPad(ps4::PAD_R2));      // R2 closes the keyboard (grab in the game)
+    CHECK(!hle::modal::HoldsPad(0));               // all released: the game gets the pad back
+    CHECK(!hle::modal::HoldsPad(ps4::PAD_CROSS));  // and a new Cross is the game's
     hle::modal::Begin("test");
     hle::modal::End();
     Sleep(1100);

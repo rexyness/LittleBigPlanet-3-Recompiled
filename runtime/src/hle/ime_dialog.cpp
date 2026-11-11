@@ -14,15 +14,20 @@
 // - Abort when the requester goes away; the next poll then sees FINISHED, calls
 //   GetResult and Term.
 //
-// Here the dialog is a native window on its own thread, so the game keeps running.
-// Each dialog is a Session shared with its window thread; the text goes into the
-// game's buffer on a game thread (GetStatus/GetResult), never from the window thread.
+// Front ends, chosen per dialog at Init: the on-screen keyboard (ui/osk_overlay.h) over
+// the game window when one is presenting, played with the pad as on a PS4; otherwise, or
+// with LBP3_IME=window, a native window on its own thread. Either way the game keeps
+// running. Each dialog is a Session shared with its front end (the window thread, or the
+// presenter thread for the keyboard's answer); the text goes into the game's buffer on a
+// game thread (GetStatus/GetResult), never from either of those.
 #include "hle/ime_dialog.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <cwchar>
 #include <deque>
 #include <memory>
@@ -47,22 +52,25 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 
-// The longest the modal gate stays up after the dialog closes while Cross or Circle
-// is still held (see GetStatus).
+// The longest the modal gate stays up after the dialog closes while a button, Enter, Esc
+// or Backspace is still held (see GetStatus).
 constexpr auto kGateReleaseTimeout = 1s;
-// Scripted actions wait this long after the window opens, so it's seen in captures.
+// Scripted actions wait this long after the dialog opens, so it's seen in captures.
 constexpr auto kScriptDelay = 150ms;
 
-// One dialog. The window thread fills in the outcome; the game side reads it.
+// One dialog. The front end fills in the outcome; the game side reads it.
 struct Session {
     // Set at Init, read-only afterwards.
     std::wstring title, placeholder, prefill;
     uint32_t maxLength = 0, type = 0, option = 0, enterLabel = 0;
-    // Shared with the window thread, under `mutex`.
+    bool keyboard = false;       // the on-screen keyboard, not the window
+    Clock::time_point openedAt;  // keyboard: scripts wait kScriptDelay after this
+    uint64_t keyboardId = 0;     // the keyboard's id for Close (set at Init; game side, under g_mutex)
+    // Shared with the front end (window thread, or the keyboard's answer), under `mutex`.
     std::mutex mutex;
     HWND window = nullptr;
     bool abort = false;   // the game aborted: close without a result
-    bool closed = false;  // the window is gone (or never came up)
+    bool closed = false;  // the window is gone (or never came up); the keyboard answered
     int32_t end = kEndUserCanceled;
     std::wstring text;    // the confirmed text, already clamped to maxLength
 };
@@ -88,6 +96,15 @@ struct ScriptQueue {
 ScriptQueue& Script() {
     static auto* q = new ScriptQueue;  // never destroyed: window threads may outlive main
     return *q;
+}
+
+std::optional<Scripted> TakeScript() {
+    ScriptQueue& q = Script();
+    std::lock_guard lock(q.mutex);
+    if (q.queue.empty()) return std::nullopt;
+    Scripted action = std::move(q.queue.front());
+    q.queue.pop_front();
+    return action;
 }
 
 std::wstring FromGame(const char16_t* s, size_t max) {
@@ -185,14 +202,8 @@ void RunScript(HWND hwnd, Window& w) {
         std::lock_guard lock(w.session->mutex);
         if (w.session->abort) return;  // closing: the script is for the next dialog
     }
-    std::optional<Scripted> action;
-    {
-        ScriptQueue& q = Script();
-        std::lock_guard lock(q.mutex);
-        if (q.queue.empty()) return;
-        action = std::move(q.queue.front());
-        q.queue.pop_front();
-    }
+    std::optional<Scripted> action = TakeScript();
+    if (!action) return;
     if (!action->confirm) {
         std::fprintf(stderr, "[ime] scripted: cancel\n");
         Finish(hwnd, w, kEndUserCanceled);
@@ -401,15 +412,99 @@ void RunWindow(std::shared_ptr<Session> s) {
     s->closed = true;
 }
 
+// ---- The on-screen keyboard ----
+
+const KeyboardHooks kRealKeyboard{::ui::osk::Available, ::ui::osk::Show, ::ui::osk::Close};
+std::atomic<const KeyboardHooks*> g_keyboardHooks{&kRealKeyboard};
+const KeyboardHooks& Keyboard() { return *g_keyboardHooks.load(); }
+
+// LBP3_IME=window keeps the native window even with a game window up (read once).
+bool WindowForced() {
+    static const bool forced = [] {
+        const char* v = std::getenv("LBP3_IME");
+        return v && std::strcmp(v, "window") == 0;
+    }();
+    return forced;
+}
+
+// LBP3_AUTOPRESS taps buttons blindly in automated runs. With the window, a tapped Cross
+// confirms the text unchanged and Circle cancels; on the keyboard Cross would type a key
+// every 2 s and the dialog would never close. So under LBP3_AUTOPRESS the dialog answers
+// the pad itself with either front end (sceImeDialogGetStatus), as the window did.
+bool AutoPressOn() {
+    static const bool on = std::getenv("LBP3_AUTOPRESS") != nullptr;
+    return on;
+}
+
+std::u16string ToU16(const std::wstring& w) { return std::u16string(w.begin(), w.end()); }
+
+// Records the outcome unless the game aborted or the dialog already has one. Any thread.
+// Returns whether this outcome was taken.
+bool Record(Session& s, int32_t end, std::wstring text) {
+    std::lock_guard lock(s.mutex);
+    if (s.abort || s.closed) return false;
+    Clamp(text, s.maxLength);
+    s.end = end;
+    s.text = end == kEndOk ? std::move(text) : std::wstring{};
+    s.closed = true;
+    return true;
+}
+
+// Puts the keyboard up for `s`. The answer comes on the presenter thread and is only recorded
+// there; the game's buffer is written later, on a game thread (FinishIfClosed).
+void ShowKeyboard(const std::shared_ptr<Session>& s) {
+    ::ui::osk::Request request;
+    request.title = ToU16(s->title);
+    request.text = ToU16(s->prefill);
+    request.placeholder = ToU16(s->placeholder);
+    request.maxLength = s->maxLength;
+    request.multiline = (s->option & kOptionMultiline) != 0;
+    request.password = (s->option & kOptionPassword) != 0;
+    request.enterLabel = s->enterLabel;
+    s->openedAt = Clock::now();
+    std::weak_ptr<Session> weak = s;
+    s->keyboardId = Keyboard().show(std::move(request), [weak](const ::ui::osk::Answer& answer) {
+        if (auto session = weak.lock())
+            Record(*session, answer.confirmed ? kEndOk : kEndUserCanceled,
+                   std::wstring(answer.text.begin(), answer.text.end()));
+    });
+}
+
 // ---- Game side ----
+
+// Under g_mutex, keyboard only: one queued script action (remote "ime" commands) once the
+// keyboard has been up a moment. It answers in place of the player and takes the keyboard
+// down; if the player answered first, the action stays queued for the next dialog.
+void RunKeyboardScript(Session& s) {
+    if (Clock::now() - s.openedAt < kScriptDelay) return;
+    {
+        std::lock_guard lock(s.mutex);
+        if (s.abort || s.closed) return;
+    }
+    std::optional<Scripted> action = TakeScript();
+    if (!action) return;
+    const std::string text = Utf8(action->text);
+    if (!Record(s, action->confirm ? kEndOk : kEndUserCanceled, action->text)) {
+        ScriptQueue& q = Script();
+        std::lock_guard lock(q.mutex);
+        q.queue.push_front(std::move(*action));
+        return;
+    }
+    Keyboard().close(s.keyboardId);
+    if (action->confirm) {
+        std::fprintf(stderr, "[ime] scripted: typing \"%s\" and confirming\n", text.c_str());
+    } else {
+        std::fprintf(stderr, "[ime] scripted: cancel\n");
+    }
+}
 
 void PostToWindow(UINT msg, WPARAM wp) {
     std::lock_guard lock(g_session->mutex);
     if (g_session->window) PostMessageW(g_session->window, msg, wp, 0);
 }
 
-// Under g_mutex. RUNNING -> FINISHED once the window has closed; the text goes into
-// the game's buffer here, on a game thread.
+// Under g_mutex. RUNNING -> FINISHED once the window has closed or the keyboard (or a
+// script) has answered; the text goes into the game's buffer here, on a game thread.
 void FinishIfClosed() {
     if (g_status != kStatusRunning || !g_session) return;
     int32_t end;
@@ -474,8 +569,10 @@ int PS4_SYSV_ABI sceImeDialogInit(const Param* param, const void* extended) {
     s->title = StripBom(FromGame(param->title, 512));
     s->placeholder = StripBom(FromGame(param->placeholder, 512));
     s->prefill = FromGame(param->inputTextBuffer, s->maxLength);
-    std::fprintf(stderr, "[ime] dialog opened: \"%s\", up to %u characters, text \"%s\" (type %u, options %#x)\n",
-                 Utf8(s->title).c_str(), s->maxLength, Utf8(s->prefill).c_str(), s->type, s->option);
+    s->keyboard = !WindowForced() && Keyboard().available();
+    std::fprintf(stderr, "[ime] dialog opened: \"%s\", up to %u characters, text \"%s\" (type %u, options %#x) on %s\n",
+                 Utf8(s->title).c_str(), s->maxLength, Utf8(s->prefill).c_str(), s->type, s->option,
+                 s->keyboard ? "the on-screen keyboard" : "the window");
     // LBP3 passes neither. A filter is game code, which can't run on the window thread.
     if (param->filter) std::fprintf(stderr, "[ime] note: the game's text filter is not applied\n");
     if (extended) std::fprintf(stderr, "[ime] note: extended parameters (colours, keyboard filter) are ignored\n");
@@ -489,7 +586,11 @@ int PS4_SYSV_ABI sceImeDialogInit(const Param* param, const void* extended) {
         g_gateHeld = true;
     }
     g_status = kStatusRunning;
-    std::thread(RunWindow, s).detach();
+    if (s->keyboard) {
+        ShowKeyboard(s);
+    } else {
+        std::thread(RunWindow, s).detach();
+    }
     return kernel::SCE_OK;
 }
 
@@ -500,25 +601,34 @@ int PS4_SYSV_ABI sceImeDialogGetStatus() {
     ps4::PadData pad{};
     const uint32_t buttons = input::Read(0, pad) ? pad.buttons : 0;  // the real pad; the game sees a neutral one
     const bool cross = buttons & ps4::PAD_CROSS, circle = buttons & ps4::PAD_CIRCLE;
-    if (g_status == kStatusRunning) {
-        if (cross && !g_crossWasDown) {
-            std::fprintf(stderr, "[ime] Cross on the pad: confirm\n");
-            PostToWindow(WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED));
-        } else if (circle && !g_circleWasDown) {
-            std::fprintf(stderr, "[ime] Circle on the pad: cancel\n");
-            PostToWindow(WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED));
+    if (g_status == kStatusRunning && g_session) {
+        Session& s = *g_session;
+        // The window has no pad of its own: Cross confirms it and Circle cancels. The
+        // keyboard reads the pad itself (Cross types a key there), except under
+        // LBP3_AUTOPRESS, whose blind taps answer it the same way (AutoPressOn).
+        if (!s.keyboard || AutoPressOn()) {
+            const bool confirm = cross && !g_crossWasDown;
+            const bool cancel = !confirm && circle && !g_circleWasDown;
+            if (confirm || cancel) {
+                std::fputs(confirm ? "[ime] Cross on the pad: confirm\n" : "[ime] Circle on the pad: cancel\n", stderr);
+                if (!s.keyboard) {
+                    PostToWindow(WM_COMMAND, MAKEWPARAM(confirm ? IDOK : IDCANCEL, BN_CLICKED));
+                } else if (Record(s, confirm ? kEndOk : kEndUserCanceled, s.prefill)) {
+                    Keyboard().close(s.keyboardId);  // the text unchanged, as the window's OK
+                }
+            }
         }
         g_crossWasDown = cross;
         g_circleWasDown = circle;
+        if (s.keyboard) RunKeyboardScript(s);
         FinishIfClosed();
     }
-    // The game saw a neutral pad while the dialog was up; a Cross still held from
-    // confirming would reach it as a fresh press (and reopen the text field), so the
-    // gate stays up until Cross and Circle are released. Likewise Enter and Esc, which
-    // are keyboard actions (Confirm, Back) once the game window has the focus again.
-    const bool keyHeld = (GetAsyncKeyState(VK_RETURN) | GetAsyncKeyState(VK_ESCAPE)) & 0x8000;
+    // The game saw a neutral pad while the dialog was up; a press still held from
+    // answering would reach it as a fresh one (Cross reopens the text field, R2 grabs), so
+    // the gate stays up until every button is released, and Enter, Esc and Backspace,
+    // which are keyboard actions (Confirm, Back) once the game window has the focus again.
     if (g_gateHeld && g_status != kStatusRunning &&
-        ((!cross && !circle && !keyHeld) || Clock::now() - g_finishedAt > kGateReleaseTimeout)) {
+        (!modal::AnswerHeld(buttons) || Clock::now() - g_finishedAt > kGateReleaseTimeout)) {
         modal::End();
         g_gateHeld = false;
     }
@@ -545,6 +655,7 @@ int PS4_SYSV_ABI sceImeDialogAbort() {
         g_session->abort = true;
         if (g_session->window) PostMessageW(g_session->window, kMsgAbort, 0, 0);
     }
+    if (g_session->keyboard) Keyboard().close(g_session->keyboardId);
     std::fprintf(stderr, "[ime] dialog aborted by the game\n");
     g_endStatus = kEndAborted;
     g_status = kStatusFinished;
@@ -562,6 +673,8 @@ int PS4_SYSV_ABI sceImeDialogTerm() {
     g_status = kStatusNone;
     return kernel::SCE_OK;
 }
+
+void SetKeyboardForTest(const KeyboardHooks* hooks) { g_keyboardHooks = hooks ? hooks : &kRealKeyboard; }
 
 }  // namespace hle::ime_dialog
 

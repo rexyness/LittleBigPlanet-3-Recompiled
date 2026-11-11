@@ -15,9 +15,15 @@ bool Active();
 
 // For scePadReadState, with the real pad's buttons: true while the game should see a
 // neutral pad. That is while a dialog is open, and after the last one closes until
-// Cross, Circle, Enter and Esc are all released (at most 1 s): the game saw no presses
-// while the dialog was up, so the press that answered it would otherwise reach the
-// game as a fresh one and act on the menu behind it (and often reopen the dialog).
+// AnswerHeld is false (at most 1 s): the game saw no presses while the dialog was up, so
+// the press that answered it would otherwise reach the game as a fresh one and act on
+// the menu behind it (and often reopen the dialog).
 bool HoldsPad(uint32_t realButtons);
+
+// True while any pad button in `realButtons` (sticks aside) is down, or Enter, Esc or
+// Backspace on the PC keyboard. Every button counts: the on-screen keyboard closes with
+// R2 (grab in LBP3) and types with Square, Triangle, L1, R1, L2 and L3, besides Cross and
+// Circle; the keys are the keyboard's Confirm and Back actions.
+bool AnswerHeld(uint32_t realButtons);
 
 }  // namespace hle::modal
