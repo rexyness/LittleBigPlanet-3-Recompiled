@@ -443,7 +443,14 @@ int PS4_SYSV_ABI sceGnmSubmitCommandBuffers(uint32_t count, void* const* dcbs, c
     static int logged = 0;
     if (logged++ < 5)
         std::fprintf(stderr, "[gnm] submit %u command buffer(s), first %u bytes\n", count, count ? dcbSizes[0] : 0);
+    const auto t0 = std::chrono::steady_clock::now();
     Process(count, dcbs, dcbSizes, ccbs, ccbSizes);
+    if (gpu::split::Enabled()) {
+        uint32_t dw = 0;
+        for (uint32_t i = 0; i < count; ++i) dw += dcbSizes[i] / 4;
+        gpu::split::NoteSubmit(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count(),
+                               count, dw);
+    }
     return kernel::SCE_OK;
 }
 
@@ -490,6 +497,11 @@ int PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void* const* 
     TraceSimSteps();
     if (count && gpu::Active()) {
         const uint64_t splitFrame = gpu::split::BeginFrame();  // LBP3_FRAME_SPLIT measurement
+        if (splitFrame) {
+            uint32_t dw = 0;
+            for (uint32_t i = 0; i < count; ++i) dw += dcbSizes[i] / 4;
+            gpu::split::SetFlipBuffers(count, dw);
+        }
         // Like the real driver: the previous frame must be done before this one is patched.
         const int idleResult = gpu::WaitIdle();
         gpu::split::Mark(gpu::split::WaitIdleEnd);

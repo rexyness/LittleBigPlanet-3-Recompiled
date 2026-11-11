@@ -57,6 +57,10 @@ struct Slot {
     std::atomic<int64_t> mainCpuUs{-1}, periodUs{-1};
     PerfCounters at0{}, at1{};  // counters at Enqueued (main) and at Flipped (command processor)
     std::atomic<int> parts{0};  // 1: released, 2: flipped
+    // The flip submit's buffers, the first buffer's hand-over, and the frame's earlier
+    // sceGnmSubmitCommandBuffers calls (no flip) since the previous flip submit.
+    std::atomic<int64_t> firstEnq{0}, preUs{0};
+    std::atomic<uint32_t> flipBufs{0}, flipDw{0}, preCalls{0}, preBufs{0}, preDw{0};
 };
 
 Slot g_ring[kRing];
@@ -66,6 +70,9 @@ std::atomic<uint64_t> g_nextFrame{1};
 thread_local uint64_t t_frame = 0;
 int64_t g_lastReleasedUs = -1;  // main thread only
 int64_t g_lastFlippedUs = -1;   // command-processor thread only
+// Main thread only: sceGnmSubmitCommandBuffers calls since the last flip submit.
+int64_t g_preUs = 0;
+uint32_t g_preCalls = 0, g_preBufs = 0, g_preDw = 0;
 
 bool Open() {
     static const bool on = [] {
@@ -78,7 +85,8 @@ bool Open() {
         std::fprintf(g_csv,
                      "frame,submit_ms,main_cpu_us,waitidle_us,waitidle_rel,prep_us,record_us,gfx_blocked_us,"
                      "gfx_blocked_waits,finish_us,copy_us,slot_us,present_us,release_after_flip_us,submit_rel,"
-                     "period_us,pipelines,pipeline_us,shaders,shader_us\n");
+                     "period_us,pipelines,pipeline_us,shaders,shader_us,flip_buffers,flip_dwords,"
+                     "first_to_last_enq_us,pre_submits,pre_buffers,pre_dwords,pre_submit_us\n");
         std::fprintf(stderr, "[split] writing analysis\\frame_split.csv (LBP3_FRAME_SPLIT)\n");
         return true;
     }();
@@ -102,7 +110,10 @@ void WriteRow(uint64_t frame, Slot& s) {
     const int64_t blockedUs =
         s.t[Enqueued].load() ? static_cast<int64_t>((s.at1.gfxBlockedNs - s.at0.gfxBlockedNs) / 1000) : -1;
     std::lock_guard lk(g_fileMutex);
-    std::fprintf(g_csv, "%llu,%.3f,%lld,%lld,%d,%lld,%lld,%lld,%u,%lld,%lld,%lld,%lld,%lld,%d,%lld,%u,%llu,%u,%llu\n",
+    const int64_t firstToLast =
+        s.firstEnq.load() && s.t[Enqueued].load() ? s.t[Enqueued].load() - s.firstEnq.load() : -1;
+    std::fprintf(g_csv, "%llu,%.3f,%lld,%lld,%d,%lld,%lld,%lld,%u,%lld,%lld,%lld,%lld,%lld,%d,%lld,%u,%llu,%u,%llu,"
+                        "%u,%u,%lld,%u,%u,%u,%lld\n",
                  static_cast<unsigned long long>(frame), s.t[SubmitEnter].load() / 1000.0,
                  static_cast<long long>(s.mainCpuUs.load()), static_cast<long long>(Span(s, SubmitEnter, WaitIdleEnd)),
                  s.waitIdleResult.load(), static_cast<long long>(Span(s, WaitIdleEnd, Enqueued)),
@@ -114,7 +125,9 @@ void WriteRow(uint64_t frame, Slot& s) {
                  s.at1.pipelineCompiles - s.at0.pipelineCompiles,
                  static_cast<unsigned long long>(s.at1.pipelineUs - s.at0.pipelineUs),
                  s.at1.shaderCompiles - s.at0.shaderCompiles,
-                 static_cast<unsigned long long>(s.at1.shaderUs - s.at0.shaderUs));
+                 static_cast<unsigned long long>(s.at1.shaderUs - s.at0.shaderUs), s.flipBufs.load(), s.flipDw.load(),
+                 static_cast<long long>(firstToLast), s.preCalls.load(), s.preBufs.load(), s.preDw.load(),
+                 static_cast<long long>(s.preUs.load()));
     static unsigned rows = 0;
     if (++rows % 60 == 0) std::fflush(g_csv);
 }
@@ -137,6 +150,14 @@ uint64_t BeginFrame() {
     s.periodUs = -1;
     s.at0 = s.at1 = PerfCounters{};
     s.parts = 0;
+    s.firstEnq = 0;
+    s.flipBufs = s.flipDw = 0;
+    s.preUs = g_preUs;
+    s.preCalls = g_preCalls;
+    s.preBufs = g_preBufs;
+    s.preDw = g_preDw;
+    g_preUs = 0;
+    g_preCalls = g_preBufs = g_preDw = 0;
     const int64_t now = NowUs();
     s.t[SubmitEnter] = now;
     s.mainCpuUs = g_lastReleasedUs >= 0 ? now - g_lastReleasedUs : -1;
@@ -155,6 +176,7 @@ void Mark(Point p) {
     Slot* s = SlotFor(frame);
     if (!s) return;
     const int64_t now = NowUs();
+    if (p == Enqueued && !s->firstEnq.load()) s->firstEnq = now;
     s->t[p] = now;
     switch (p) {
     case Enqueued: s->at0 = ReadPerfCounters(); break;
@@ -176,6 +198,22 @@ void Flush() {
     if (!Open()) return;
     std::lock_guard lk(g_fileMutex);
     std::fflush(g_csv);
+}
+
+void NoteSubmit(int64_t us, uint32_t buffers, uint32_t dwords) {
+    if (!Open()) return;
+    g_preUs += us;
+    ++g_preCalls;
+    g_preBufs += buffers;
+    g_preDw += dwords;
+}
+
+void SetFlipBuffers(uint32_t buffers, uint32_t dwords) {
+    if (!Open()) return;
+    if (Slot* s = SlotFor(t_frame)) {
+        s->flipBufs = buffers;
+        s->flipDw = dwords;
+    }
 }
 
 void SetResults(int waitIdleResult, int submitResult) {

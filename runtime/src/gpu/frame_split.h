@@ -39,6 +39,11 @@ void SetCpFrame(uint64_t frame);
 void Mark(Point p);
 // Main thread, just before Mark(Released): how the two waits returned (gpu::WaitResult values).
 void SetResults(int waitIdleResult, int submitResult);
+// Main thread: a sceGnmSubmitCommandBuffers call (no flip) took `us` for `buffers` command
+// buffers of `dwords` in all; counted into the next frame's row.
+void NoteSubmit(int64_t us, uint32_t buffers, uint32_t dwords);
+// Main thread, in the flip submit after BeginFrame: its command buffers and their dwords in all.
+void SetFlipBuffers(uint32_t buffers, uint32_t dwords);
 // Writes buffered rows to the file (the status line calls it every 30 flips).
 void Flush();
 
