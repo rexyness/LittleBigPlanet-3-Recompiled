@@ -598,6 +598,29 @@ void MouseChecks() {
     MouseClick(x, y);
     CHECK_EQ(a5.count, 1);
     CHECK_EQ(a5.button, 2);
+    // A list has no buttons (as on a PS4); its hint row's Cross item ("Save") chooses the
+    // selected entry, and Circle's backs out.
+    Answers a6;
+    Show(SaveList(5, 1), Recorder(a6));
+    Pad(0);
+    Pad(0);
+    CHECK(!testing::ButtonCentre(1, x, y));
+    CHECK(!testing::ButtonCentre(2, x, y));
+    Pad(ps4::PAD_DOWN);  // selection 1 -> 2
+    Pad(0);
+    CHECK(testing::EnterHintCentre(x, y));
+    MouseClick(x, y);
+    CHECK_EQ(a6.count, 1);
+    CHECK_EQ(a6.button, 1);
+    CHECK_EQ(a6.item, 2);
+    Answers a7;
+    Show(SaveList(5, 1), Recorder(a7));
+    Pad(0);
+    Pad(0);
+    CHECK(testing::BackHintCentre(x, y));
+    MouseClick(x, y);
+    CHECK_EQ(a7.count, 1);
+    CHECK_EQ(a7.button, 2);  // the list's cancel button
     MouseMove(5.f, 5.f);
 }
 

@@ -25,6 +25,7 @@ size_t LiveCount();
 bool ButtonCentre(int button, float& x, float& y);
 bool RowCentre(int index, float& x, float& y);
 bool BackHintCentre(float& x, float& y);
+bool EnterHintCentre(float& x, float& y);  // the hint row's Cross item (a list's "Save")
 // The pad the dialogs read instead of input::Read(0), until cleared with nullptr.
 void SetPad(const ps4::PadData* pad);
 // A millisecond clock for repeats and double clicks instead of SDL_GetTicks (nullptr = real).

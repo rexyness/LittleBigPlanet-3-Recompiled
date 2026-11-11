@@ -338,6 +338,7 @@ struct Box {
 
 struct HintItem {
     bool present = false;
+    std::string text;  // "Enter", "Back", or a list's action ("Save", "Load", "Delete")
     Box hit;           // the hover/click area
     ImVec2 glyph{};    // the glyph's centre
     ImVec2 label{};    // the label's top-left
@@ -403,7 +404,9 @@ Geometry Compute(const Live& l, ImVec2 display) {
         y = g.bar.max.y;
     }
     const bool b1 = HasButton(r, 1), b2 = HasButton(r, 2);
-    if (b1 || b2) {
+    // A list has no buttons, as on a PS4: Cross on an entry chooses it (button 1 with that
+    // entry), Circle backs out, and the hint row names the action.
+    if (!list && (b1 || b2)) {
         y += 40.f * s;
         const float h = 64.f * s, gap = 24.f * s;
         float w[2] = {0.f, 0.f};
@@ -432,8 +435,9 @@ Geometry Compute(const Live& l, ImVec2 display) {
         g.glyphSize = 24.f * s;
         const float gap = 10.f * s, between = 34.f * s, cy = y + rowH * 0.5f;
         float x = panelW - 34.f * s;
-        const auto place = [&](HintItem& item, const char* label) {
-            const ImVec2 ts = TextSize(g_font, g.hintSize, label);
+        const auto place = [&](HintItem& item, const std::string& label) {
+            item.text = label;
+            const ImVec2 ts = TextSize(g_font, g.hintSize, label.c_str());
             const float w = g.glyphSize + gap + ts.x;
             x -= w;
             item.present = true;
@@ -443,7 +447,7 @@ Geometry Compute(const Live& l, ImVec2 display) {
             x -= between;
         };
         if (r.cancelButton != 0) place(g.back, "Back");
-        if (b1 || b2) place(g.enter, "Enter");
+        if (list ? b1 : (b1 || b2)) place(g.enter, list ? Utf8(r.button1) : std::string("Enter"));
         y += rowH;
     }
     const float panelH = y;
@@ -639,7 +643,7 @@ void DrawList(ImDrawList* dl, const Live& l, const Geometry& g, bool active, int
     }
 }
 
-void DrawHint(ImDrawList* dl, const Geometry& g, bool active, bool hoverBack) {
+void DrawHint(ImDrawList* dl, const Geometry& g, bool active, bool hoverBack, bool hoverEnter) {
     const float s = g.s;
     dl->AddLine({g.panel.min.x, g.hint.min.y}, {g.panel.max.x, g.hint.min.y}, kLine);
     const ImU32 col = active ? kText : kDimText;
@@ -647,11 +651,12 @@ void DrawHint(ImDrawList* dl, const Geometry& g, bool active, bool hoverBack) {
     if (g.back.present) {
         if (hoverBack) dl->AddRectFilled(g.back.hit.min, g.back.hit.max, IM_COL32(44, 44, 44, 255), 4.f * s);
         DrawButtonGlyph(dl, g.back.glyph, g.glyphSize, false, col, t);
-        dl->AddText(g_font, g.hintSize, g.back.label, col, "Back");
+        dl->AddText(g_font, g.hintSize, g.back.label, col, g.back.text.c_str());
     }
     if (g.enter.present) {
+        if (hoverEnter) dl->AddRectFilled(g.enter.hit.min, g.enter.hit.max, IM_COL32(44, 44, 44, 255), 4.f * s);
         DrawButtonGlyph(dl, g.enter.glyph, g.glyphSize, true, col, t);
-        dl->AddText(g_font, g.hintSize, g.enter.label, col, "Enter");
+        dl->AddText(g_font, g.hintSize, g.enter.label, col, g.enter.text.c_str());
     }
 }
 
@@ -673,6 +678,7 @@ struct Hover {
     int button = 0;  // 1, 2 or 0
     int row = -1;    // list entry under the pointer
     bool back = false;
+    bool enter = false;
 };
 
 // The top dialog's geometry as last drawn (dlgtest's hit points).
@@ -701,7 +707,7 @@ void DrawDialog(const Live& l, const Geometry& g, bool active, const Hover& hove
         DrawButton(dl, g.buttons[i], i == 0 ? l.request.button1 : l.request.button2, focused == i + 1, active,
                    hover.button == i + 1, s);
     }
-    if (g.hintRow) DrawHint(dl, g, active, hover.back);
+    if (g.hintRow) DrawHint(dl, g, active, hover.back, hover.enter);
 }
 
 // The mouse on the top dialog: hovering moves the focus or the selection when the pointer
@@ -742,6 +748,10 @@ bool Mouse(Live& l, const Geometry& g, Hover& hover) {
     if (g.back.present && g.back.hit.Contains(m)) {
         hover.back = true;
         if (click) return Press(l, l.request.cancelButton);
+    }
+    if (g.enter.present && g.enter.hit.Contains(m)) {  // a list's "Save": the selected entry
+        hover.enter = true;
+        if (click) return Press(l, FocusedButton(l));
     }
     return false;
 }
@@ -962,6 +972,14 @@ bool RowCentre(int index, float& x, float& y) {
     if (i < 0 || i >= g_lastTop.rows) return false;
     x = g_lastTop.list.Centre().x;
     y = g_lastTop.list.min.y + (i + 0.5f) * g_lastTop.rowH;
+    return true;
+}
+
+bool EnterHintCentre(float& x, float& y) {
+    if (!Drawn() || !g_lastTop.enter.present) return false;
+    const ImVec2 c = g_lastTop.enter.hit.Centre();
+    x = c.x;
+    y = c.y;
     return true;
 }
 
