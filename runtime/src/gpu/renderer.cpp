@@ -1,6 +1,7 @@
 ﻿// Wiring follows shadPS4's Presenter constructor and gnmdriver PerformSubmit
 // (GPL-2.0-or-later).
 #include "gpu/renderer.h"
+#include "gpu/frame_split.h"
 
 #include <algorithm>
 #include <array>
@@ -34,6 +35,11 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+
+namespace Vulkan {  // vk_pipeline_cache.cpp (LBP3 measurement counters)
+extern std::atomic<u32> g_lbp3ShaderCompiles, g_lbp3PipelineCompiles;
+extern std::atomic<u64> g_lbp3ShaderCompileUs, g_lbp3PipelineCompileUs;
+}  // namespace Vulkan
 
 namespace core {
 void* ProcParam();  // runtime/src/core/runner.h (not included: shadPS4 has its own core/ headers)
@@ -223,11 +229,14 @@ bool ReadbackDisplayBuffer(const DisplayBufferDesc& d, std::vector<uint8_t>& out
         .imageExtent = {width, height, 1},
     };
     cmd.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal, g_staging.buffer, region);
+    split::Mark(split::FinishBegin);
     g_scheduler->Finish();  // wait for the GPU; fine for a first version
+    split::Mark(split::FinishEnd);
 
     vmaInvalidateAllocation(g_instance->GetAllocator(), g_staging.allocation, 0, bytes);
     out.resize(bytes);
     std::memcpy(out.data(), g_staging.mapped, bytes);
+    split::Mark(split::CopyEnd);
     return true;
 }
 
@@ -573,17 +582,65 @@ void DumpImage(VideoCore::Image& image, const char* base) {
 // game may satisfy that only after its submit call returns, as on the console, where
 // submits are asynchronous (waiting there deadlocked the Newton cutscene and thrusters).
 // LBP3_SYNC_STRICT=1 always waits for idle (for comparison).
-void WaitGpu() {
+int WaitGpu() {
     static const bool strict = std::getenv("LBP3_SYNC_STRICT") != nullptr;
-    if (strict) g_liverpool->WaitGpuIdle();
-    else g_liverpool->WaitGpuIdleOrBlocked();
+    if (strict) {
+        g_liverpool->WaitGpuIdle();
+        return kWaitIdle;
+    }
+    return g_liverpool->WaitGpuIdleOrBlocked();
+}
+
+// Milestone 5 measurement: early releases per call site (see renderer.h).
+std::atomic<uint32_t> g_releases[3][2]{};
+void CountRelease(int site, int result) {
+    if (result == kWaitReleasedKnown) ++g_releases[site][0];
+    else if (result == kWaitReleasedGrace) ++g_releases[site][1];
 }
 
 uint32_t TakeEarlyReleases() { return g_liverpool ? g_liverpool->early_releases.exchange(0) : 0; }
 uint32_t LearnedWaits() { return g_liverpool ? g_liverpool->learned_waits.load() : 0; }
 
-void WaitIdle() {
-    if (g_liverpool) WaitGpu();
+// LBP3_SUBMIT_WAIT=all: the pre-submit wait and the submit wait both wait on every queue
+// (the behaviour before ticket 10 and milestone 5); otherwise both wait for graphics only.
+bool SubmitWaitAll() {
+    static const bool all = [] {
+        const char* v = std::getenv("LBP3_SUBMIT_WAIT");
+        return v && std::string(v) == "all";
+    }();
+    return all;
+}
+
+// Before a frame is patched and submitted ("the previous frame must be done", as the real
+// driver does). Graphics only (milestone 5, perf/slow_frames.md): waiting on every queue here
+// let the async compute queue, parked on one of the game's label waits that only the coming
+// frame's graphics work satisfies, hold the game for the 20 ms grace, eight frames in a row
+// once per session while those addresses were learned. The graphics queue is idle here (the
+// previous submit already waited for it), so ticket 10's early-release race can't reopen.
+int WaitIdle() {
+    if (!g_liverpool) return kWaitIdle;
+    static const bool strict = std::getenv("LBP3_SYNC_STRICT") != nullptr;
+    const int result = SubmitWaitAll() || strict ? WaitGpu() : g_liverpool->WaitGfxIdleOrBlocked();
+    CountRelease(0, result);
+    return result;
+}
+
+PerfCounters ReadPerfCounters() {
+    PerfCounters c;
+    if (g_liverpool) {
+        c.gfxBlockedNs = g_liverpool->lbp3_gfx_blocked_ns.load();
+        c.gfxBlockedWaits = g_liverpool->lbp3_gfx_blocked_waits.load();
+    }
+    c.shaderCompiles = Vulkan::g_lbp3ShaderCompiles.load();
+    c.shaderUs = Vulkan::g_lbp3ShaderCompileUs.load();
+    c.pipelineCompiles = Vulkan::g_lbp3PipelineCompiles.load();
+    c.pipelineUs = Vulkan::g_lbp3PipelineCompileUs.load();
+    return c;
+}
+
+void ReadReleaseCounts(uint32_t out[3][2]) {
+    for (int s = 0; s < 3; ++s)
+        for (int k = 0; k < 2; ++k) out[s][k] = g_releases[s][k].load();
 }
 
 // Ported from shadPS4's gnmdriver.cpp.
@@ -609,7 +666,7 @@ void DingDong(uint32_t gnmVqid, uint32_t nextOffsDw) {
     static std::mutex submitMutex;
     static uint32_t nextOffs[64]{};  // where each ring's unsubmitted commands start
     std::scoped_lock lk{submitMutex};
-    WaitGpu();
+    CountRelease(1, WaitGpu());
     const uint32_t vqid = gnmVqid - 1;
     auto& queue = g_liverpool->asc_queues[{vqid}];
     auto& offs = nextOffs[vqid];
@@ -626,8 +683,8 @@ void DingDong(uint32_t gnmVqid, uint32_t nextOffsDw) {
     g_liverpool->SubmitAsc(gnmVqid, acb);
 }
 
-void SubmitGfx(const uint32_t* dcb, uint32_t dcbBytes, const uint32_t* ccb, uint32_t ccbBytes) {
-    if (!g_liverpool) return;
+int SubmitGfx(const uint32_t* dcb, uint32_t dcbBytes, const uint32_t* ccb, uint32_t ccbBytes) {
+    if (!g_liverpool) return kWaitNone;
     if (!g_sentInit) {
         g_sentInit = true;
         // LBP3 is SDK 2.00 on a base PS4; same choice as shadPS4's PerformSubmit.
@@ -657,6 +714,7 @@ void SubmitGfx(const uint32_t* dcb, uint32_t dcbBytes, const uint32_t* ccb, uint
         dcbSpan = d;
         ccbSpan = c;
     }
+    split::Mark(split::Enqueued);
     g_liverpool->SubmitGfx(dcbSpan, ccbSpan);
     // Finish each submission before returning to the game. With the command
     // processor running behind the game, LBP3's Bink video decoder rewrote a
@@ -665,14 +723,11 @@ void SubmitGfx(const uint32_t* dcb, uint32_t dcbBytes, const uint32_t* ccb, uint
     static const bool async = std::getenv("LBP3_GPU_ASYNC") != nullptr;
     // Wait for the graphics queue only (ticket 10). LBP3_SUBMIT_WAIT=all restores waiting on
     // every queue, where a blocked compute queue released the game before this submission ran.
-    static const bool waitAll = [] {
-        const char* v = std::getenv("LBP3_SUBMIT_WAIT");
-        return v && std::string(v) == "all";
-    }();
     static const bool strict = std::getenv("LBP3_SYNC_STRICT") != nullptr;
-    if (async) return;
-    if (waitAll || strict) WaitGpu();
-    else g_liverpool->WaitGfxIdleOrBlocked();
+    if (async) return kWaitNone;
+    const int result = SubmitWaitAll() || strict ? WaitGpu() : g_liverpool->WaitGfxIdleOrBlocked();
+    CountRelease(2, result);
+    return result;
 }
 
 }  // namespace gpu

@@ -222,6 +222,12 @@ int64_t ReadImpl(int fd, void* buf, uint64_t len, const int64_t* offset) {
     // the GPU's write tracking, and ReadFile fails on such pages rather than
     // faulting. The memcpy faults normally and the tracker unprotects.
     thread_local std::vector<uint8_t> bounce(1 << 20);
+    // Milestone 5 measurement: a read that takes over 20 ms is logged with its time split
+    // into the disk (ReadFile) and the copy into guest memory (memcpy, where write-tracking
+    // faults on GPU-protected pages land). A few QueryPerformanceCounter calls per MB.
+    LARGE_INTEGER qpcStart, qpcMark, qpcNow;
+    QueryPerformanceCounter(&qpcStart);
+    int64_t diskTicks = 0, copyTicks = 0;
     while (total < len) {
         DWORD chunk = static_cast<DWORD>(std::min<uint64_t>(len - total, bounce.size()));
         DWORD got = 0;
@@ -233,14 +239,34 @@ int64_t ReadImpl(int fd, void* buf, uint64_t len, const int64_t* offset) {
             ov.OffsetHigh = static_cast<DWORD>(at >> 32);
             pov = &ov;
         }
+        QueryPerformanceCounter(&qpcMark);
         if (!ReadFile(f->handle, bounce.data(), chunk, &got, pov)) {
             DWORD e = GetLastError();
             if (e == ERROR_HANDLE_EOF) break;
             return total ? static_cast<int64_t>(total) : SceErr(FromWin32(e));
         }
+        QueryPerformanceCounter(&qpcNow);
+        diskTicks += qpcNow.QuadPart - qpcMark.QuadPart;
         std::memcpy(out + total, bounce.data(), got);
+        QueryPerformanceCounter(&qpcMark);
+        copyTicks += qpcMark.QuadPart - qpcNow.QuadPart;
         total += got;
         if (got < chunk) break;
+    }
+    {
+        static const double ticksPerMs = [] {
+            LARGE_INTEGER freq;
+            QueryPerformanceFrequency(&freq);
+            return static_cast<double>(freq.QuadPart) / 1000.0;
+        }();
+        QueryPerformanceCounter(&qpcNow);
+        const double ms = static_cast<double>(qpcNow.QuadPart - qpcStart.QuadPart) / ticksPerMs;
+        if (ms > 20.0)
+            std::fprintf(stderr, "[fs] slow read %.1f ms (disk %.1f, copy %.1f): %s, %llu bytes at %lld -> %llu [%s]\n",
+                         ms, static_cast<double>(diskTicks) / ticksPerMs, static_cast<double>(copyTicks) / ticksPerMs,
+                         f->guest.c_str(), static_cast<unsigned long long>(len),
+                         offset ? static_cast<long long>(*offset) : -1LL, static_cast<unsigned long long>(total),
+                         core::ThreadName(GetCurrentThreadId()).c_str());
     }
     // LBP3_TRACE_READS=N logs the first N archive (.farc) reads with thread and offset.
     {

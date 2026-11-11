@@ -38,6 +38,7 @@ add_library(video_core STATIC
     ${SHADPS4}/src/common/spin_lock.cpp
     src/gpu/video_core_glue.cpp
     src/gpu/renderer.cpp
+    src/gpu/frame_split.cpp
 )
 add_dependencies(video_core host_shaders)
 set_target_properties(video_core PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
