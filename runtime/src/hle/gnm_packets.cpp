@@ -99,17 +99,19 @@ FILL_FUNCTION_LOGGED(sceGnmUpdateVsShader, const uint32_t*, uint32_t)
 // ---- Geometry and tessellation stages (gap 15) ----
 // LBP3 draws some objects with an ES+GS stage set (eboot+0x465d40; perf/dropped_draws.md).
 // These were NOP fills, so the ES and GS program registers stayed 0 and shadPS4 dropped those
-// draws whole, every frame. With LBP3_GS_STAGES=1 they write the registers as shadPS4's
-// gnmdriver.cpp does (sceGnmSetEsShader and on, ~1563-1688, and the Update* forms at
-// ~2393-2456, whose context-register "updates" are NOPs the command processor ignores). The
-// rest of each reserved block stays a trailing NOP, so the stream keeps its layout. Off by
-// default until judged in the game.
+// draws whole, every frame. Now they write the registers as shadPS4's gnmdriver.cpp does
+// (sceGnmSetEsShader and on, ~1563-1688, and the Update* forms at ~2393-2456, whose
+// context-register "updates" are NOPs the command processor ignores). The rest of each
+// reserved block stays a trailing NOP, so the stream keeps its layout. On by default since
+// 2026-11-12 (ticket 15: with the real GS vertex count and the device-limit guard in shadPS4,
+// 0 dropped draws and no GPU fault in the Pod, the Introduction and Bunkum; milestone 1
+// passes). LBP3_GS_STAGES=0 restores the NOP fills.
 namespace {
 
 bool GsStagesOn() {
     static const bool on = [] {
         const char* v = std::getenv("LBP3_GS_STAGES");
-        const bool enabled = v && std::strcmp(v, "1") == 0;
+        const bool enabled = !(v && std::strcmp(v, "0") == 0);
         std::fprintf(stderr, "[gnm] geometry/tessellation stage setup: %s (LBP3_GS_STAGES)\n",
                      enabled ? "on" : "off (NOP fills; such draws are dropped)");
         return enabled;
