@@ -37,7 +37,7 @@
 #include <windows.h>
 
 namespace Vulkan {  // vk_pipeline_cache.cpp (LBP3 measurement counters)
-extern std::atomic<u32> g_lbp3ShaderCompiles, g_lbp3PipelineCompiles;
+extern std::atomic<u32> g_lbp3ShaderCompiles, g_lbp3PipelineCompiles, g_lbp3DroppedDraws;
 extern std::atomic<u64> g_lbp3ShaderCompileUs, g_lbp3PipelineCompileUs;
 }  // namespace Vulkan
 
@@ -635,6 +635,7 @@ PerfCounters ReadPerfCounters() {
     c.shaderUs = Vulkan::g_lbp3ShaderCompileUs.load();
     c.pipelineCompiles = Vulkan::g_lbp3PipelineCompiles.load();
     c.pipelineUs = Vulkan::g_lbp3PipelineCompileUs.load();
+    c.droppedDraws = Vulkan::g_lbp3DroppedDraws.load();
     return c;
 }
 

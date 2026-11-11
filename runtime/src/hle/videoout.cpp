@@ -147,13 +147,13 @@ void PrintPerfLine() {
     gpu::ReadReleaseCounts(rel);
     std::fprintf(stderr,
                  "[perf] compiled %u pipelines (%.0f ms), %u shaders (%.0f ms); gfx blocked %.1f ms/frame in %u waits; "
-                 "early releases: wait-idle %u+%u, compute %u+%u, submit %u+%u (known+grace)\n",
+                 "early releases: wait-idle %u+%u, compute %u+%u, submit %u+%u (known+grace); dropped %u draws\n",
                  now.pipelineCompiles - last.pipelineCompiles, (now.pipelineUs - last.pipelineUs) / 1000.0,
                  now.shaderCompiles - last.shaderCompiles, (now.shaderUs - last.shaderUs) / 1000.0,
                  static_cast<double>(now.gfxBlockedNs - last.gfxBlockedNs) / 1e6 / kFlipsPerStatus,
                  now.gfxBlockedWaits - last.gfxBlockedWaits, rel[0][0] - lastRel[0][0], rel[0][1] - lastRel[0][1],
                  rel[1][0] - lastRel[1][0], rel[1][1] - lastRel[1][1], rel[2][0] - lastRel[2][0],
-                 rel[2][1] - lastRel[2][1]);
+                 rel[2][1] - lastRel[2][1], now.droppedDraws - last.droppedDraws);
     last = now;
     for (int s = 0; s < 3; ++s)
         for (int k = 0; k < 2; ++k) lastRel[s][k] = rel[s][k];

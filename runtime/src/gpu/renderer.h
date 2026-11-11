@@ -44,6 +44,7 @@ struct PerfCounters {
     uint64_t shaderUs = 0;
     uint32_t pipelineCompiles = 0;  // first-sight Vulkan pipelines (after boot's warm-up)
     uint64_t pipelineUs = 0;
+    uint32_t droppedDraws = 0;      // draws with no pipeline (gap 15; "[gpu] dropped draw" lines)
 };
 PerfCounters ReadPerfCounters();
 // Early releases per call site, totals since start: [0] the main thread's WaitIdle before a

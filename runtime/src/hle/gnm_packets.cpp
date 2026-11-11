@@ -5,6 +5,9 @@
 // of sync. Until rendering exists, each one fills its space with a single NOP
 // packet; the real register writes come with the GPU work (shadPS4's
 // gnmdriver.cpp has them). Sizes follow shadPS4.
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 #include <iterator>
@@ -64,12 +67,22 @@ int PS4_SYSV_ABI sceGnmInsertWaitFlipDone(uint32_t* cmd, uint32_t size, int32_t,
     return kernel::SCE_OK;
 }
 
-// All of these take (cmd, size, ...) and own exactly `size` dwords.
+// All of these take (cmd, size, ...) and own exactly `size` dwords. The shader ones log their
+// first call (gap 15: which of the NOP-filled setups LBP3 actually uses).
 #define FILL_FUNCTION(name, ...)                                     \
     int PS4_SYSV_ABI name(uint32_t* cmd, uint32_t size, ##__VA_ARGS__) { \
         if (!cmd) return -1;                                         \
         FillNop(cmd, size);                                          \
         return kernel::SCE_OK;                                       \
+    }
+#define FILL_FUNCTION_LOGGED(name, ...)                                                          \
+    int PS4_SYSV_ABI name(uint32_t* cmd, uint32_t size, ##__VA_ARGS__) {                         \
+        if (!cmd) return -1;                                                                     \
+        static std::atomic<bool> logged{false};                                                  \
+        if (!logged.exchange(true))                                                              \
+            std::fprintf(stderr, "[gnm] first call: " #name " (%u dwords; NOP fill)\n", size);  \
+        FillNop(cmd, size);                                                                      \
+        return kernel::SCE_OK;                                                                   \
     }
 
 FILL_FUNCTION(sceGnmInsertPopMarker)
@@ -77,16 +90,146 @@ FILL_FUNCTION(sceGnmInsertPushMarker, const char*)
 FILL_FUNCTION(sceGnmInsertSetMarker, const char*)
 FILL_FUNCTION(sceGnmInsertPushColorMarker, const char*, uint32_t)
 FILL_FUNCTION(sceGnmInsertSetColorMarker, const char*, uint32_t)
-FILL_FUNCTION(sceGnmUpdatePsShader, const uint32_t*)
-FILL_FUNCTION(sceGnmUpdateVsShader, const uint32_t*, uint32_t)
-FILL_FUNCTION(sceGnmSetEsShader, const uint32_t*, uint32_t)
-FILL_FUNCTION(sceGnmSetGsShader, const uint32_t*)
-FILL_FUNCTION(sceGnmUpdateGsShader, const uint32_t*)
-FILL_FUNCTION(sceGnmSetHsShader, const uint32_t*, uint32_t)
-FILL_FUNCTION(sceGnmUpdateHsShader, const uint32_t*, uint32_t)
-FILL_FUNCTION(sceGnmSetLsShader, const uint32_t*, uint32_t)
+FILL_FUNCTION_LOGGED(sceGnmUpdatePsShader, const uint32_t*)
+FILL_FUNCTION_LOGGED(sceGnmUpdateVsShader, const uint32_t*, uint32_t)
 
 #undef FILL_FUNCTION
+#undef FILL_FUNCTION_LOGGED
+
+// ---- Geometry and tessellation stages (gap 15) ----
+// LBP3 draws some objects with an ES+GS stage set (eboot+0x465d40; perf/dropped_draws.md).
+// These were NOP fills, so the ES and GS program registers stayed 0 and shadPS4 dropped those
+// draws whole, every frame. With LBP3_GS_STAGES=1 they write the registers as shadPS4's
+// gnmdriver.cpp does (sceGnmSetEsShader and on, ~1563-1688, and the Update* forms at
+// ~2393-2456, whose context-register "updates" are NOPs the command processor ignores). The
+// rest of each reserved block stays a trailing NOP, so the stream keeps its layout. Off by
+// default until judged in the game.
+namespace {
+
+bool GsStagesOn() {
+    static const bool on = [] {
+        const char* v = std::getenv("LBP3_GS_STAGES");
+        const bool enabled = v && std::strcmp(v, "1") == 0;
+        std::fprintf(stderr, "[gnm] geometry/tessellation stage setup: %s (LBP3_GS_STAGES)\n",
+                     enabled ? "on" : "off (NOP fills; such draws are dropped)");
+        return enabled;
+    }();
+    return on;
+}
+
+void FirstCall(std::atomic<bool>& logged, const char* name, uint32_t size) {
+    if (!logged.exchange(true))
+        std::fprintf(stderr, "[gnm] first call: %s (%u dwords; %s)\n", name, size,
+                     GsStagesOn() ? "registers written" : "NOP fill");
+}
+
+}  // namespace
+
+int PS4_SYSV_ABI sceGnmSetEsShader(uint32_t* cmd, uint32_t size, const uint32_t* es, uint32_t modifier) {
+    if (!cmd) return -1;
+    static std::atomic<bool> logged{false};
+    FirstCall(logged, "sceGnmSetEsShader", size);
+    if (!GsStagesOn()) {
+        FillNop(cmd, size);
+        return kernel::SCE_OK;
+    }
+    if (size < 0x14 || !es || (modifier & 0xFCFFFC3F) || es[1] != 0) return -1;
+    uint32_t* const end = cmd + size;
+    const uint32_t rsrc1 = modifier == 0 ? es[2] : (es[2] & 0xFCFFFC3F) | modifier;
+    cmd = ShReg(cmd, 0xC8, {es[0], 0});      // SPI_SHADER_PGM_LO/HI_ES
+    cmd = ShReg(cmd, 0xCA, {rsrc1, es[3]});  // SPI_SHADER_PGM_RSRC1/2_ES
+    FillNop(cmd, static_cast<uint32_t>(end - cmd));
+    return kernel::SCE_OK;
+}
+
+int PS4_SYSV_ABI sceGnmSetGsShader(uint32_t* cmd, uint32_t size, const uint32_t* gs) {
+    if (!cmd) return -1;
+    static std::atomic<bool> logged{false};
+    FirstCall(logged, "sceGnmSetGsShader", size);
+    if (!GsStagesOn()) {
+        FillNop(cmd, size);
+        return kernel::SCE_OK;
+    }
+    if (size < 0x1D || !gs || gs[1] != 0) return -1;
+    uint32_t* const end = cmd + size;
+    cmd = ShReg(cmd, 0x88, {gs[0], 0});       // SPI_SHADER_PGM_LO/HI_GS
+    cmd = ShReg(cmd, 0x8A, {gs[2], gs[3]});   // SPI_SHADER_PGM_RSRC1/2_GS
+    cmd = CtxReg(cmd, 0x2E5, {gs[4]});        // VGT_STRMOUT_CONFIG
+    cmd = CtxReg(cmd, 0x29B, {gs[5]});        // VGT_GS_OUT_PRIM_TYPE
+    cmd = CtxReg(cmd, 0x2E4, {gs[6]});        // VGT_GS_INSTANCE_CNT
+    FillNop(cmd, static_cast<uint32_t>(end - cmd));
+    return kernel::SCE_OK;
+}
+
+int PS4_SYSV_ABI sceGnmUpdateGsShader(uint32_t* cmd, uint32_t size, const uint32_t* gs) {
+    if (!cmd) return -1;
+    static std::atomic<bool> logged{false};
+    FirstCall(logged, "sceGnmUpdateGsShader", size);
+    if (!GsStagesOn()) {
+        FillNop(cmd, size);
+        return kernel::SCE_OK;
+    }
+    if (size < 0x1D || !gs || gs[1] != 0) return -1;
+    uint32_t* const end = cmd + size;
+    cmd = ShReg(cmd, 0x88, {gs[0], 0});      // SPI_SHADER_PGM_LO/HI_GS
+    cmd = ShReg(cmd, 0x8A, {gs[2], gs[3]});  // SPI_SHADER_PGM_RSRC1/2_GS
+    FillNop(cmd, static_cast<uint32_t>(end - cmd));
+    return kernel::SCE_OK;
+}
+
+int PS4_SYSV_ABI sceGnmSetHsShader(uint32_t* cmd, uint32_t size, const uint32_t* hs, uint32_t lsHsConfig) {
+    if (!cmd) return -1;
+    static std::atomic<bool> logged{false};
+    FirstCall(logged, "sceGnmSetHsShader", size);
+    if (!GsStagesOn()) {
+        FillNop(cmd, size);
+        return kernel::SCE_OK;
+    }
+    if (size < 0x1E || !hs || hs[1] != 0) return -1;
+    uint32_t* const end = cmd + size;
+    cmd = ShReg(cmd, 0x108, {hs[0], 0});        // SPI_SHADER_PGM_LO/HI_HS
+    cmd = ShReg(cmd, 0x10A, {hs[2], hs[3]});    // SPI_SHADER_PGM_RSRC1/2_HS
+    cmd = CtxReg(cmd, 0x286, {hs[5], hs[6]});   // VGT_HOS_MAX/MIN_TESS_LEVEL
+    cmd = CtxReg(cmd, 0x2DB, {hs[4]});          // VGT_TF_PARAM
+    cmd = CtxReg(cmd, 0x2D6, {lsHsConfig});     // VGT_LS_HS_CONFIG
+    FillNop(cmd, static_cast<uint32_t>(end - cmd));
+    return kernel::SCE_OK;
+}
+
+int PS4_SYSV_ABI sceGnmUpdateHsShader(uint32_t* cmd, uint32_t size, const uint32_t* hs, uint32_t) {
+    if (!cmd) return -1;
+    static std::atomic<bool> logged{false};
+    FirstCall(logged, "sceGnmUpdateHsShader", size);
+    if (!GsStagesOn()) {
+        FillNop(cmd, size);
+        return kernel::SCE_OK;
+    }
+    if (size <= 0x1C || !hs || hs[1] != 0) return -1;
+    uint32_t* const end = cmd + size;
+    cmd = ShReg(cmd, 0x108, {hs[0], 0});      // SPI_SHADER_PGM_LO/HI_HS
+    cmd = ShReg(cmd, 0x10A, {hs[2], hs[3]});  // SPI_SHADER_PGM_RSRC1/2_HS
+    FillNop(cmd, static_cast<uint32_t>(end - cmd));
+    return kernel::SCE_OK;
+}
+
+int PS4_SYSV_ABI sceGnmSetLsShader(uint32_t* cmd, uint32_t size, const uint32_t* ls, uint32_t modifier) {
+    if (!cmd) return -1;
+    static std::atomic<bool> logged{false};
+    FirstCall(logged, "sceGnmSetLsShader", size);
+    if (!GsStagesOn()) {
+        FillNop(cmd, size);
+        return kernel::SCE_OK;
+    }
+    const uint32_t mask = (modifier & 0xFFFFFC3F) == 0 ? 0xFFFFFC3F : 0xFCFFFC3F;
+    if (size < 0x17 || !ls || (modifier & mask) || ls[1] != 0) return -1;
+    uint32_t* const end = cmd + size;
+    const uint32_t rsrc1 = modifier == 0 ? ls[2] : (ls[2] & mask) | modifier;
+    cmd = ShReg(cmd, 0x148, {ls[0], 0});      // SPI_SHADER_PGM_LO/HI_LS
+    cmd = ShReg(cmd, 0x14B, {ls[3]});         // SPI_SHADER_PGM_RSRC2_LS
+    cmd = ShReg(cmd, 0x14A, {rsrc1, ls[3]});  // SPI_SHADER_PGM_RSRC1/2_LS
+    FillNop(cmd, static_cast<uint32_t>(end - cmd));
+    return kernel::SCE_OK;
+}
 
 // Hardware init, ported from shadPS4. Each fills exactly kHwInitPacketSize dwords.
 uint32_t PS4_SYSV_ABI sceGnmDrawInitDefaultHardwareState200(uint32_t* cmd, uint32_t size) {
