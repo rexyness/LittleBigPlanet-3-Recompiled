@@ -189,8 +189,10 @@ void Keyboard::Move(int dRow, int dCol, bool repeating) {
     }
     if (dRow == 0) return;
     // Up or down: the nearest key in the next row that has one (a gap in the column doesn't
-    // send the cursor around the whole keyboard).
+    // send the cursor around the whole keyboard). A key spanning rows (the symbol pages' page
+    // key) is left from its first row going up and its last row going down.
     int r = row_;
+    if (origin) r = dRow > 0 ? origin->row + std::max<int>(1, origin->rowSpan) - 1 : origin->row;
     for (int i = 0; i < l.rows; ++i) {
         int next = r + (dRow > 0 ? 1 : -1);
         if (next < 0 || next >= l.rows) {
@@ -360,6 +362,7 @@ void Keyboard::CursorUp() {
     const size_t prevStart = LineStart(start - 1);
     const size_t prevLen = (start - 1) - prevStart;
     cursor_ = prevStart + std::min(column, prevLen);
+    if (cursor_ > 0 && cursor_ < text_.size() && IsHigh(text_[cursor_ - 1]) && IsLow(text_[cursor_])) --cursor_;
     ++edits_;
 }
 
@@ -379,6 +382,7 @@ void Keyboard::CursorDown() {
     size_t nextEnd = text_.find(u'\n', nextStart);
     if (nextEnd == std::u16string::npos) nextEnd = text_.size();
     cursor_ = nextStart + std::min(column, nextEnd - nextStart);
+    if (cursor_ > 0 && cursor_ < text_.size() && IsHigh(text_[cursor_ - 1]) && IsLow(text_[cursor_])) --cursor_;
     ++edits_;
 }
 
