@@ -73,7 +73,9 @@ add_library(hle STATIC
     src/core/native_trace.cpp
     src/video/presenter.cpp
     src/ui/osk_model.cpp
+    src/ui/overlay.cpp
     src/ui/osk_overlay.cpp
+    src/ui/dialog_overlay.cpp
 )
 target_include_directories(hle PUBLIC src)
 target_include_directories(hle PRIVATE ${SHADPS4_EXT}/stb)  # hle/jpeg.cpp
@@ -103,7 +105,12 @@ target_link_libraries(dialogtest PRIVATE hle)
 add_executable(osktest tests/osktest.cpp)
 target_link_libraries(osktest PRIVATE hle)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest)
+# The system dialogs drawn over the game (ui/dialog_overlay): behaviour checks with a scripted
+# pad, clock and keys, and screenshots (dlgtest --shot <dir>).
+add_executable(dlgtest tests/dlgtest.cpp)
+target_link_libraries(dlgtest PRIVATE hle)
+
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()

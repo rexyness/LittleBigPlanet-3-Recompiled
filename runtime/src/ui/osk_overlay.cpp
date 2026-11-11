@@ -1,6 +1,6 @@
-// The on-screen keyboard over the game window (see ui/osk_overlay.h). State that any thread
-// touches (the requested keyboard, its id) is under g_mutex; everything else, ImGui
-// included, belongs to the presenter thread.
+// The on-screen keyboard over the game window (see ui/osk_overlay.h), a layer of the overlay
+// host (ui/overlay.cpp), which owns ImGui. State that any thread touches (the requested
+// keyboard, its id) is under g_mutex; everything else belongs to the presenter thread.
 //
 // The look follows the PS4 keyboard as shadPS4 measured it (ime_kb_layout.cpp): a 793x528
 // panel at 1080p with a title row, the text field, an empty prediction bar with a close
@@ -11,8 +11,6 @@
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
-#include <imgui_impl_sdl3.h>
-#include <imgui_impl_sdlrenderer3.h>
 
 #include <algorithm>
 #include <atomic>
@@ -28,14 +26,19 @@
 #include "input/gamepad.h"
 #include "ui/osk_model.h"
 #include "ui/osk_testing.h"
+#include "ui/overlay.h"
+#include "ui/overlay_layers.h"
 
 namespace ui::osk {
 namespace {
+
+namespace host = ui::overlay::detail;
 
 // ---- Shared between threads (g_mutex) ----
 
 struct Pending {
     uint64_t id = 0;
+    uint64_t stamp = 0;  // show order among all overlay layers
     Request request;
     AnswerFn onAnswer;
 };
@@ -44,15 +47,11 @@ std::mutex g_mutex;
 std::optional<Pending> g_pending;    // shown, not yet picked up by the presenter
 uint64_t g_nextId = 1;
 std::atomic<uint64_t> g_current{0};  // the keyboard that should be up; 0 = none
-std::atomic<bool> g_attached{false};
 
 // ---- Presenter thread ----
 
-SDL_Window* g_window = nullptr;
-SDL_Renderer* g_renderer = nullptr;
-bool g_imgui = false;
-ImFont* g_font = nullptr;      // Segoe UI (+ Segoe UI Symbol)
-ImFont* g_fontKeys = nullptr;  // Segoe UI Semibold for key labels
+ImFont* g_font = nullptr;      // the host's fonts, refreshed each frame
+ImFont* g_fontKeys = nullptr;
 const ps4::PadData* g_testPad = nullptr;
 uint64_t (*g_testClock)() = nullptr;
 
@@ -64,10 +63,11 @@ constexpr int kStickCentre = 40;     // back inside this = released
 
 struct Live {
     explicit Live(Pending p)
-        : id(p.id), request(std::move(p.request)), onAnswer(std::move(p.onAnswer)),
+        : id(p.id), stamp(p.stamp), request(std::move(p.request)), onAnswer(std::move(p.onAnswer)),
           kb(request.text, request.maxLength, request.multiline) {}
 
-    uint64_t id;
+    uint64_t id, stamp;
+    bool wasTop = true;  // false while a newer overlay (a system dialog) has the input
     Request request;
     AnswerFn onAnswer;
     Keyboard kb;
@@ -91,57 +91,6 @@ std::optional<Live> g_live;
 
 std::string Quoted(const std::u16string& s) { return "\"" + Utf8(s) + "\""; }
 
-// ---- ImGui ----
-
-bool FileExists(const std::string& path) {
-    if (FILE* f = std::fopen(path.c_str(), "rb")) {
-        std::fclose(f);
-        return true;
-    }
-    return false;
-}
-
-ImFont* LoadFont(const std::string& fonts, const char* file) {
-    const std::string main = fonts + file, symbols = fonts + "seguisym.ttf";
-    if (!FileExists(main)) return nullptr;
-    ImGuiIO& io = ImGui::GetIO();
-    ImFont* font = io.Fonts->AddFontFromFileTTF(main.c_str(), 0.0f);
-    if (font && FileExists(symbols)) {  // currency signs and the like
-        ImFontConfig merge;
-        merge.MergeMode = true;
-        io.Fonts->AddFontFromFileTTF(symbols.c_str(), 0.0f, &merge);
-    }
-    return font;
-}
-
-void EnsureImGui() {
-    if (g_imgui) return;
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
-    io.IniFilename = nullptr;
-    io.LogFilename = nullptr;
-    io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
-    ImGui_ImplSDL3_InitForSDLRenderer(g_window, g_renderer);
-    ImGui_ImplSDLRenderer3_Init(g_renderer);
-    // The pad belongs to input::Read; ImGui must not open or navigate with it.
-    ImGui_ImplSDL3_SetGamepadMode(ImGui_ImplSDL3_GamepadMode_Manual, nullptr, 0);
-    // Text input is started and stopped with the keyboard here, not by ImGui widgets.
-    ImGui::GetPlatformIO().Platform_SetImeDataFn = nullptr;
-
-    const char* windir = std::getenv("WINDIR");
-    const std::string fonts = std::string(windir ? windir : "C:\\Windows") + "\\Fonts\\";
-    g_font = LoadFont(fonts, "segoeui.ttf");
-    g_fontKeys = LoadFont(fonts, "seguisb.ttf");
-    if (!g_font) {
-        std::fprintf(stderr, "[osk] Segoe UI not found; using ImGui's built-in font\n");
-        g_font = io.Fonts->AddFontDefault();
-    }
-    if (!g_fontKeys) g_fontKeys = g_font;
-    g_imgui = true;
-    std::fprintf(stderr, "[osk] ImGui %s ready on the %s renderer\n", IMGUI_VERSION, SDL_GetRendererName(g_renderer));
-}
-
 // ---- Lifecycle ----
 
 bool ReadPad(ps4::PadData& pad) {
@@ -154,33 +103,40 @@ bool ReadPad(ps4::PadData& pad) {
 
 void EndLive() {
     if (!g_live) return;
-    if (g_window) SDL_StopTextInput(g_window);
-    // A click that answered leaves its button down in ImGui and the mouse captured (the SDL3
-    // backend captures while a button is down); the release comes after the keyboard is gone.
-    if (g_imgui) ImGui::GetIO().ClearInputMouse();
-    SDL_CaptureMouse(false);
+    if (SDL_Window* w = host::Window()) SDL_StopTextInput(w);
+    // The release of a click that answered comes after the keyboard is gone.
+    host::ReleaseMouse();
     g_live.reset();
 }
 
-void StartLive(Pending p) {
-    EnsureImGui();
-    g_live.emplace(std::move(p));
-    Live& l = *g_live;
+// Whatever is held now (buttons, the stick, Enter and Esc) counts only after a release: when
+// the keyboard comes up, and when it is back on top after a system dialog closed over it.
+void Rearm(Live& l) {
     ps4::PadData pad{};
     const bool ok = ReadPad(pad);
     l.ignore = ok ? pad.buttons : 0;
+    l.prev = 0;
     l.stickIgnored = ok && (std::abs(int(pad.leftStick.x) - 128) > kStickCentre ||
                             std::abs(int(pad.leftStick.y) - 128) > kStickCentre);
+    for (Repeater* r : {&l.up, &l.down, &l.left, &l.right, &l.cross, &l.square, &l.triangle, &l.l1, &l.r1}) r->Reset();
+    l.l2Down = l.l2Combo = l.triangleCombo = false;
     const bool* keys = SDL_GetKeyboardState(nullptr);
     l.enterHeld = keys && (keys[SDL_SCANCODE_RETURN] || keys[SDL_SCANCODE_KP_ENTER]);
     l.escHeld = keys && keys[SDL_SCANCODE_ESCAPE];
-    if (g_window) SDL_StartTextInput(g_window);
+}
+
+void StartLive(Pending p) {
+    host::EnsureImGui();
+    g_live.emplace(std::move(p));
+    Live& l = *g_live;
+    Rearm(l);
+    if (SDL_Window* w = host::Window()) SDL_StartTextInput(w);
     std::fprintf(stderr, "[osk] keyboard #%llu up: %s, up to %u, text %s\n", static_cast<unsigned long long>(l.id),
                  Quoted(l.request.title).c_str(), l.request.maxLength, Quoted(l.request.text).c_str());
 }
 
-// Picks up Show and Close from other threads.
-void Sync() {
+// Picks up Show and Close from other threads. Returns the stamp of the keyboard that is up.
+uint64_t Sync() {
     std::optional<Pending> take;
     uint64_t want;
     {
@@ -193,6 +149,7 @@ void Sync() {
     }
     if (g_live && g_live->id != want) EndLive();  // closed or replaced
     if (take && take->id == want) StartLive(std::move(*take));
+    return g_live ? g_live->stamp : 0;
 }
 
 // The player is done: take the keyboard down, then answer (unless Close got there first).
@@ -647,8 +604,7 @@ void DrawPanel(Live& l, const Geometry& g, ImVec2 display, bool closeHover) {
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     const float s = g.s;
     const uint64_t now = NowMs();
-    // The game stays visible behind, a little darker.
-    dl->AddRectFilled({0.f, 0.f}, display, IM_COL32(0, 0, 0, 96));
+    (void)display;  // the host dims the game behind all overlays
     for (int i = 3; i >= 1; --i) {  // a soft shadow
         const float o = i * 3.f * s;
         dl->AddRectFilled({g.panel.min.x - o, g.panel.min.y - o + 2.f * s},
@@ -699,7 +655,7 @@ void DrawPanel(Live& l, const Geometry& g, ImVec2 display, bool closeHover) {
 
 // ---- Interface ----
 
-bool Available() { return g_attached.load(); }
+bool Available() { return ui::overlay::Available(); }
 
 uint64_t Show(Request request, AnswerFn onAnswer) {
     request.maxLength = std::clamp<uint32_t>(request.maxLength, 1, 2048);
@@ -707,7 +663,7 @@ uint64_t Show(Request request, AnswerFn onAnswer) {
     const uint64_t id = g_nextId++;
     std::fprintf(stderr, "[osk] keyboard #%llu requested: %s, up to %u\n", static_cast<unsigned long long>(id),
                  Quoted(request.title).c_str(), request.maxLength);
-    g_pending = Pending{id, std::move(request), std::move(onAnswer)};
+    g_pending = Pending{id, host::NextStamp(), std::move(request), std::move(onAnswer)};
     g_current = id;
     return id;
 }
@@ -722,33 +678,35 @@ void Close(uint64_t id) {
 
 bool Visible() { return g_current.load() != 0; }
 
-void Attach(SDL_Window* window, SDL_Renderer* renderer) {
-    if (window != g_window || renderer != g_renderer) {
-        // A different window (osktest makes several): ImGui's backends belong to the old one.
-        EndLive();
-        if (g_imgui) {
-            ImGui_ImplSDLRenderer3_Shutdown();
-            ImGui_ImplSDL3_Shutdown();
-            ImGui::DestroyContext();
-            g_imgui = false;
-            g_font = g_fontKeys = nullptr;
-        }
+// The presenter's calls go to the host (ui/overlay.h); these stay for the test programs.
+void Attach(SDL_Window* window, SDL_Renderer* renderer) { ui::overlay::Attach(window, renderer); }
+bool HandleEvent(const SDL_Event& e) { return ui::overlay::HandleEvent(e); }
+void Draw() { ui::overlay::Draw(); }
+
+// ---- Layer (ui/overlay_layers.h) ----
+
+namespace layer {
+
+bool Wanted() { return g_current.load() != 0 || g_live.has_value(); }
+
+uint64_t Sync() { return ui::osk::Sync(); }
+
+bool Poll(bool top) {
+    if (!g_live) return false;
+    Live& l = *g_live;
+    if (!top) {
+        l.wasTop = false;
+        return true;
     }
-    g_window = window;
-    g_renderer = renderer;
-    g_attached = window && renderer;
+    if (!l.wasTop) {  // a system dialog over it just closed: its answering press isn't ours
+        Rearm(l);
+        l.wasTop = true;
+    }
+    return PollPad();
 }
 
-bool HandleEvent(const SDL_Event& e) {
-    if (g_current.load() == 0 && !g_live) {
-        // The release of a click that closed the keyboard: the SDL3 backend still counts the
-        // button as down until it sees it.
-        if (g_imgui && e.type == SDL_EVENT_MOUSE_BUTTON_UP) ImGui_ImplSDL3_ProcessEvent(&e);
-        return false;
-    }
-    Sync();
+bool Event(const SDL_Event& e) {
     if (!g_live) return false;
-    ImGui_ImplSDL3_ProcessEvent(&e);  // the mouse
     Live& l = *g_live;
     Keyboard& kb = l.kb;
     switch (e.type) {
@@ -798,27 +756,21 @@ bool HandleEvent(const SDL_Event& e) {
     }
 }
 
-void Draw() {
-    if (g_current.load() == 0 && !g_live) return;
-    Sync();
+void Frame(bool top, ImVec2 display) {
     if (!g_live) return;
-    if (!PollPad() || !g_live) return;
-
-    ImGui_ImplSDLRenderer3_NewFrame();
-    ImGui_ImplSDL3_NewFrame();
-    ImGui::NewFrame();
+    g_font = host::Font();
+    g_fontKeys = host::KeyFont();
     const ImGuiIO& io = ImGui::GetIO();
-    const ImVec2 display = io.DisplaySize;
 
-    // The mouse: hovering selects (only when the pointer moves), a click presses.
+    // The mouse (top only): hovering selects (only when the pointer moves), a click presses.
     Live& l = *g_live;
     Geometry g = Compute(l.kb, display);
     const ImVec2 m = io.MousePos;
-    const bool mouseValid = ImGui::IsMousePosValid(&m);
+    const bool mouseValid = top && ImGui::IsMousePosValid(&m);
     const bool moved = mouseValid && l.mouseSeen && (m.x != l.lastMouse.x || m.y != l.lastMouse.y);
     l.lastMouse = m;
     l.mouseSeen = true;
-    const bool click = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    const bool click = mouseValid && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
     const bool closeHover = mouseValid && g.close.Contains(m);
     int answer = -1;  // -1 none, 0 cancel, 1 confirm
     if (mouseValid) {
@@ -831,7 +783,6 @@ void Draw() {
         if (closeHover && click) answer = 0;
     }
     if (answer >= 0) {
-        ImGui::EndFrame();
         Finish(answer == 1);
         return;
     }
@@ -843,16 +794,18 @@ void Draw() {
     }
     g = Compute(l.kb, display);  // the page may have changed
     DrawPanel(l, g, display, closeHover);
-    ImGui::Render();
-    ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), g_renderer);
 }
+
+void Reset() { EndLive(); }
+
+}  // namespace layer
 
 // ---- Test hooks ----
 
 namespace testing {
 
 bool WithKeyboard(const std::function<void(Keyboard&)>& fn) {
-    Sync();
+    ui::osk::Sync();
     if (!g_live) return false;
     fn(g_live->kb);
     return true;
