@@ -72,6 +72,7 @@ add_library(hle STATIC
     src/input/game_state.cpp
     src/core/native_trace.cpp
     src/video/presenter.cpp
+    src/ui/osk_model.cpp
     src/ui/osk_overlay.cpp
 )
 target_include_directories(hle PUBLIC src)
@@ -97,7 +98,12 @@ target_link_libraries(imetest PRIVATE hle)
 add_executable(dialogtest tests/dialogtest.cpp)
 target_link_libraries(dialogtest PRIVATE hle)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest)
+# The on-screen keyboard offline: model checks, the overlay driven with a scripted pad, and
+# screenshots of every page (osktest --shot <dir>); osktest --manual to try it by hand.
+add_executable(osktest tests/osktest.cpp)
+target_link_libraries(osktest PRIVATE hle)
+
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()
