@@ -601,9 +601,26 @@ void CountRelease(int site, int result) {
 uint32_t TakeEarlyReleases() { return g_liverpool ? g_liverpool->early_releases.exchange(0) : 0; }
 uint32_t LearnedWaits() { return g_liverpool ? g_liverpool->learned_waits.load() : 0; }
 
+// LBP3_SUBMIT_WAIT=all: the pre-submit wait and the submit wait both wait on every queue
+// (the behaviour before ticket 10 and milestone 5); otherwise both wait for graphics only.
+bool SubmitWaitAll() {
+    static const bool all = [] {
+        const char* v = std::getenv("LBP3_SUBMIT_WAIT");
+        return v && std::string(v) == "all";
+    }();
+    return all;
+}
+
+// Before a frame is patched and submitted ("the previous frame must be done", as the real
+// driver does). Graphics only (milestone 5, perf/slow_frames.md): waiting on every queue here
+// let the async compute queue, parked on one of the game's label waits that only the coming
+// frame's graphics work satisfies, hold the game for the 20 ms grace, eight frames in a row
+// once per session while those addresses were learned. The graphics queue is idle here (the
+// previous submit already waited for it), so ticket 10's early-release race can't reopen.
 int WaitIdle() {
     if (!g_liverpool) return kWaitIdle;
-    const int result = WaitGpu();
+    static const bool strict = std::getenv("LBP3_SYNC_STRICT") != nullptr;
+    const int result = SubmitWaitAll() || strict ? WaitGpu() : g_liverpool->WaitGfxIdleOrBlocked();
     CountRelease(0, result);
     return result;
 }
@@ -706,13 +723,9 @@ int SubmitGfx(const uint32_t* dcb, uint32_t dcbBytes, const uint32_t* ccb, uint3
     static const bool async = std::getenv("LBP3_GPU_ASYNC") != nullptr;
     // Wait for the graphics queue only (ticket 10). LBP3_SUBMIT_WAIT=all restores waiting on
     // every queue, where a blocked compute queue released the game before this submission ran.
-    static const bool waitAll = [] {
-        const char* v = std::getenv("LBP3_SUBMIT_WAIT");
-        return v && std::string(v) == "all";
-    }();
     static const bool strict = std::getenv("LBP3_SYNC_STRICT") != nullptr;
     if (async) return kWaitNone;
-    const int result = waitAll || strict ? WaitGpu() : g_liverpool->WaitGfxIdleOrBlocked();
+    const int result = SubmitWaitAll() || strict ? WaitGpu() : g_liverpool->WaitGfxIdleOrBlocked();
     CountRelease(2, result);
     return result;
 }
