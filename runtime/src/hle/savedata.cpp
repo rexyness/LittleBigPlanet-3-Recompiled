@@ -1,6 +1,7 @@
 // libSceSaveData: every save directory is a normal folder under
-// user/savedata/<title id>/<dir name>/, mounted at /savedata0.. while the game
-// uses it. Saves can be backed up, copied or swapped with File Explorer.
+// user/savedata/<title id>/<dir name>/ (user 1) or user/savedata/user<N>/<title id>/<dir name>/
+// (co-op users 2-4; hle/savedata.h), mounted at /savedata0.. while the game uses it. Saves can
+// be backed up, copied or swapped with File Explorer.
 // Structures and error codes follow shadPS4's save_data library.
 #include <cstdio>
 #include <cstring>
@@ -13,6 +14,7 @@
 #include "core/vfs.h"
 #include "hle/kernel_errors.h"
 #include "hle/register.h"
+#include "hle/savedata.h"
 
 namespace hle::savedata {
 namespace {
@@ -37,16 +39,31 @@ constexpr const char* kDefaultTitleId = "CUSA00473";
 
 std::mutex g_mutex;
 std::string g_mounted[kMaxMounts];  // mount slot -> dir name ("" = free)
+int32_t g_mountedUser[kMaxMounts] = {};
 
 std::string Bounded(const char* s, size_t max) { return s ? std::string(s, strnlen(s, max)) : std::string(); }
 
-fs::path SaveFolder(const char* titleId, const std::string& dirName) {
-    std::string title = Bounded(titleId, kTitleIdSize);
-    if (title.empty()) title = kDefaultTitleId;
-    return core::vfs::UserRoot() / "savedata" / title / fs::path(std::u8string(dirName.begin(), dirName.end()));
+fs::path SaveFolder(int32_t userId, const char* titleId, const std::string& dirName) {
+    return SaveRoot(userId, titleId) / fs::path(std::u8string(dirName.begin(), dirName.end()));
+}
+
+// The user a mount point belongs to, for the log.
+int32_t MountUser(const std::string& point) {
+    if (point.rfind("/savedata", 0) != 0) return 0;
+    const int slot = std::atoi(point.c_str() + 9);
+    std::lock_guard lock(g_mutex);
+    return slot >= 0 && slot < kMaxMounts ? g_mountedUser[slot] : 0;
 }
 
 }  // namespace
+
+fs::path SaveRoot(int32_t userId, const char* titleId) {
+    std::string title = Bounded(titleId, kTitleIdSize);
+    if (title.empty()) title = kDefaultTitleId;
+    fs::path root = core::vfs::UserRoot() / "savedata";
+    if (userId >= 2) root /= "user" + std::to_string(userId);
+    return root / title;
+}
 
 struct DirName { char data[kDirNameSize]; };
 struct MountPoint { char data[kMountPointSize]; };
@@ -109,9 +126,9 @@ int PS4_SYSV_ABI sceSaveDataMount(const Mount* mount, MountResult* result) {
     if (!mount || !mount->dirName || !result) return kErrorParameter;
     const std::string dir = Bounded(mount->dirName->data, kDirNameSize);
     if (dir.empty()) return kErrorParameter;
-    std::fprintf(stderr, "[savedata] mount '%s' mode 0x%x blocks %llu\n", dir.c_str(), mount->mountMode,
-                 static_cast<unsigned long long>(mount->blocks));
-    const fs::path folder = SaveFolder(mount->titleId, dir);
+    std::fprintf(stderr, "[savedata] mount '%s' mode 0x%x blocks %llu user %d\n", dir.c_str(), mount->mountMode,
+                 static_cast<unsigned long long>(mount->blocks), mount->userId);
+    const fs::path folder = SaveFolder(mount->userId, mount->titleId, dir);
     std::error_code ec;
 
     std::memset(result, 0, sizeof(*result));
@@ -129,6 +146,7 @@ int PS4_SYSV_ABI sceSaveDataMount(const Mount* mount, MountResult* result) {
     for (int slot = 0; slot < kMaxMounts; ++slot) {
         if (!g_mounted[slot].empty()) continue;
         g_mounted[slot] = dir;
+        g_mountedUser[slot] = mount->userId;
         const std::string point = "/savedata" + std::to_string(slot);
         core::vfs::Mount(point, folder, !(mount->mountMode & kRdOnly) || (mount->mountMode & kRdWr));
         std::snprintf(result->mountPoint.data, kMountPointSize, "%s", point.c_str());
@@ -180,9 +198,9 @@ static bool Matches(const std::string& name, const std::string& pattern) {
 
 int PS4_SYSV_ABI sceSaveDataDirNameSearch(const DirNameSearchCond* cond, DirNameSearchResult* result) {
     if (!cond || !result) return kErrorParameter;
-    const fs::path root = SaveFolder(cond->titleId, "");
+    const fs::path root = SaveRoot(cond->userId, cond->titleId);
     const std::string pattern = cond->dirName ? Bounded(cond->dirName->data, kDirNameSize) : "";
-    std::fprintf(stderr, "[savedata] search '%s'\n", pattern.c_str());
+    std::fprintf(stderr, "[savedata] search '%s' user %d\n", pattern.c_str(), cond->userId);
     std::vector<std::string> hits;
     std::error_code ec;
     for (const auto& e : fs::directory_iterator(root, ec)) {
@@ -202,7 +220,9 @@ int PS4_SYSV_ABI sceSaveDataDirNameSearch(const DirNameSearchCond* cond, DirName
 
 int PS4_SYSV_ABI sceSaveDataDelete(const Delete* del) {
     if (!del || !del->dirName) return kErrorParameter;
-    const fs::path folder = SaveFolder(del->titleId, Bounded(del->dirName->data, kDirNameSize));
+    const fs::path folder = SaveFolder(del->userId, del->titleId, Bounded(del->dirName->data, kDirNameSize));
+    std::fprintf(stderr, "[savedata] delete '%s' user %d\n", Bounded(del->dirName->data, kDirNameSize).c_str(),
+                 del->userId);
     std::error_code ec;
     if (!fs::exists(folder, ec)) return kErrorNotFound;
     fs::remove_all(folder, ec);
@@ -211,12 +231,13 @@ int PS4_SYSV_ABI sceSaveDataDelete(const Delete* del) {
 
 // Titles, icons and backups aren't kept yet; accepting them is harmless.
 int PS4_SYSV_ABI sceSaveDataSetParam(const MountPoint* point, uint32_t type, const void*, size_t size) {
-    std::fprintf(stderr, "[savedata] set param %u (%zu bytes) on %s\n", type, size,
-                 point ? Bounded(point->data, kMountPointSize).c_str() : "?");
+    const std::string p = point ? Bounded(point->data, kMountPointSize) : "?";
+    std::fprintf(stderr, "[savedata] set param %u (%zu bytes) on %s (user %d)\n", type, size, p.c_str(), MountUser(p));
     return kernel::SCE_OK;
 }
 int PS4_SYSV_ABI sceSaveDataSaveIcon(const MountPoint* point, const void*) {
-    std::fprintf(stderr, "[savedata] save icon on %s\n", point ? Bounded(point->data, kMountPointSize).c_str() : "?");
+    const std::string p = point ? Bounded(point->data, kMountPointSize) : "?";
+    std::fprintf(stderr, "[savedata] save icon on %s (user %d)\n", p.c_str(), MountUser(p));
     return kernel::SCE_OK;
 }
 int PS4_SYSV_ABI sceSaveDataCheckBackupData(const void*) { return kErrorNotFound; }

@@ -18,7 +18,10 @@ bool Active();
 // AnswerHeld is false (at most 1 s): the game saw no presses while the dialog was up, so
 // the press that answered it would otherwise reach the game as a fresh one and act on
 // the menu behind it (and often reopen the dialog).
-bool HoldsPad(uint32_t realButtons);
+// `slot`: the player's pad slot. Every player's pad is neutral while a dialog is open, but
+// only player 1 (slot 0) answers dialogs, so only slot 0's buttons hold the gate after it
+// closes; other players' reads neither wait for nor end that release wait.
+bool HoldsPad(uint32_t realButtons, int slot = 0);
 
 // True while any pad button in `realButtons` (sticks aside) is down, or Enter, Esc or
 // Backspace on the PC keyboard. Every button counts: the on-screen keyboard closes with

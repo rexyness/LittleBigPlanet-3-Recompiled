@@ -1,30 +1,74 @@
-// libSceUserService and libSceSystemService: one local player who is always
-// signed in, and console settings that match a stock English PS4.
-#include <atomic>
+// libSceUserService and libSceSystemService: local players and console settings that match
+// a stock English PS4. User 1 is always signed in; users 2-4 sign in while a controller is in
+// their pad slot (local co-op; input/gamepad.h: user N plays with slot N-1) and sign out when
+// it goes. Each sign-in and sign-out is an event for sceUserServiceGetEvent, in order.
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <deque>
+#include <mutex>
+#include <string>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
 #include "hle/kernel_errors.h"
 #include "hle/register.h"
+#include "hle/users.h"
+#include "input/gamepad.h"
 
 namespace hle::user {
+
+constexpr int kMaxLoginUsers = 4;
+struct LoginUserIdList { int32_t userId[kMaxLoginUsers]; };
+struct UserEvent { int32_t eventType; int32_t userId; };
+
 namespace {
 
-constexpr int32_t kUserId = 1;  // our libScePad maps user N to pad slot N-1
+constexpr int32_t kUserId = 1;  // player 1; user N plays with pad slot N-1
 constexpr int32_t kInvalidUser = -1;
-constexpr int kMaxLoginUsers = 4;
+constexpr int32_t kEventLogin = 0, kEventLogout = 1;
 constexpr int kErrorNoEvent = static_cast<int>(0x80960007);
 constexpr int kErrorInvalidArgument = static_cast<int>(0x80960002);
 
-std::atomic<bool> g_loginReported{false};
+std::mutex g_mutex;
+std::deque<UserEvent> g_events;
+bool g_started = false;                  // user 1's login has been queued
+bool g_in[kMaxLoginUsers + 1] = {};      // by user id: signed in
+uint32_t g_gen[kMaxLoginUsers + 1] = {}; // by user id: the pad slot's generation at sign-in
+
+// Under g_mutex: turns controller changes since the last look into sign-in and sign-out
+// events. A slot whose controller dropped out and came back in between (a new generation)
+// signs its user out and in again.
+void SyncLocked() {
+    if (!g_started) {
+        g_started = true;
+        g_in[kUserId] = true;
+        g_events.push_back({kEventLogin, kUserId});
+    }
+    input::Refresh();
+    for (int slot = 1; slot < input::kMaxPads && slot + 1 <= kMaxLoginUsers; ++slot) {
+        const int32_t user = slot + 1;
+        uint32_t gen = 0;
+        const bool present = input::SlotPresent(slot, &gen);
+        if (present == g_in[user] && (!present || gen == g_gen[user])) continue;
+        if (g_in[user]) {
+            g_in[user] = false;
+            g_events.push_back({kEventLogout, user});
+            np::DropStateNotice(user);
+            std::fprintf(stderr, "[user] user %d logged out (slot %d)\n", user, slot);
+        }
+        if (present) {
+            g_in[user] = true;
+            g_gen[user] = gen;
+            g_events.push_back({kEventLogin, user});
+            std::fprintf(stderr, "[user] user %d logged in (slot %d, %s)\n", user, slot, input::SlotName(slot).c_str());
+            np::QueueStateNotice(user);
+        }
+    }
+}
 
 }  // namespace
-
-struct LoginUserIdList { int32_t userId[kMaxLoginUsers]; };
-struct UserEvent { int32_t eventType; int32_t userId; };  // 0 = login, 1 = logout
 
 int PS4_SYSV_ABI sceUserServiceInitialize(const void*) { return kernel::SCE_OK; }
 int PS4_SYSV_ABI sceUserServiceTerminate() { return kernel::SCE_OK; }
@@ -37,26 +81,50 @@ int PS4_SYSV_ABI sceUserServiceGetInitialUser(int32_t* userId) {
 
 int PS4_SYSV_ABI sceUserServiceGetLoginUserIdList(LoginUserIdList* list) {
     if (!list) return kErrorInvalidArgument;
-    list->userId[0] = kUserId;
-    for (int i = 1; i < kMaxLoginUsers; ++i) list->userId[i] = kInvalidUser;
+    std::lock_guard lock(g_mutex);
+    SyncLocked();
+    int n = 0;
+    for (int32_t user = 1; user <= kMaxLoginUsers; ++user)
+        if (g_in[user]) list->userId[n++] = user;
+    while (n < kMaxLoginUsers) list->userId[n++] = kInvalidUser;
     return kernel::SCE_OK;
 }
 
-// One login event for our player, then the queue is empty.
+// User 1's login first, then every sign-in and sign-out as controllers come and go.
 int PS4_SYSV_ABI sceUserServiceGetEvent(UserEvent* ev) {
     if (!ev) return kErrorInvalidArgument;
-    if (g_loginReported.exchange(true)) return kErrorNoEvent;
-    *ev = {0, kUserId};
+    std::lock_guard lock(g_mutex);
+    SyncLocked();
+    if (g_events.empty()) return kErrorNoEvent;
+    *ev = g_events.front();
+    g_events.pop_front();
     return kernel::SCE_OK;
 }
+
+// A PS4 user name is at most 16 bytes (SCE_USER_SERVICE_MAX_USER_NAME_LENGTH); LBP3 passes a
+// 17-byte buffer. Cut at a UTF-8 character boundary, never inside a character.
+constexpr size_t kMaxUserName = 16;
 
 int PS4_SYSV_ABI sceUserServiceGetUserName(int32_t userId, char* name, size_t size) {
     if (!name || size == 0) return kErrorInvalidArgument;
-    (void)userId;
-    char buf[64] = "Player";
-    DWORD len = sizeof(buf);
-    GetUserNameA(buf, &len);  // the Windows account name makes a friendly default
-    std::snprintf(name, size, "%s", buf);
+    std::string s;
+    if (userId >= 2 && userId <= kMaxLoginUsers) {  // co-op guests
+        s = "Player " + std::to_string(userId);
+    } else {
+        // The Windows account name makes a friendly default for player 1.
+        wchar_t wide[257] = {};
+        DWORD len = 257;
+        if (GetUserNameW(wide, &len) && wide[0]) {
+            char utf8[1024];
+            const int n = WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, sizeof(utf8), nullptr, nullptr);
+            if (n > 1) s.assign(utf8, static_cast<size_t>(n - 1));
+        }
+        if (s.empty()) s = "Player";
+    }
+    size_t cut = std::min({s.size(), kMaxUserName, size - 1});
+    while (cut > 0 && cut < s.size() && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80) --cut;
+    std::memcpy(name, s.data(), cut);
+    name[cut] = '\0';
     return kernel::SCE_OK;
 }
 
