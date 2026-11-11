@@ -85,8 +85,10 @@ void WriteDefaultConfig() {
 // Test runs (remote input "action <name> <ms>") hold actions without a keyboard.
 std::array<uint64_t, static_cast<size_t>(Action::Count)> g_remoteUntil{};
 
-bool Held(Action action) {
+// withKeyboard = false: only the remote holds (test runs), not the PC keyboard; see ApplyToFrame.
+bool Held(Action action, bool withKeyboard = true) {
     if (SDL_GetTicks() < g_remoteUntil[static_cast<size_t>(action)]) return true;
+    if (!withKeyboard) return false;
     if (!SDL_GetKeyboardFocus()) return false;  // only while the game window is active
     const bool* keys = SDL_GetKeyboardState(nullptr);
     if (!keys) return false;
@@ -145,27 +147,27 @@ std::atomic<uint64_t> g_pulseUntil{0};
 uint64_t g_blockUntil = 0;  // RunGameHooks only
 }  // namespace
 
-void ApplyToFrame(ps4::PadData& frame) {
+void ApplyToFrame(ps4::PadData& frame, bool keys) {
     // Character movement: the walk and layer directions go through the left stick, which
     // is what the game's character controller reads, at full deflection.
-    const int x = (Held(Action::MoveRight) ? 1 : 0) - (Held(Action::MoveLeft) ? 1 : 0);
-    const int z = (Held(Action::LayerFront) ? 1 : 0) - (Held(Action::LayerBack) ? 1 : 0);
+    const int x = (Held(Action::MoveRight, keys) ? 1 : 0) - (Held(Action::MoveLeft, keys) ? 1 : 0);
+    const int z = (Held(Action::LayerFront, keys) ? 1 : 0) - (Held(Action::LayerBack, keys) ? 1 : 0);
     if (x) frame.leftStick.x = x > 0 ? 255 : 0;
     if (z) frame.leftStick.y = z > 0 ? 255 : 0;
-    if (Held(Action::Jump)) frame.buttons |= ps4::PAD_CROSS;
-    if (Held(Action::Grab)) frame.buttons |= ps4::PAD_R1;
+    if (Held(Action::Jump, keys)) frame.buttons |= ps4::PAD_CROSS;
+    if (Held(Action::Grab, keys)) frame.buttons |= ps4::PAD_R1;
 
     // A Popit press from RunGameHooks (R), held for 150 ms.
     const uint32_t pulse = g_pulse.load();
-    if (pulse && SDL_GetTicks() < g_pulseUntil.load()) frame.buttons |= pulse;
+    if (keys && pulse && SDL_GetTicks() < g_pulseUntil.load()) frame.buttons |= pulse;
 
-    if (Held(Action::MenuUp)) frame.buttons |= ps4::PAD_UP;
-    if (Held(Action::MenuDown)) frame.buttons |= ps4::PAD_DOWN;
-    if (Held(Action::MenuLeft)) frame.buttons |= ps4::PAD_LEFT;
-    if (Held(Action::MenuRight)) frame.buttons |= ps4::PAD_RIGHT;
-    if (Held(Action::Confirm)) frame.buttons |= ps4::PAD_CROSS;
-    if (Held(Action::Back)) frame.buttons |= ps4::PAD_CIRCLE;
-    if (Held(Action::Pause)) frame.buttons |= ps4::PAD_OPTIONS;
+    if (Held(Action::MenuUp, keys)) frame.buttons |= ps4::PAD_UP;
+    if (Held(Action::MenuDown, keys)) frame.buttons |= ps4::PAD_DOWN;
+    if (Held(Action::MenuLeft, keys)) frame.buttons |= ps4::PAD_LEFT;
+    if (Held(Action::MenuRight, keys)) frame.buttons |= ps4::PAD_RIGHT;
+    if (Held(Action::Confirm, keys)) frame.buttons |= ps4::PAD_CROSS;
+    if (Held(Action::Back, keys)) frame.buttons |= ps4::PAD_CIRCLE;
+    if (Held(Action::Pause, keys)) frame.buttons |= ps4::PAD_OPTIONS;
 }
 
 void RunGameHooks() {

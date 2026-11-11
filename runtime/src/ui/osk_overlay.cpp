@@ -796,7 +796,17 @@ void Frame(bool top, ImVec2 display) {
     DrawPanel(l, g, display, closeHover);
 }
 
-void Reset() { EndLive(); }
+void Reset() {
+    // A new window: the keyboard that is up goes back to pending with what has been typed so
+    // far, so it comes up again on it and still gets answered.
+    if (!g_live) return;
+    Request r = g_live->request;
+    r.text = g_live->kb.text();
+    Pending p{g_live->id, g_live->stamp, std::move(r), std::move(g_live->onAnswer)};
+    EndLive();
+    std::lock_guard lock(g_mutex);
+    if (!g_pending && g_current.load() == p.id) g_pending = std::move(p);
+}
 
 }  // namespace layer
 

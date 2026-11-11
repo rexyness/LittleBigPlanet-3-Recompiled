@@ -7,10 +7,12 @@
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_sdlrenderer3.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 #include "ui/overlay_layers.h"
 
@@ -26,6 +28,7 @@ SDL_Renderer* g_renderer = nullptr;
 bool g_imgui = false;
 ImFont* g_font = nullptr;
 ImFont* g_fontKeys = nullptr;
+std::vector<SDL_Scancode> g_dialogKeys;  // see HandleEvent
 
 bool FileExists(const std::string& path) {
     if (FILE* f = std::fopen(path.c_str(), "rb")) {
@@ -131,6 +134,10 @@ void Attach(SDL_Window* window, SDL_Renderer* renderer) {
 }
 
 bool HandleEvent(const SDL_Event& e) {
+    // Keys pressed while a dialog had the input, until released. Their text events come after
+    // the key-down, when a dialog the key answered (Space) may be gone and the keyboard under
+    // it on top again: that text must not be typed into it.
+    if (e.type == SDL_EVENT_KEY_UP) std::erase(g_dialogKeys, e.key.scancode);
     Up up;
     if (Wanted()) up = SyncLayers();
     if (!up.Any()) {
@@ -139,8 +146,14 @@ bool HandleEvent(const SDL_Event& e) {
         if (g_imgui && e.type == SDL_EVENT_MOUSE_BUTTON_UP) ImGui_ImplSDL3_ProcessEvent(&e);
         return false;
     }
+    if (e.type == SDL_EVENT_TEXT_INPUT && !g_dialogKeys.empty()) return true;
     if (g_imgui) ImGui_ImplSDL3_ProcessEvent(&e);  // the mouse
-    return up.OskTop() ? osk::layer::Event(e) : dialog::layer::Event(e);
+    if (up.OskTop()) return osk::layer::Event(e);
+    const bool used = dialog::layer::Event(e);
+    if (used && e.type == SDL_EVENT_KEY_DOWN &&
+        std::find(g_dialogKeys.begin(), g_dialogKeys.end(), e.key.scancode) == g_dialogKeys.end())
+        g_dialogKeys.push_back(e.key.scancode);
+    return used;
 }
 
 void Draw() {
