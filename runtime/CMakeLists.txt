@@ -145,7 +145,11 @@ target_link_libraries(addconttest PRIVATE hle)
 add_executable(rescachetest tests/rescachetest.cpp)
 target_link_libraries(rescachetest PRIVATE hle)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest)
+# LBP3_MY_UNLOCKS's import guard (ticket 19): the import's cancel button is held off while it runs.
+add_executable(unlocktest tests/unlocktest.cpp)
+target_link_libraries(unlocktest PRIVATE hle)
+
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest unlocktest)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()

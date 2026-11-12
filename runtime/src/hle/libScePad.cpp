@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "hle/modal.h"
+#include "hle/my_unlocks.h"
 #include "input/gamepad.h"
 
 namespace hle::pad {
@@ -66,6 +67,8 @@ int PS4_SYSV_ABI scePadReadState(int32_t handle, ps4::PadData* data) {
         data->analogButtons.l2 = data->analogButtons.r2 = 0;
         data->touchData.touchNum = 0;
     } else {
+        // LBP3_MY_UNLOCKS: keep the back button from cancelling the import (hle/my_unlocks.h).
+        data->buttons = my_unlocks::GuardImport(data->buttons);
         input::RunGameHooks(slot);
     }
     return SCE_OK;

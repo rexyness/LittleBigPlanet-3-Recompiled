@@ -13,6 +13,14 @@
 // main thread, the first time the start menu opens (its IsOnline__ native) with a profile
 // loaded. The My Unlocks page itself stays as the game decides (greyed offline).
 // LBP3_MY_UNLOCKS_TRACE=1 logs the import screen natives too.
+//
+// The screen's handler (FUN_008bee30) checks every connected controller each frame and cancels
+// the import as soon as one holds the back button (internal bit 0x20 = Circle when the game's
+// region flag at eboot+0x1060a20 is set, as on this US build; 0x40 = Cross otherwise). The close
+// (FUN_008bec30) then shows "Failed to import objects" instead of "successfully imported" and
+// skips the profile's "imported" marker. Pressing Circle to leave the start menu while the
+// import runs (test sessions o2-o4 on 2026-11-12) throws it away, so GuardImport holds that
+// button off the game until the screen closes (LBP3_MY_UNLOCKS_GUARD=off: the game's way).
 #include "hle/my_unlocks.h"
 
 #include <array>
@@ -25,6 +33,7 @@
 #include "core/native_trace.h"
 #include "core/runner.h"
 #include "hle/abi.h"
+#include "hle/pad_types.h"
 
 namespace hle::my_unlocks {
 namespace {
@@ -33,12 +42,15 @@ namespace {
 constexpr uint64_t kActivateImportScreen = 0x836fb0;  // ActivateImportScreen__i (native; ignores self)
 constexpr uint64_t kLocalUser = 0x4cab10;             // returns the local player's user/profile slot
 constexpr uint64_t kImportScreenActive = 0x13a5708;   // the import screen object (first byte: active)
+constexpr uint64_t kBackIsCircle = 0x1060a20;         // 1: the import's cancel button is Circle (0: Cross)
 
 constexpr uint32_t kLbp1 = 0x1;
 constexpr uint32_t kLbp2Worlds = 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40;
 
 uint32_t g_flags = 0;
+bool g_guard = true;
 std::atomic<bool> g_done{false};
+std::atomic<bool> g_heldLogged{false};
 core::ScriptNative g_isOnline = nullptr;
 
 bool ProfileLoaded() {
@@ -95,6 +107,25 @@ void PS4_SYSV_ABI Traced(void* self, void* ret, const unsigned long long* args) 
 
 }  // namespace
 
+uint32_t FilterBack(uint32_t buttons, bool importRunning, bool backIsCircle) {
+    if (!importRunning) return buttons;
+    return buttons & ~static_cast<uint32_t>(backIsCircle ? ps4::PAD_CIRCLE : ps4::PAD_CROSS);
+}
+
+uint32_t GuardImport(uint32_t buttons) {
+    if (!g_flags || !g_guard || !g_done.load(std::memory_order_relaxed) || !buttons) return buttons;
+    if (!ImportScreenActive()) return buttons;
+    uint8_t* base = core::EbootBase();
+    const bool circle = *reinterpret_cast<volatile uint8_t*>(base + kBackIsCircle) != 0;
+    const uint32_t out = FilterBack(buttons, true, circle);
+    if (out != buttons && !g_heldLogged.exchange(true))
+        std::fprintf(stderr,
+                     "[unlocks] %s held off the game while the import runs (it would cancel it: \"Failed to import "
+                     "objects\"; LBP3_MY_UNLOCKS_GUARD=off lets it through)\n",
+                     circle ? "Circle" : "Cross");
+    return out;
+}
+
 void InstallHooks() {
     const char* v = std::getenv("LBP3_MY_UNLOCKS");
     if (!v || !*v) return;
@@ -112,6 +143,7 @@ void InstallHooks() {
         std::fprintf(stderr, "[unlocks] IsOnline__ not found: no import\n");
         return;
     }
+    if (const char* gd = std::getenv("LBP3_MY_UNLOCKS_GUARD"); gd && std::string(gd) == "off") g_guard = false;
     if (const char* t = std::getenv("LBP3_MY_UNLOCKS_TRACE"); t && *t && *t != '0') {
         g_traced[0] = core::HookNative(*m, kTraced[0], Traced<0>);
         g_traced[1] = core::HookNative(*m, kTraced[1], Traced<1>);
@@ -119,8 +151,8 @@ void InstallHooks() {
     }
     std::fprintf(stderr,
                  "[unlocks] LBP3_MY_UNLOCKS=%s: the game's own LBP1/LBP2 import (flags 0x%x) runs once, the first "
-                 "time the start menu opens with a profile loaded\n",
-                 v, g_flags);
+                 "time the start menu opens with a profile loaded; the back button is %s while it runs\n",
+                 v, g_flags, g_guard ? "held off" : "left alone (LBP3_MY_UNLOCKS_GUARD=off: it cancels)");
 }
 
 }  // namespace hle::my_unlocks
