@@ -24,6 +24,8 @@
 #include "gpu/fg_shaders/fg_warp_luma0_comp.h"
 #include "gpu/fg_shaders/fg_warp_midinit_comp.h"
 #include "gpu/fg_shaders/fg_warp_smooth_comp.h"
+#include "gpu/fg_shaders/fg_warp_textdil_comp.h"
+#include "gpu/fg_shaders/fg_warp_textraw_comp.h"
 
 namespace gpu::fggpu {
 namespace {
@@ -31,8 +33,8 @@ namespace {
 constexpr int kLevels = 3;
 constexpr int kBlock = 8;
 constexpr int kStats = 16;  // uints in the stats buffer (fg_warp.comp's S_ constants)
-enum Pass { kHudShare, kDecide, kLuma0, kDown, kGameVec, kCoarse, kInit, kSmooth, kMidInit, kCompose, kPasses };
-enum Binding { bFinalPrev, bFinalCur, bHudPrev, bHudCur, bVel, bLuma, bFields, bGVec, bStats, bOut, kBindings };
+enum Pass { kHudShare, kDecide, kLuma0, kDown, kGameVec, kCoarse, kInit, kSmooth, kMidInit, kCompose, kTextRaw, kTextDil, kPasses };
+enum Binding { bFinalPrev, bFinalCur, bHudPrev, bHudCur, bVel, bLuma, bFields, bGVec, bStats, bOut, bText, kBindings };
 
 // fg_warp.comp's push constants, in order.
 struct PC {
@@ -81,7 +83,7 @@ struct WarpGpu::Impl {
     int lumaOff[2][kLevels]{};       // [frame: 0 = N-1, 1 = N][level]
     int fieldOff[3][kLevels][2]{};   // [0 back, 1 fwd, 2 mid (level 0 only)][level][ping-pong]
     int gvecOff[kLevels]{};          // levels 0 and 2
-    Buf finals[2], huds[2], vel, luma, fields, gvec, stats, out, staging;
+    Buf finals[2], huds[2], vel, luma, fields, gvec, stats, out, text, staging;
     Buf readOut[kReadSlots], readStats[kReadSlots];
 
     ~Impl() { Free(); DestroyPipelines(); }
@@ -109,7 +111,7 @@ struct WarpGpu::Impl {
         b = Buf{};
     }
     void Free() {
-        for (auto* b : {&finals[0], &finals[1], &huds[0], &huds[1], &vel, &luma, &fields, &gvec, &stats, &out, &staging})
+        for (auto* b : {&finals[0], &finals[1], &huds[0], &huds[1], &vel, &luma, &fields, &gvec, &stats, &out, &text, &staging})
             FreeBuf(*b);
         for (int i = 0; i < kReadSlots; ++i) FreeBuf(readOut[i]), FreeBuf(readStats[i]);
         W = H = 0;
@@ -145,7 +147,8 @@ struct WarpGpu::Impl {
             std::span<const uint32_t>(FG_WARP_LUMA0_COMP),    std::span<const uint32_t>(FG_WARP_DOWN_COMP),
             std::span<const uint32_t>(FG_WARP_GAMEVEC_COMP),  std::span<const uint32_t>(FG_WARP_COARSE_COMP),
             std::span<const uint32_t>(FG_WARP_INIT_COMP),     std::span<const uint32_t>(FG_WARP_SMOOTH_COMP),
-            std::span<const uint32_t>(FG_WARP_MIDINIT_COMP),  std::span<const uint32_t>(FG_WARP_COMPOSE_COMP)};
+            std::span<const uint32_t>(FG_WARP_MIDINIT_COMP),  std::span<const uint32_t>(FG_WARP_COMPOSE_COMP),
+            std::span<const uint32_t>(FG_WARP_TEXTRAW_COMP),  std::span<const uint32_t>(FG_WARP_TEXTDIL_COMP)};
         for (int i = 0; i < kPasses; ++i) {
             const vk::ShaderModule m = Vulkan::CompileSPV(code[i], device);
             if (!m) return false;
@@ -204,7 +207,8 @@ struct WarpGpu::Impl {
         good = good && MakeBuf(fb, dev, false, vel) && MakeBuf(fb, dev, false, out) &&
                MakeBuf(vk::DeviceSize(lumaTotal) * 4, dev, false, luma) &&
                MakeBuf(vk::DeviceSize(fieldTotal) * 8, dev, false, fields) &&
-               MakeBuf(vk::DeviceSize(gvecTotal) * 8, dev, false, gvec) && MakeBuf(kStats * 4, dev, false, stats);
+               MakeBuf(vk::DeviceSize(gvecTotal) * 8, dev, false, gvec) && MakeBuf(kStats * 4, dev, false, stats) &&
+               MakeBuf(fb * 3, dev, false, text);  // three regions of one uint per pixel (fg_warp.comp)
         for (int i = 0; i < kReadSlots; ++i)
             good = good && MakeBuf(fb, U::eTransferDst, true, readOut[i]) &&
                    MakeBuf(kStats * 4, U::eTransferDst, true, readStats[i]);
@@ -235,8 +239,8 @@ struct WarpGpu::Impl {
     void Bind(vk::CommandBuffer cmd, Pass pass, int cur) {
         cmd.bindPipeline(vk::PipelineBindPoint::eCompute, pipes[pass]);
         const int prev = cur ^ 1;
-        const Buf* bufs[kBindings] = {&finals[prev], &finals[cur], &huds[prev], &huds[cur], &vel,
-                                      &luma,         &fields,      &gvec,       &stats,      &out};
+        const Buf* bufs[kBindings] = {&finals[prev], &finals[cur], &huds[prev], &huds[cur], &vel,  &luma,
+                                      &fields,       &gvec,        &stats,      &out,        &text};
         std::array<vk::DescriptorBufferInfo, kBindings> infos{};
         std::array<vk::WriteDescriptorSet, kBindings> writes{};
         for (uint32_t i = 0; i < kBindings; ++i) {
@@ -432,6 +436,32 @@ struct WarpGpu::Impl {
             Mark(cmd, "midinit");
             smooth(0, true);
         }
+        // In-world text masks: both frames' thin bright strokes, then their square dilation by
+        // textD (x, then y), as framegen_warp.cpp's TextMasks.
+        if (p.textKeep) {
+            const int N = int(W * H);
+            Bind(cmd, kTextRaw, cur);
+            PC t = Base();
+            t.a[0] = hudAllowed ? 1 : 0;
+            t.a[1] = p.textW;
+            t.a[2] = p.textC;
+            t.a[3] = p.textR;
+            Push(cmd, t);
+            cmd.dispatch(DivUp(W, 8), DivUp(H, 8), 1);
+            ComputeBarrier(cmd);
+            for (int axis = 0; axis < 2; ++axis) {
+                Bind(cmd, kTextDil, cur);
+                PC d = Base();
+                d.a[0] = axis;
+                d.a[1] = p.textD;
+                d.a[2] = axis == 0 ? 0 : N;
+                d.a[3] = axis == 0 ? N : 2 * N;
+                Push(cmd, d);
+                cmd.dispatch(DivUp(W, 8), DivUp(H, 8), 1);
+                ComputeBarrier(cmd);
+            }
+            Mark(cmd, "text");
+        }
         // Compose (and the HUD put-back).
         {
             Bind(cmd, kCompose, cur);
@@ -449,6 +479,8 @@ struct WarpGpu::Impl {
             pc.a[7] = 512 - tP;
             pc.a[8] = int(std::lround(f.t * 256.0f));
             pc.a[9] = p.hudT;
+            pc.a[10] = p.textKeep ? 1 : 0;
+            pc.a[11] = p.textW;
             Push(cmd, pc);
             cmd.dispatch(DivUp(W, 8), DivUp(H, 8), 1);
             Mark(cmd, "compose");
@@ -524,6 +556,7 @@ Result WarpGpu::ReadResult(int readSlot) {
     r.pixFall = s[8];
     r.pixStatic = s[9];
     r.pixHud = s[10];
+    r.pixText = s[11];
     r.usedVectors = m.lastUseVec[slot];
     // As the CPU version: decline when nearly all covered vectors are saturated (a cut).
     r.declined = r.usedVectors && r.covered && double(r.saturated) > double(m.p.maxSaturated) * double(r.covered);

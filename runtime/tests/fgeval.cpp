@@ -101,6 +101,54 @@ Score Compare(const std::vector<uint8_t>& gen, const std::vector<uint8_t>& truth
     return s;
 }
 
+// Visible thin bright strokes of a frame (in-world text): min channel >= 236 and at least 48
+// brighter than some pixel within 8 on both sides along x or y; dilated by one pixel.
+std::vector<uint8_t> TextMask(const std::vector<uint8_t>& f) {
+    const int W = int(kW), H = int(kH);
+    std::vector<int> l(size_t(W) * H);
+    for (size_t i = 0; i < l.size(); ++i) l[i] = (f[i * 4] + 2 * f[i * 4 + 1] + f[i * 4 + 2]) >> 2;
+    std::vector<uint8_t> m(size_t(W) * H, 0);
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+            const uint8_t* p = &f[(size_t(y) * W + x) * 4];
+            if (std::min(p[0], std::min(p[1], p[2])) < 236) continue;
+            const int c = l[size_t(y) * W + x];
+            for (int axis = 0; axis < 2 && !m[size_t(y) * W + x]; ++axis) {
+                const int ex = axis == 0, ey = 1 - ex;
+                bool lo = false, hi = false;
+                for (int k = 1; k <= 8; ++k) {
+                    const int x0 = std::clamp(x - k * ex, 0, W - 1), y0 = std::clamp(y - k * ey, 0, H - 1);
+                    const int x1 = std::clamp(x + k * ex, 0, W - 1), y1 = std::clamp(y + k * ey, 0, H - 1);
+                    lo = lo || c - l[size_t(y0) * W + x0] >= 48;
+                    hi = hi || c - l[size_t(y1) * W + x1] >= 48;
+                }
+                if (lo && hi) m[size_t(y) * W + x] = 1;
+            }
+        }
+    std::vector<uint8_t> d(m);
+    for (int y = 1; y < H - 1; ++y)
+        for (int x = 1; x < W - 1; ++x)
+            if (m[size_t(y) * W + x])
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx) d[size_t(y + dy) * W + x + dx] = 1;
+    return d;
+}
+
+double MaskMse(const std::vector<uint8_t>& gen, const std::vector<uint8_t>& truth, const std::vector<uint8_t>& mask,
+               uint64_t& n) {
+    double sum = 0;
+    n = 0;
+    for (size_t i = 0; i < mask.size(); ++i) {
+        if (!mask[i]) continue;
+        for (int c = 0; c < 3; ++c) {
+            const double d = double(gen[i * 4 + c]) - double(truth[i * 4 + c]);
+            sum += d * d;
+        }
+        ++n;
+    }
+    return n ? sum / double(n * 3) : 0;
+}
+
 double Psnr(double mse) { return mse > 0 ? 10.0 * std::log10(255.0 * 255.0 / mse) : 99.0; }
 
 // Writes images side by side (each RGBA8 kW x kH), downscaled by 2, as an RGB PNG.
@@ -169,7 +217,7 @@ int main(int argc, char** argv) {
     const std::string dir = argv[1];
     std::string gens = "warp,blend,repeat", outDir, stills, image = "final", crop;
     int from = 1, to = 1 << 30;
-    bool quiet = false, useVec = true, useHud = true, compare = false;
+    bool quiet = false, useVec = true, useHud = true, compare = false, textScore = false;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : std::string(); };
@@ -184,6 +232,7 @@ int main(int argc, char** argv) {
         else if (a == "--novec") useVec = false;
         else if (a == "--nohud") useHud = false;
         else if (a == "--compare") compare = true;  // byte-compare "warp" (CPU) with "warp-gpu" per triple
+        else if (a == "--text") textScore = true;   // also score the truth's thin bright strokes (text)
     }
     const std::vector<long long> sims = ManifestSims(dir);
     if (sims.size() < 3) {
@@ -204,6 +253,9 @@ int main(int argc, char** argv) {
     // Skip-one scores.
     std::vector<double> sumAll(gs.size()), sumMov(gs.size()), sumMae(gs.size()), sumMs(gs.size()), maxMs(gs.size());
     std::vector<int> declined(gs.size());
+    std::vector<double> textSum(gs.size());
+    int textFrames = 0;
+    std::vector<uint8_t> tmask;
     std::vector<double> gpuSum(gs.size()), gpuMax(gs.size());
     std::vector<int> gpuN(gs.size());
     std::vector<std::vector<uint8_t>> outs(gs.size());
@@ -229,6 +281,12 @@ int main(int argc, char** argv) {
         }
         const bool haveVel = useVec && LoadRaw(Frame(dir, k + 1, "velocity"), vel);
         const bool haveHud = useHud && LoadRaw(Frame(dir, k - 1, "hudless"), hlA) && LoadRaw(Frame(dir, k + 1, "hudless"), hlB);
+        uint64_t tn = 0;
+        if (textScore) {
+            tmask = TextMask(t);
+            for (uint8_t v : tmask) tn += v;
+            if (tn >= 200) ++textFrames;
+        }
         if (!quiet) std::printf("k=%3d", k);
         for (size_t gi = 0; gi < gs.size(); ++gi) {
             fg::GenInputs in;
@@ -256,6 +314,12 @@ int main(int argc, char** argv) {
                 ++gpuN[gi];
             }
             const Score s = Compare(out, t, a, b);
+            if (textScore && tn >= 200) {
+                uint64_t n2 = 0;
+                const double tp = Psnr(MaskMse(out, t, tmask, n2));
+                textSum[gi] += tp;
+                if (!quiet) std::printf("  text %.2f dB (%llu px)", tp, (unsigned long long)n2);
+            }
             sumAll[gi] += Psnr(s.mseAll);
             sumMov[gi] += Psnr(s.mseMoving);
             sumMae[gi] += s.maeMoving;
@@ -265,9 +329,10 @@ int main(int argc, char** argv) {
                 std::printf("  %s %.2f/%.2f dB %.1f ms", gs[gi]->Name(), Psnr(s.mseAll), Psnr(s.mseMoving), ms);
                 if (gpuMs >= 0) std::printf(" (gpu %.3f ms)", gpuMs);
                 if (const fg::WarpDebug* d = fg::LastWarpDebug(gs[gi].get()))
-                    std::printf(" [luma %.1f search %.1f compose %.1f; static %.0f%% alt %.1f%% fall %.1f%% hud %.1f%%; vec cov %.0f%% sat %.0f%%%s]",
+                    std::printf(" [luma %.1f search %.1f compose %.1f; static %.0f%% alt %.1f%% fall %.1f%% text %.2f%% hud %.1f%%; vec cov %.0f%% sat %.0f%%%s]",
                                 d->msLuma, d->msSearch, d->msCompose, 100.0 * d->pixStatic / (kW * kH),
                                 100.0 * d->pixAlt / (kW * kH), 100.0 * d->pixFallback / (kW * kH),
+                                100.0 * d->pixText / (kW * kH),
                                 100.0 * d->pixHud / (kW * kH), 100.0 * d->vecCovered, 100.0 * d->vecSaturated,
                                 d->declined ? " DECLINED" : "");
             }
@@ -298,6 +363,9 @@ int main(int argc, char** argv) {
         std::printf("  %-7s PSNR all %.2f dB, moving %.2f dB, MAE moving %.2f; %.2f ms avg, %.2f max; %d declined\n",
                     gs[gi]->Name(), sumAll[gi] / scored, sumMov[gi] / scored, sumMae[gi] / scored, sumMs[gi] / scored,
                     maxMs[gi], declined[gi]);
+    for (size_t gi = 0; gi < gs.size() && textScore && textFrames; ++gi)
+        std::printf("  %-7s text PSNR %.2f dB over %d frames with >= 200 text pixels\n", gs[gi]->Name(),
+                    textSum[gi] / textFrames, textFrames);
     for (size_t gi = 0; gi < gs.size(); ++gi)
         if (gpuN[gi])
             std::printf("  %-7s GPU time %.3f ms avg, %.3f max (%d timed)\n", gs[gi]->Name(), gpuSum[gi] / gpuN[gi],
@@ -354,6 +422,19 @@ int main(int argc, char** argv) {
                                 *std::min_element(d->hy.begin(), d->hy.end()), *std::max_element(d->hy.begin(), d->hy.end()));
                 }
                 if (cw > 0) WriteCrop(std::string(base) + "_mid_crop.png", {&f1, &g, &f2}, cx, cy, cw, ch);
+                if (const fg::WarpDebug* d = fg::LastWarpDebug(gs[gi].get()); d && d->kinds.size() == size_t(kW) * kH) {
+                    // Per-pixel decisions over the dimmed output: grey averaged, blue averaged after an
+                    // alternative vector, red nearer frame, black static, green kept as text.
+                    static const uint8_t col[5][3] = {{128, 128, 128}, {40, 90, 255}, {255, 40, 40}, {0, 0, 0}, {40, 255, 40}};
+                    std::vector<uint8_t> km(g.size());
+                    for (size_t i = 0; i < size_t(kW) * kH; ++i) {
+                        const uint8_t k = std::min<uint8_t>(d->kinds[i], 4);
+                        for (int c = 0; c < 3; ++c) km[i * 4 + c] = uint8_t((g[i * 4 + c] + 2 * col[k][c]) / 3);
+                        km[i * 4 + 3] = 255;
+                    }
+                    if (cw > 0) WriteCrop(std::string(base) + "_kinds_crop.png", {&g, &km}, cx, cy, cw, ch);
+                    else WriteRow(std::string(base) + "_kinds.png", {&g, &km});
+                }
                 // Skip-one: generated vs the real k, with the error map.
                 in.prev = {f0.data(), kW, kH};
                 in.cur = {f2.data(), kW, kH};

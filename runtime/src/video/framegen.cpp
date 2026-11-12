@@ -292,14 +292,16 @@ void PrintStatus() {
     if (s.gpuN || s.gpuMissing)
         std::fprintf(stderr,
                      "[framegen] gpu: %llu fetched (%llu with HUD-less images, %llu with the game's vectors), %llu without "
-                     "GPU work, %llu declined; gpu %.2f ms avg, %.2f max; wait %.2f ms avg, %.2f max\n",
+                     "GPU work, %llu declined; gpu %.2f ms avg, %.2f max; wait %.2f ms avg, %.2f max; "
+                     "white near text: %llu frames, %llu px\n",
                      (unsigned long long)s.gpuN, (unsigned long long)s.gpuHud, (unsigned long long)s.gpuVec,
                      (unsigned long long)s.gpuMissing, (unsigned long long)s.gpuDeclined,
                      s.gpuN ? s.gpuMsSum / double(s.gpuN) : 0.0, s.gpuMsMax, s.gpuN ? s.gpuWaitSum / double(s.gpuN) : 0.0,
-                     s.gpuWaitMax);
+                     s.gpuWaitMax, (unsigned long long)s.gpuTextFrames, (unsigned long long)s.gpuText);
 }
 
-void NoteGpu(bool fetched, double gpuMs, double waitMs, bool declined, bool usedHudless, bool usedVectors) {
+void NoteGpu(bool fetched, double gpuMs, double waitMs, bool declined, bool usedHudless, bool usedVectors,
+             uint32_t pixText) {
     std::lock_guard lk(g_mutex);
     if (!fetched) {
         ++g_stats.gpuMissing;
@@ -309,6 +311,8 @@ void NoteGpu(bool fetched, double gpuMs, double waitMs, bool declined, bool used
     g_stats.gpuDeclined += declined;
     g_stats.gpuHud += usedHudless;
     g_stats.gpuVec += usedVectors;
+    g_stats.gpuText += pixText;
+    g_stats.gpuTextFrames += pixText > 0;
     if (gpuMs >= 0) {
         g_stats.gpuMsSum += gpuMs;
         g_stats.gpuMsMax = std::max(g_stats.gpuMsMax, gpuMs);

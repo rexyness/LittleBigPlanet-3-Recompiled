@@ -242,6 +242,7 @@ Fetched Fetch(const Ticket& t, std::vector<uint8_t>& out) {
     r.covered = res.covered;
     r.saturated = res.saturated;
     r.total = res.total;
+    r.pixText = res.pixText;
     return r;
 }
 
