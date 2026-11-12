@@ -26,11 +26,21 @@ namespace video::framegen {
 // LBP3_FRAMEGEN=1 (read once). Everything below is inert when it's off.
 bool Enabled();
 
+// The GPU generator's work for one frame (gpu/fg_live.h): submitted by the command-processor
+// thread after the frame's readback, waited for by the worker. id 0 = none.
+struct GpuTicket {
+    uint64_t id = 0;
+    uint64_t tick = 0;
+    int slot = 0;
+};
+
 // A real frame as the command-processor thread hands it over.
 struct RealInfo {
     int64_t slotNs = 0;    // steady-clock time of the frame's flip slot (when it would be shown without this)
     int64_t periodNs = 0;  // the game's flip period (33.3 ms at the game's 30 Hz)
     int simSteps = -1;     // simulation steps the game ran for this frame (-1 = unknown)
+    double camJump = -1;   // the camera's translation change since the last flip submit (-1 = unknown)
+    GpuTicket gpu;         // the GPU generator's work for this frame (LBP3_FRAMEGEN_MODE=warp)
 };
 // Takes the frame (pixels comes back holding a spare buffer to refill) and returns at once.
 void SubmitReal(std::vector<uint8_t>& pixels, uint32_t width, uint32_t height, const RealInfo& info);
@@ -56,6 +66,7 @@ struct GenInputs {
     const void* hudless = nullptr;
     const void* hudlessPrev = nullptr;
     float motionScale = 1.0f;  // multiplies the decoded vectors (the offline skip-one test uses 2)
+    GpuTicket gpu;             // in game, the GPU generator's work for N (already submitted)
 };
 class Generator {
 public:
@@ -65,8 +76,13 @@ public:
     virtual bool Generate(const GenInputs& in, std::vector<uint8_t>& out) = 0;
 };
 // "blend" (50/50 average of N-1 and N, the default) or "repeat" (N-1 again: the window then
-// shows 30 distinct frames a second at the 60 Hz cadence, for timing checks). nullptr = unknown.
+// shows 30 distinct frames a second at the 60 Hz cadence, for timing checks). "warp" is the
+// motion-compensated generator: on the GPU in game (gpu/fg_live.h), else on the CPU;
+// "warp-cpu" always the CPU one; "warp-gpu" the GPU one on a headless device of its own (the
+// offline tools). nullptr = unknown.
 std::unique_ptr<Generator> MakeGenerator(const char* name);
+// The GPU generator's timing, for the status line (from the generator).
+void NoteGpu(bool fetched, double gpuMs, double waitMs, bool declined);
 
 // ---- Decisions (pure, for the worker and the offline test) -----------------------------------
 
@@ -80,6 +96,8 @@ struct DecideIn {
     int simSteps = -1;
     double cutDiff = 0;       // MeanAbsDiff of the two frames
     double cutThreshold = 0;  // a cut when cutDiff is above it
+    double camJump = -1;      // the camera's translation change (-1 = unknown)
+    double camJumpThreshold = 0;  // a cut when camJump is above it (0 = off)
 };
 Drop Decide(const DecideIn& in);
 // Mean absolute difference of B, G and R (0..255) over a sparse grid (every 8th pixel of every
@@ -97,6 +115,8 @@ struct Stats {
     uint64_t dropped[static_cast<int>(Drop::kCount)] = {};
     double genMsSum = 0, genMsMax = 0, diffSum = 0, diffMax = 0;
     uint64_t diffCount = 0;
+    uint64_t gpuN = 0, gpuMissing = 0, gpuDeclined = 0;
+    double gpuMsSum = 0, gpuMsMax = 0, gpuWaitSum = 0, gpuWaitMax = 0;
 };
 Stats TakeStats();
 

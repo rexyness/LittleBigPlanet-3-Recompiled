@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <deque>
 #include <cstdio>
 #include <cstdlib>
@@ -25,7 +26,9 @@
 #include "hle/register.h"
 #include "gpu/frame_split.h"
 #include "gpu/renderer.h"
+#include "gpu/fg_live.h"
 #include "video/framegen.h"
+#include "video/framegen_warp.h"
 #include "video/presenter.h"
 
 namespace VideoCore {
@@ -66,7 +69,7 @@ gpu::DisplayBufferDesc g_displayBuffers[16];
 // reaches the frame's flip packet (GfxFlip interrupt), not at submit time.
 // splitFrame: gpu/frame_split.h. simSteps: the frame's simulation steps, read only with frame
 // generation on (video/framegen.h), else -1.
-struct PendingFlip { int buffer; int64_t arg; uint64_t splitFrame = 0; int simSteps = -1; };
+struct PendingFlip { int buffer; int64_t arg; uint64_t splitFrame = 0; int simSteps = -1; double camJump = -1; };
 std::mutex g_pendingMutex;
 std::deque<PendingFlip> g_pendingFlips;
 constexpr uint32_t kIrqGfxFlip = 0x08;
@@ -238,6 +241,14 @@ int PS4_SYSV_ABI sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index,
     static const bool gpuReady = [] {
         try {
             if (!gpu::Init()) return false;
+            // Frame generation's warp runs on the GPU (perf/fg_gpu.md) unless
+            // LBP3_FRAMEGEN_WARP_GPU=0 (then the CPU version, video/framegen_warp.cpp).
+            if (video::framegen::Enabled()) {
+                const char* mode = std::getenv("LBP3_FRAMEGEN_MODE");
+                const char* onGpu = std::getenv("LBP3_FRAMEGEN_WARP_GPU");
+                if (mode && std::strcmp(mode, "warp") == 0 && !(onGpu && std::strcmp(onGpu, "0") == 0))
+                    gpu::fglive::Configure(video::framegen::WarpParamsFromEnv());
+            }
         } catch (const std::exception& e) {
             std::fprintf(stderr, "[gpu] renderer unavailable (%s); using the scaffolding path\n", e.what());
             return false;
@@ -267,6 +278,10 @@ int PS4_SYSV_ABI sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index,
                     // Show the frame on its slot, not whenever the GPU finished it:
                     // uneven hand-over times make a moving camera judder.
                     if (got) gpu::fg::OnFinal(pixels, w, h, g_displayBuffers[f.buffer].pixelFormat);
+                    // GPU frame generation: submit this frame's in-between work now (its inputs
+                    // were copied during the frame and by the readback); the worker waits for it.
+                    video::framegen::GpuTicket gpuTicket;
+                    if (gpu::fglive::Active()) gpuTicket = gpu::fglive::Kick();
                     WaitFlipSlot();
                     gpu::fg::OnShown();
                     if (got) {
@@ -282,6 +297,8 @@ int PS4_SYSV_ABI sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index,
                                                 kFrameTime * (g_flipRate.load() + 1))
                                                 .count();
                             info.simSteps = f.simSteps;
+                            info.camJump = f.camJump;
+                            info.gpu = gpuTicket;
                             video::framegen::SubmitReal(pixels, w, h, info);
                         } else {
                             video::PresentPixels(pixels, w, h);
@@ -336,6 +353,7 @@ int PS4_SYSV_ABI sceVideoOutRegisterBuffers(int32_t handle, int32_t start, void*
             g_displayBuffers[start + i] = {reinterpret_cast<uint64_t>(addresses[i]), attr->width, attr->height,
                                            attr->pitchInPixel, attr->pixelFormat, attr->tilingMode};
         gpu::fg::SetDisplayBuffer(start + i, reinterpret_cast<uint64_t>(addresses[i]));
+        gpu::fglive::SetDisplayBuffer(start + i, reinterpret_cast<uint64_t>(addresses[i]));
     }
     return start;  // the buffer set index
 }
@@ -576,6 +594,34 @@ void TraceSimSteps() {
 // Frame generation only (video/framegen.h): the simulation steps since the previous flip
 // submit (GetSimFrame__, read as TraceSimSteps does), so no in-between frame is made across a
 // 0- or 2-step frame. -1 when frame generation is off (nothing is read) or for the first flip.
+// Frame generation only: how far the camera moved since the last flip submit (the largest change
+// of the main view's translation, DAT_013a2a60's camera matrix at +0x20; perf/fg_inputs.md: 5,753
+// at a camera cut, at most ~250 in play). -1 when off or unknown.
+double FrameGenCamJump() {
+    if (!video::framegen::Enabled()) return -1;
+    uint8_t* base = core::EbootBase();
+    if (!base) return -1;
+    uint64_t view = 0;
+    std::memcpy(&view, base + 0x13a2a60, sizeof(view));
+    static bool haveLast = false;
+    static float last[3] = {};
+    if (view <= 0x100000 || view >= (uint64_t{1} << 47)) {
+        haveLast = false;
+        return -1;
+    }
+    float t[3];
+    std::memcpy(t, reinterpret_cast<const uint8_t*>(view) + 0x20 + 12 * 4, sizeof t);
+    double jump = -1;
+    if (haveLast) {
+        jump = 0;
+        for (int i = 0; i < 3; ++i) jump = std::max(jump, double(std::fabs(t[i] - last[i])));
+        if (!(jump == jump)) jump = -1;  // NaN
+    }
+    std::memcpy(last, t, sizeof t);
+    haveLast = true;
+    return jump;
+}
+
 int FrameGenSimSteps() {
     if (!video::framegen::Enabled()) return -1;
     uint8_t* base = core::EbootBase();
@@ -598,6 +644,7 @@ int PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void* const* 
     (void)noted;
     TraceSimSteps();
     const int simSteps = FrameGenSimSteps();
+    const double camJump = FrameGenCamJump();
     if (gpu::fg::Enabled()) {  // LBP3_FG_DUMP: counters and the main view (camera now +0x20, before +0x160)
         if (uint8_t* base = core::EbootBase()) {
             using Counter = int(PS4_SYSV_ABI*)();
@@ -621,7 +668,7 @@ int PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void* const* 
         if (PatchFlipRequest(static_cast<uint32_t*>(dcbs[count - 1]), dcbSizes[count - 1] / 4, displayBufferIndex)) {
             {
                 std::lock_guard pl(videoout::g_pendingMutex);
-                videoout::g_pendingFlips.push_back({static_cast<int>(displayBufferIndex), flipArg, splitFrame, simSteps});
+                videoout::g_pendingFlips.push_back({static_cast<int>(displayBufferIndex), flipArg, splitFrame, simSteps, camJump});
             }
             TraceFlipSubmit(count, dcbs, dcbSizes, splitFrame);
             const int submitResult = Process(count, dcbs, dcbSizes, ccbs, ccbSizes);

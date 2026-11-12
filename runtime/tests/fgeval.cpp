@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "video/framegen.h"
+#include "video/framegen_gpu.h"
 #include "video/framegen_warp.h"
 
 #define STB_IMAGE_WRITE_STATIC
@@ -168,7 +169,7 @@ int main(int argc, char** argv) {
     const std::string dir = argv[1];
     std::string gens = "warp,blend,repeat", outDir, stills, image = "final", crop;
     int from = 1, to = 1 << 30;
-    bool quiet = false, useVec = true, useHud = true;
+    bool quiet = false, useVec = true, useHud = true, compare = false;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : std::string(); };
@@ -182,6 +183,7 @@ int main(int argc, char** argv) {
         else if (a == "--quiet") quiet = true;
         else if (a == "--novec") useVec = false;
         else if (a == "--nohud") useHud = false;
+        else if (a == "--compare") compare = true;  // byte-compare "warp" (CPU) with "warp-gpu" per triple
     }
     const std::vector<long long> sims = ManifestSims(dir);
     if (sims.size() < 3) {
@@ -202,6 +204,17 @@ int main(int argc, char** argv) {
     // Skip-one scores.
     std::vector<double> sumAll(gs.size()), sumMov(gs.size()), sumMae(gs.size()), sumMs(gs.size()), maxMs(gs.size());
     std::vector<int> declined(gs.size());
+    std::vector<double> gpuSum(gs.size()), gpuMax(gs.size());
+    std::vector<int> gpuN(gs.size());
+    std::vector<std::vector<uint8_t>> outs(gs.size());
+    std::vector<bool> outDeclined(gs.size());
+    int cpuIdx = -1, gpuIdx = -1;
+    for (size_t gi = 0; gi < gs.size(); ++gi) {
+        if (std::strcmp(gs[gi]->Name(), "warp") == 0) cpuIdx = int(gi);
+        if (std::strcmp(gs[gi]->Name(), "warp-gpu") == 0) gpuIdx = int(gi);
+    }
+    uint64_t cmpTriples = 0, cmpIdentical = 0, cmpDiffPixels = 0, cmpDeclineMismatch = 0;
+    int cmpMaxDiff = 0;
     int scored = 0, skipped = 0;
     std::vector<uint8_t> a, t, b, out, vel, hlA, hlB;
     for (int k = std::max(1, from); k < std::min(n - 1, to + 1); ++k) {
@@ -227,11 +240,20 @@ int main(int argc, char** argv) {
             const auto t0 = std::chrono::steady_clock::now();
             bool ok = gs[gi]->Generate(in, out);
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            outDeclined[gi] = !ok;
             if (!ok) {
                 // Declined: the window keeps showing N-1 (scored as such).
                 ++declined[gi];
                 out = a;
                 ok = true;
+            }
+            if (compare) outs[gi] = out;
+            double gpuMs = -1;
+            if (const auto* gr = fg::LastGpuResult(gs[gi].get()); gr && gr->gpuMs >= 0) {
+                gpuMs = gr->gpuMs;
+                gpuSum[gi] += gpuMs;
+                gpuMax[gi] = std::max(gpuMax[gi], gpuMs);
+                ++gpuN[gi];
             }
             const Score s = Compare(out, t, a, b);
             sumAll[gi] += Psnr(s.mseAll);
@@ -241,6 +263,7 @@ int main(int argc, char** argv) {
             maxMs[gi] = std::max(maxMs[gi], ms);
             if (!quiet) {
                 std::printf("  %s %.2f/%.2f dB %.1f ms", gs[gi]->Name(), Psnr(s.mseAll), Psnr(s.mseMoving), ms);
+                if (gpuMs >= 0) std::printf(" (gpu %.3f ms)", gpuMs);
                 if (const fg::WarpDebug* d = fg::LastWarpDebug(gs[gi].get()))
                     std::printf(" [luma %.1f search %.1f compose %.1f; static %.0f%% alt %.1f%% fall %.1f%% hud %.1f%%; vec cov %.0f%% sat %.0f%%%s]",
                                 d->msLuma, d->msSearch, d->msCompose, 100.0 * d->pixStatic / (kW * kH),
@@ -248,6 +271,24 @@ int main(int argc, char** argv) {
                                 100.0 * d->pixHud / (kW * kH), 100.0 * d->vecCovered, 100.0 * d->vecSaturated,
                                 d->declined ? " DECLINED" : "");
             }
+        }
+        if (compare && cpuIdx >= 0 && gpuIdx >= 0) {
+            ++cmpTriples;
+            const auto& c = outs[cpuIdx];
+            const auto& g = outs[gpuIdx];
+            uint64_t diffPx = 0;
+            int maxD = 0;
+            for (size_t i = 0; i + 3 < c.size() && i + 3 < g.size(); i += 4) {
+                int d = 0;
+                for (int ch = 0; ch < 4; ++ch) d = std::max(d, std::abs(int(c[i + ch]) - int(g[i + ch])));
+                if (d) ++diffPx, maxD = std::max(maxD, d);
+            }
+            if (outDeclined[cpuIdx] != outDeclined[gpuIdx]) ++cmpDeclineMismatch;
+            if (!diffPx && c.size() == g.size()) ++cmpIdentical;
+            cmpDiffPixels += diffPx;
+            cmpMaxDiff = std::max(cmpMaxDiff, maxD);
+            if (!quiet) std::printf("  [cpu/gpu: %llu px differ, max %d%s]", (unsigned long long)diffPx, maxD,
+                                    outDeclined[cpuIdx] != outDeclined[gpuIdx] ? ", DECLINE MISMATCH" : "");
         }
         if (!quiet) std::printf("  moving %.1f%%\n", 100.0 * Compare(a, b, a, b).moving / (kW * kH));
         ++scored;
@@ -257,6 +298,15 @@ int main(int argc, char** argv) {
         std::printf("  %-7s PSNR all %.2f dB, moving %.2f dB, MAE moving %.2f; %.2f ms avg, %.2f max; %d declined\n",
                     gs[gi]->Name(), sumAll[gi] / scored, sumMov[gi] / scored, sumMae[gi] / scored, sumMs[gi] / scored,
                     maxMs[gi], declined[gi]);
+    for (size_t gi = 0; gi < gs.size(); ++gi)
+        if (gpuN[gi])
+            std::printf("  %-7s GPU time %.3f ms avg, %.3f max (%d timed)\n", gs[gi]->Name(), gpuSum[gi] / gpuN[gi],
+                        gpuMax[gi], gpuN[gi]);
+    if (cmpTriples)
+        std::printf("  cpu/gpu compare: %llu of %llu triples identical; %llu differing pixels in all; max diff %d; "
+                    "%llu decline mismatches\n",
+                    (unsigned long long)cmpIdentical, (unsigned long long)cmpTriples,
+                    (unsigned long long)cmpDiffPixels, cmpMaxDiff, (unsigned long long)cmpDeclineMismatch);
 
     // Stills.
     if (!outDir.empty() && !stills.empty()) {

@@ -23,6 +23,7 @@ add_subdirectory(${SHADPS4_EXT}/miniz ${CMAKE_BINARY_DIR}/ext/miniz EXCLUDE_FROM
 
 # Build-time GLSL helpers (detiler, blits, post-processing) -> embedded SPIR-V headers.
 add_subdirectory(${SHADPS4}/src/video_core/host_shaders ${CMAKE_BINARY_DIR}/host_shaders)
+include(${CMAKE_CURRENT_LIST_DIR}/fg_shaders.cmake)  # frame generation's compute passes
 
 # --- video_core -----------------------------------------------------------------
 file(GLOB_RECURSE VIDEO_CORE_SOURCES CONFIGURE_DEPENDS ${SHADPS4}/src/video_core/*.cpp)
@@ -39,11 +40,13 @@ add_library(video_core STATIC
     src/gpu/video_core_glue.cpp
     src/gpu/renderer.cpp
     src/gpu/frame_split.cpp
+    src/gpu/fg_gpu.cpp
+    src/gpu/fg_live.cpp
 )
-add_dependencies(video_core host_shaders)
+add_dependencies(video_core host_shaders fg_shaders)
 set_target_properties(video_core PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
 target_include_directories(video_core
-    PRIVATE ${HOST_SHADERS_INCLUDE} ${CMAKE_CURRENT_SOURCE_DIR}/src
+    PRIVATE ${HOST_SHADERS_INCLUDE} ${FG_SHADER_INCLUDE} ${CMAKE_CURRENT_SOURCE_DIR}/src
     PUBLIC ${SHADPS4_EXT}/tracy/public)  # profiling compiled out (no TRACY_ENABLE)
 target_compile_options(video_core PRIVATE -Wno-everything)
 target_link_libraries(video_core PUBLIC shader_recompiler Vulkan::Headers GPUOpen::VulkanMemoryAllocator SDL3::SDL3 miniz)

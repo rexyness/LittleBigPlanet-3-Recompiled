@@ -74,6 +74,7 @@ add_library(hle STATIC
     src/video/presenter.cpp
     src/video/framegen.cpp
     src/video/framegen_warp.cpp
+    src/video/framegen_gpu.cpp
     src/ui/osk_model.cpp
     src/ui/overlay.cpp
     src/ui/osk_overlay.cpp

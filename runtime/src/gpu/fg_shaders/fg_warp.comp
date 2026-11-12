@@ -1,0 +1,588 @@
+// Frame generation on the GPU: lane D's warp generator (runtime/src/video/framegen_warp.cpp)
+// as compute passes, with the same integer arithmetic, so the result matches the CPU version
+// byte for byte (perf/fg_gpu.md in the planning repo). Compiled once per pass (-DPASS=n).
+//
+// Data, all in storage buffers (std430), one uint per pixel:
+//   frames   RGBA8 as stored by the game (4 bytes per pixel, c0..c3 in memory order)
+//   luma     the two frames' half/quarter/eighth luma planes (one uint per sample, 0..255)
+//   fields   motion fields, one ivec2 per 8x8 block of a luma level (total motion N-1 -> N in
+//            that level's pixels)
+//   gvec     the game's vectors per block (level 0 and level 2), x = -32768 for none
+//   stats    counters (see the S_ constants)
+// Reads outside a plane are clamped to its edge, which is what the CPU version's edge-padded
+// planes give for every offset it can search.
+#version 450
+
+#define P_HUDSHARE 1
+#define P_DECIDE 2
+#define P_LUMA0 3
+#define P_DOWN 4
+#define P_GAMEVEC 5
+#define P_COARSE 6
+#define P_INIT 7
+#define P_SMOOTH 8
+#define P_MIDINIT 9
+#define P_COMPOSE 10
+
+#if PASS == P_COARSE
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+#else
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+#endif
+
+layout(std430, set = 0, binding = 0) readonly buffer FinalPrev { uint finalPrev[]; };
+layout(std430, set = 0, binding = 1) readonly buffer FinalCur { uint finalCur[]; };
+layout(std430, set = 0, binding = 2) readonly buffer HudPrev { uint hudPrev[]; };
+layout(std430, set = 0, binding = 3) readonly buffer HudCur { uint hudCur[]; };
+layout(std430, set = 0, binding = 4) readonly buffer Vel { uint vel[]; };
+layout(std430, set = 0, binding = 5) buffer Luma { uint luma[]; };
+layout(std430, set = 0, binding = 6) buffer Fields { ivec2 fields[]; };
+layout(std430, set = 0, binding = 7) buffer GVec { ivec2 gvec[]; };
+layout(std430, set = 0, binding = 8) buffer Stats { uint stats[]; };
+layout(std430, set = 0, binding = 9) writeonly buffer Out { uint outPx[]; };
+
+// stats[]
+#define S_TOTAL 0
+#define S_COVERED 1
+#define S_SATURATED 2
+#define S_HUDHIT 3
+#define S_HUDN 4
+#define S_USEHUD 5
+#define S_AVG 6
+#define S_ALT 7
+#define S_FALL 8
+#define S_STATIC 9
+#define S_HUDPIX 10
+
+layout(push_constant) uniform PC {
+    int W, H;          // full-resolution frame
+    int lw, lh;        // this level's plane size
+    int bw, bh;        // this level's blocks
+    int plPrev, plCur; // luma plane offsets of N-1 and N at this level
+    int src0, dst0;    // field offsets for z = 0 (back: anchor N) or the mid field
+    int src1, dst1;    // field offsets for z = 1 (fwd: anchor N-1)
+    int par0, par1;    // parent-level field offsets (P_INIT)
+    int pbw, pbh;      // parent-level blocks
+    int gOff;          // game-vector offset for this level, -1 = none
+    int radius;        // P_COARSE: full search radius; P_INIT: refine radius
+    int lambdaZero, lambdaSmooth;
+    int a0, a1, a2, a3, a4, a5, a6, a7;  // per-pass extras (see each pass)
+    int a8, a9, a10, a11;
+} pc;
+
+const int kBlock = 8;
+const int kLim = 96 - 8 - 1;  // the CPU version's Clamp(): kPad - kBlock - 1
+const int kNoVec = -32768;
+
+int L(int off, int w, int h, int x, int y) {
+    return int(luma[off + clamp(y, 0, h - 1) * w + clamp(x, 0, w - 1)]);
+}
+
+uint Sad8(int offA, int ax, int ay, int offB, int bx, int by) {
+    uint s = 0u;
+    for (int r = 0; r < kBlock; ++r)
+        for (int c = 0; c < kBlock; ++c)
+            s += uint(abs(L(offA, pc.lw, pc.lh, ax + c, ay + r) - L(offB, pc.lw, pc.lh, bx + c, by + r)));
+    return s;
+}
+
+ivec2 ClampV(ivec2 v) { return clamp(v, ivec2(-kLim), ivec2(kLim)); }
+int L1(ivec2 a, ivec2 b) { return abs(a.x - b.x) + abs(a.y - b.y); }
+
+// CostOne: the anchor frame's block against the other frame at + sign * m.
+uint CostOne(int anchor, int other, int sign, int bx, int by, ivec2 m, bool useMed, ivec2 med) {
+    const int x = bx * kBlock, y = by * kBlock;
+    uint c = Sad8(anchor, x, y, other, x + sign * m.x, y + sign * m.y);
+    c += uint(pc.lambdaZero) * uint(abs(m.x) + abs(m.y));
+    if (useMed) c += uint(pc.lambdaSmooth) * 8u * uint(L1(m, med));
+    return c;
+}
+
+// CostMid: N-1 at p - floor(m / 2) against N at p + (m - floor(m / 2)) (level 0).
+uint CostMid(int bx, int by, ivec2 m, bool useMed, ivec2 med) {
+    const int x = bx * kBlock, y = by * kBlock;
+    const int px = m.x >> 1, py = m.y >> 1;
+    uint c = Sad8(pc.plPrev, x - px, y - py, pc.plCur, x + (m.x - px), y + (m.y - py));
+    c += uint(pc.lambdaZero) * uint(abs(m.x) + abs(m.y));
+    if (useMed) c += uint(pc.lambdaSmooth) * 8u * uint(L1(m, med));
+    return c;
+}
+
+uint MaxDiff3(uint a, uint b) {
+    const ivec3 ca = ivec3(int(a & 0xffu), int((a >> 8) & 0xffu), int((a >> 16) & 0xffu));
+    const ivec3 cb = ivec3(int(b & 0xffu), int((b >> 8) & 0xffu), int((b >> 16) & 0xffu));
+    const ivec3 d = abs(ca - cb);
+    return uint(max(d.x, max(d.y, d.z)));
+}
+
+#if PASS == P_COMPOSE
+// ---- compose -------------------------------------------------------------------------------
+// a0 = mid field offset, a1 = agreeT, a2 = altT, a3 = staticT, a4 = flags (1 perPixelAlt,
+// 2 staticCopy, 4 hud allowed, 8 t >= 0.5), a5 = fallback, a6 = tP, a7 = tC, a8 = wt, a9 = hudT.
+shared uint sCount[5];
+
+uint Px(bool prev, bool hud, int i) {
+    if (hud) return prev ? hudPrev[i] : hudCur[i];
+    return prev ? finalPrev[i] : finalCur[i];
+}
+
+// Bilinear sample at (x, y) in 1/256 pixels, clamped, the CPU version's integer math.
+ivec4 Sample(bool prev, bool hud, int x256, int y256) {
+    const int W = pc.W, H = pc.H;
+    int ix = x256 >> 8, iy = y256 >> 8;
+    int fx = x256 & 255, fy = y256 & 255;
+    if (ix < 0) { ix = 0; fx = 0; }
+    if (iy < 0) { iy = 0; fy = 0; }
+    if (ix >= W - 1) { ix = W - 2; fx = 256; }
+    if (iy >= H - 1) { iy = H - 2; fy = 256; }
+    const int i0 = iy * W + ix;
+    const uint p00 = Px(prev, hud, i0);
+    if (fx == 0 && fy == 0) return ivec4(int(p00 & 0xffu), int((p00 >> 8) & 0xffu), int((p00 >> 16) & 0xffu), int(p00 >> 24));
+    const uint p01 = Px(prev, hud, i0 + 1), p10 = Px(prev, hud, i0 + W), p11 = Px(prev, hud, i0 + W + 1);
+    ivec4 r;
+    for (int c = 0; c < 4; ++c) {
+        const int sh = c * 8;
+        const int v00 = int((p00 >> sh) & 0xffu), v01 = int((p01 >> sh) & 0xffu);
+        const int v10 = int((p10 >> sh) & 0xffu), v11 = int((p11 >> sh) & 0xffu);
+        const int t = (v00 * (256 - fx) + v01 * fx) >> 1;
+        const int b = (v10 * (256 - fx) + v11 * fx) >> 1;
+        const int s = t * (256 - fy) + b * fy;
+        r[c] = (s + (1 << 14)) >> 15;
+    }
+    return r;
+}
+
+int MaxD(ivec4 a, ivec4 b) {
+    const ivec3 d = abs(a.xyz - b.xyz);
+    return max(d.x, max(d.y, d.z));
+}
+
+uint Pack(ivec4 v) {
+    const uvec4 u = uvec4(clamp(v, ivec4(0), ivec4(255)));
+    return u.x | (u.y << 8) | (u.z << 16) | (u.w << 24);
+}
+
+void main() {
+    const bool first = gl_LocalInvocationIndex == 0u;
+    if (first) for (int i = 0; i < 5; ++i) sCount[i] = 0u;
+    barrier();
+    const int x = int(gl_GlobalInvocationID.x), y = int(gl_GlobalInvocationID.y);
+    const int W = pc.W, H = pc.H;
+    if (x < W && y < H) {
+        const bool hud = (pc.a4 & 4) != 0 && stats[S_USEHUD] != 0u;
+        const int i = y * W + x;
+        const int bw = pc.bw, bh = pc.bh;
+        uint result;
+        int kind;  // 0 avg, 1 alt (counted with avg or fall too), 2 fall, 3 static
+        bool usedAlt = false;
+        const uint pp = Px(true, hud, i), cp = Px(false, hud, i);
+        if ((pc.a4 & 2) != 0 && MaxDiff3(pp, cp) <= uint(pc.a3)) {
+            result = cp;
+            kind = 3;
+        } else {
+            // The field, bilinear between block centres (16 i + 8), as the CPU version.
+            const int blockFull = 16;
+            int gx = (x * 2 + 1 - blockFull) * 128 / blockFull;
+            int i0 = gx >> 8, wx = gx & 255;
+            if (gx < 0) { i0 = 0; wx = 0; }
+            if (i0 >= bw - 1) { i0 = bw - 1; wx = 0; }
+            const int i1 = min(i0 + 1, bw - 1);
+            int gy = (y * 2 + 1 - blockFull) * 128 / blockFull;
+            int j0 = gy >> 8, wy = gy & 255;
+            if (gy < 0) { j0 = 0; wy = 0; }
+            if (j0 >= bh - 1) { j0 = bh - 1; wy = 0; }
+            const int j1 = min(j0 + 1, bh - 1);
+            const int mo = pc.a0;
+            const ivec2 v00 = fields[mo + j0 * bw + i0], v10 = fields[mo + j1 * bw + i0];
+            const ivec2 v01 = fields[mo + j0 * bw + i1], v11 = fields[mo + j1 * bw + i1];
+            const int rx0 = (v00.x * 256 * (256 - wy) + v10.x * 256 * wy) >> 8;
+            const int ry0 = (v00.y * 256 * (256 - wy) + v10.y * 256 * wy) >> 8;
+            const int rx1 = (v01.x * 256 * (256 - wy) + v11.x * 256 * wy) >> 8;
+            const int ry1 = (v01.y * 256 * (256 - wy) + v11.y * 256 * wy) >> 8;
+            const int hx = (rx0 * (256 - wx) + rx1 * wx) >> 8;
+            const int hy = (ry0 * (256 - wx) + ry1 * wx) >> 8;
+            const int tP = pc.a6, tC = pc.a7;
+            ivec4 a = Sample(true, hud, (x << 8) - ((hx * tP) >> 8), (y << 8) - ((hy * tP) >> 8));
+            ivec4 b = Sample(false, hud, (x << 8) + ((hx * tC) >> 8), (y << 8) + ((hy * tC) >> 8));
+            int d = MaxD(a, b);
+            if (d > pc.a1 && (pc.a4 & 1) != 0) {
+                // The distinct vectors of the 3x3 blocks around this pixel's block.
+                const int bj = min(y / blockFull, bh - 1), bi = min(x / blockFull, bw - 1);
+                ivec2 list[9];
+                int n = 0;
+                for (int dj = -1; dj <= 1; ++dj)
+                    for (int di = -1; di <= 1; ++di) {
+                        const int qi = bi + di, qj = bj + dj;
+                        if (qi < 0 || qj < 0 || qi >= bw || qj >= bh) continue;
+                        const ivec2 v = fields[mo + qj * bw + qi];
+                        bool dup = false;
+                        for (int k = 0; k < n; ++k) dup = dup || (list[k] == v);
+                        if (!dup) list[n++] = v;
+                    }
+                if (n > 1) {
+                    int bestD = d;
+                    ivec4 ba = a, bb = b;
+                    for (int k = 0; k < n; ++k) {
+                        const int vx = list[k].x * 256, vy = list[k].y * 256;
+                        const ivec4 ta = Sample(true, hud, (x << 8) - ((vx * tP) >> 8), (y << 8) - ((vy * tP) >> 8));
+                        const ivec4 tb = Sample(false, hud, (x << 8) + ((vx * tC) >> 8), (y << 8) + ((vy * tC) >> 8));
+                        const int td = MaxD(ta, tb);
+                        if (td < bestD) { bestD = td; ba = ta; bb = tb; }
+                    }
+                    if (bestD < d) {
+                        usedAlt = true;
+                        d = bestD;
+                        a = ba;
+                        b = bb;
+                    }
+                }
+            }
+            if (d > pc.a2 && pc.a5 != 0) {
+                result = Pack((pc.a5 == 2 || (pc.a4 & 8) != 0) ? b : a);
+                kind = 2;
+            } else {
+                const int wt = pc.a8;
+                result = Pack((a * (256 - wt) + b * wt + 128) >> 8);
+                kind = 0;
+            }
+        }
+        if (hud) {
+            // The screen HUD from N where N differs from its HUD-less image; elsewhere N's small
+            // display-pass difference is carried over.
+            const uint fin = finalCur[i], hl = hudCur[i];
+            if (MaxDiff3(fin, hl) > uint(pc.a9)) {
+                result = fin;
+                atomicAdd(sCount[4], 1u);
+            } else {
+                uint o = 0u;
+                for (int c = 0; c < 3; ++c) {
+                    const int sh = c * 8;
+                    const int v = int((result >> sh) & 0xffu) + int((fin >> sh) & 0xffu) - int((hl >> sh) & 0xffu);
+                    o |= uint(clamp(v, 0, 255)) << sh;
+                }
+                result = o | (result & 0xff000000u);
+            }
+        }
+        outPx[i] = result;
+        atomicAdd(sCount[kind == 3 ? 3 : (kind == 2 ? 2 : 0)], 1u);
+        if (usedAlt) atomicAdd(sCount[1], 1u);
+    }
+    barrier();
+    if (first) {
+        atomicAdd(stats[S_AVG], sCount[0]);
+        atomicAdd(stats[S_ALT], sCount[1]);
+        atomicAdd(stats[S_FALL], sCount[2]);
+        atomicAdd(stats[S_STATIC], sCount[3]);
+        atomicAdd(stats[S_HUDPIX], sCount[4]);
+    }
+}
+
+#elif PASS == P_HUDSHARE
+// a0 = hudT, a1 = grid width, a2 = grid height. One thread per grid point (x = 4 + 16 i).
+void main() {
+    const int gx = int(gl_GlobalInvocationID.x), gy = int(gl_GlobalInvocationID.y);
+    if (gx >= pc.a1 || gy >= pc.a2) return;
+    const int i = (4 + 16 * gy) * pc.W + 4 + 16 * gx;
+    atomicAdd(stats[S_HUDN], 1u);
+    if (MaxDiff3(finalCur[i], hudCur[i]) > uint(pc.a0)) atomicAdd(stats[S_HUDHIT], 1u);
+}
+
+#elif PASS == P_DECIDE
+// a0 = 1 when both HUD-less images exist and the generator may use them.
+void main() {
+    if (gl_GlobalInvocationID.x != 0u || gl_GlobalInvocationID.y != 0u) return;
+    // HudShare < 0.4, as a ratio of integers.
+    stats[S_USEHUD] = (pc.a0 != 0 && stats[S_HUDHIT] * 10u < stats[S_HUDN] * 4u) ? 1u : 0u;
+}
+
+#elif PASS == P_LUMA0
+// Level 0 of both frames (z = 0: N-1, 1: N): (R + 2G + B) / 4 over each 2x2, rounded.
+// a0 = 1 when the HUD-less images may be used (the choice itself is stats[S_USEHUD]).
+void main() {
+    const int x = int(gl_GlobalInvocationID.x), y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.lw || y >= pc.lh) return;
+    const bool prev = gl_GlobalInvocationID.z == 0u;
+    const bool hud = pc.a0 != 0 && stats[S_USEHUD] != 0u;
+    const int r0 = (2 * y) * pc.W + 2 * x, r1 = r0 + pc.W;
+    uint p[4];
+    if (hud) {
+        p[0] = prev ? hudPrev[r0] : hudCur[r0];
+        p[1] = prev ? hudPrev[r0 + 1] : hudCur[r0 + 1];
+        p[2] = prev ? hudPrev[r1] : hudCur[r1];
+        p[3] = prev ? hudPrev[r1 + 1] : hudCur[r1 + 1];
+    } else {
+        p[0] = prev ? finalPrev[r0] : finalCur[r0];
+        p[1] = prev ? finalPrev[r0 + 1] : finalCur[r0 + 1];
+        p[2] = prev ? finalPrev[r1] : finalCur[r1];
+        p[3] = prev ? finalPrev[r1 + 1] : finalCur[r1 + 1];
+    }
+    uint s = 0u;
+    for (int k = 0; k < 4; ++k) s += (p[k] & 0xffu) + 2u * ((p[k] >> 8) & 0xffu) + ((p[k] >> 16) & 0xffu);
+    luma[(prev ? pc.plPrev : pc.plCur) + y * pc.lw + x] = (s + 8u) >> 4;
+}
+
+#elif PASS == P_DOWN
+// Level l from l - 1 for both frames. a0/a1 = the source planes of N-1 / N, a2/a3 = source size.
+void main() {
+    const int x = int(gl_GlobalInvocationID.x), y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.lw || y >= pc.lh) return;
+    const bool prev = gl_GlobalInvocationID.z == 0u;
+    const int s = prev ? pc.a0 : pc.a1;
+    const int sw = pc.a2;
+    const int i = s + (2 * y) * sw + 2 * x;
+    const uint v = luma[i] + luma[i + 1] + luma[i + sw] + luma[i + sw + 1];
+    luma[(prev ? pc.plPrev : pc.plCur) + y * pc.lw + x] = (v + 2u) >> 2;
+}
+
+#elif PASS == P_GAMEVEC
+// The game's vectors as per-block candidates at this level: the median of the covered,
+// unsaturated samples on a 4x4 grid. a0 = level, a1/a2 = sx/sy per level pixel (float bits),
+// a3 = cover/x/y channel indices (4 bits each), a4 = vecBias (float bits).
+void main() {
+    const int bx = int(gl_GlobalInvocationID.x), by = int(gl_GlobalInvocationID.y);
+    if (bx >= pc.bw || by >= pc.bh) return;
+    const int l = pc.a0;
+    const int scale = 2 << l, span = kBlock * scale, step = max(2, span / 4);
+    const float sxl = intBitsToFloat(pc.a1), syl = intBitsToFloat(pc.a2), bias = intBitsToFloat(pc.a4);
+    const int chC = pc.a3 & 15, chX = (pc.a3 >> 4) & 15, chY = (pc.a3 >> 8) & 15;
+    int xs[16], ys[16];
+    int n = 0;
+    uint total = 0u, covered = 0u, saturated = 0u;
+    for (int y = by * span + step / 2; y < (by + 1) * span && y < pc.H; y += step)
+        for (int x = bx * span + step / 2; x < (bx + 1) * span && x < pc.W; x += step) {
+            const uint q = vel[y * pc.W + x];
+            ++total;
+            if (((q >> (8 * chC)) & 0xffu) != 255u) continue;
+            ++covered;
+            const uint cx = (q >> (8 * chX)) & 0xffu, cy = (q >> (8 * chY)) & 0xffu;
+            if (cx == 0u || cx == 255u || cy == 0u || cy == 255u) { ++saturated; continue; }
+            if (n < 16) {
+                precise float vx = (float(cx) - bias) * sxl;
+                precise float vy = (float(cy) - bias) * syl;
+                precise float rx = vx + (vx >= 0.0 ? 0.5 : -0.5);
+                precise float ry = vy + (vy >= 0.0 ? 0.5 : -0.5);
+                xs[n] = int(rx);
+                ys[n] = int(ry);
+                ++n;
+            }
+        }
+    if (l == 0) {
+        atomicAdd(stats[S_TOTAL], total);
+        atomicAdd(stats[S_COVERED], covered);
+        atomicAdd(stats[S_SATURATED], saturated);
+    }
+    ivec2 r = ivec2(kNoVec);
+    if (n >= 4) {
+        // The (n / 2)-th smallest of each component (nth_element).
+        for (int i = 1; i < n; ++i) {
+            const int kx = xs[i], ky = ys[i];
+            int j = i - 1;
+            while (j >= 0 && xs[j] > kx) { xs[j + 1] = xs[j]; --j; }
+            xs[j + 1] = kx;
+            j = i - 1;
+            while (j >= 0 && ys[j] > ky) { ys[j + 1] = ys[j]; --j; }
+            ys[j + 1] = ky;
+        }
+        r = ivec2(xs[n / 2], ys[n / 2]);
+    }
+    gvec[pc.gOff + by * pc.bw + bx] = r;
+}
+
+#elif PASS == P_COARSE
+// The full search at the coarsest level, one workgroup per block, z = direction.
+// The other frame's window (8 + 2R square) and the anchor block are loaded into shared memory.
+const int kMaxR = 24;
+const int kWin = kBlock + 2 * kMaxR;
+shared uint sWin[kWin * kWin];
+shared uint sAnchor[kBlock * kBlock];
+shared uint sCost[64];
+shared int sIdx[64];
+void main() {
+    const int bx = int(gl_WorkGroupID.x), by = int(gl_WorkGroupID.y);
+    const bool fwd = gl_WorkGroupID.z == 1u;
+    const int anchor = fwd ? pc.plPrev : pc.plCur, other = fwd ? pc.plCur : pc.plPrev;
+    const int sign = fwd ? 1 : -1;
+    const int R = min(pc.radius, kMaxR), win = kBlock + 2 * R, side = 2 * R + 1;
+    const int x = bx * kBlock, y = by * kBlock;
+    const int tid = int(gl_LocalInvocationIndex);
+    for (int k = tid; k < win * win; k += 64)
+        sWin[k] = uint(L(other, pc.lw, pc.lh, x - R + k % win, y - R + k / win));
+    sAnchor[tid] = uint(L(anchor, pc.lw, pc.lh, x + tid % kBlock, y + tid / kBlock));
+    barrier();
+    uint best = 0xffffffffu;
+    int bestIdx = 0x7fffffff;
+    for (int k = tid; k < side * side; k += 64) {
+        const int mx = k % side - R, my = k / side - R;
+        // the other frame at + sign * m, relative to the window origin (x - R, y - R)
+        const int ox = sign * mx + R, oy = sign * my + R;
+        uint s = 0u;
+        for (int r = 0; r < kBlock; ++r)
+            for (int c = 0; c < kBlock; ++c)
+                s += uint(abs(int(sAnchor[r * kBlock + c]) - int(sWin[(oy + r) * win + ox + c])));
+        s += uint(pc.lambdaZero) * uint(abs(mx) + abs(my));
+        if (s < best) { best = s; bestIdx = k; }  // k rises: the first minimum, as the CPU's loop
+    }
+    sCost[tid] = best;
+    sIdx[tid] = bestIdx;
+    barrier();
+    for (int s = 32; s > 0; s >>= 1) {
+        if (tid < s) {
+            const uint c2 = sCost[tid + s];
+            const int i2 = sIdx[tid + s];
+            if (c2 < sCost[tid] || (c2 == sCost[tid] && i2 < sIdx[tid])) {
+                sCost[tid] = c2;
+                sIdx[tid] = i2;
+            }
+        }
+        barrier();
+    }
+    if (tid == 0) {
+        ivec2 m = ivec2(sIdx[0] % side - R, sIdx[0] / side - R);
+        uint c = sCost[0];
+        if (pc.gOff >= 0) {
+            const ivec2 g = gvec[pc.gOff + by * pc.bw + bx];
+            if (g.x != kNoVec) {
+                const ivec2 gc = ClampV(g);
+                const uint cg = CostOne(anchor, other, sign, bx, by, gc, false, ivec2(0));
+                if (cg < c) { c = cg; m = gc; }
+            }
+        }
+        fields[(fwd ? pc.dst1 : pc.dst0) + by * pc.bw + bx] = m;
+    }
+}
+
+#elif PASS == P_INIT
+// A finer level from its parent: the parent's vector at the block and its four neighbours
+// (doubled), no motion, and (level 0) the game's vector; then a +-radius refinement.
+void main() {
+    const int bx = int(gl_GlobalInvocationID.x), by = int(gl_GlobalInvocationID.y);
+    if (bx >= pc.bw || by >= pc.bh) return;
+    const bool fwd = gl_GlobalInvocationID.z == 1u;
+    const int anchor = fwd ? pc.plPrev : pc.plCur, other = fwd ? pc.plCur : pc.plPrev;
+    const int sign = fwd ? 1 : -1;
+    const int par = fwd ? pc.par1 : pc.par0;
+    ivec2 cands[8];
+    int n = 0;
+    const int px = min(bx / 2, pc.pbw - 1), py = min(by / 2, pc.pbh - 1);
+    const ivec2 nb[5] = ivec2[5](ivec2(0, 0), ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+    for (int k = 0; k < 5; ++k) {
+        const int qx = px + nb[k].x, qy = py + nb[k].y;
+        if (qx < 0 || qy < 0 || qx >= pc.pbw || qy >= pc.pbh) continue;
+        cands[n++] = ClampV(fields[par + qy * pc.pbw + qx] * 2);
+    }
+    cands[n++] = ivec2(0);
+    if (pc.gOff >= 0) {
+        const ivec2 g = gvec[pc.gOff + by * pc.bw + bx];
+        if (g.x != kNoVec) cands[n++] = ClampV(g);
+    }
+    ivec2 best = ivec2(0);
+    uint bestC = 0xffffffffu;
+    for (int k = 0; k < n; ++k) {
+        const uint c = CostOne(anchor, other, sign, bx, by, cands[k], false, ivec2(0));
+        if (c < bestC) { bestC = c; best = cands[k]; }
+    }
+    const ivec2 centre = best;
+    const int r = pc.radius;
+    for (int dy = -r; dy <= r; ++dy)
+        for (int dx = -r; dx <= r; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            const ivec2 m = ClampV(centre + ivec2(dx, dy));
+            const uint c = CostOne(anchor, other, sign, bx, by, m, false, ivec2(0));
+            if (c < bestC) { bestC = c; best = m; }
+        }
+    fields[(fwd ? pc.dst1 : pc.dst0) + by * pc.bw + bx] = best;
+}
+
+#elif PASS == P_SMOOTH
+// One neighbour-candidate pass (Jacobi: reads src, writes dst). a0 = 1 for the mid field
+// (CostMid; one field, z = 0 only), else the two one-sided fields (z = direction).
+void main() {
+    const int bx = int(gl_GlobalInvocationID.x), by = int(gl_GlobalInvocationID.y);
+    if (bx >= pc.bw || by >= pc.bh) return;
+    const bool mid = pc.a0 != 0;
+    const bool fwd = gl_GlobalInvocationID.z == 1u;
+    const int src = fwd ? pc.src1 : pc.src0, dst = fwd ? pc.dst1 : pc.dst0;
+    const int anchor = fwd ? pc.plPrev : pc.plCur, other = fwd ? pc.plCur : pc.plPrev;
+    const int sign = fwd ? 1 : -1;
+    int xs[9], ys[9];
+    ivec2 cands[10];
+    int n = 0, k = 0;
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            const int qx = bx + dx, qy = by + dy;
+            if (qx < 0 || qy < 0 || qx >= pc.bw || qy >= pc.bh) continue;
+            const ivec2 q = fields[src + qy * pc.bw + qx];
+            xs[k] = q.x;
+            ys[k] = q.y;
+            ++k;
+            bool dup = false;
+            for (int i = 0; i < n; ++i) dup = dup || (cands[i] == q);
+            if (!dup) cands[n++] = q;
+        }
+    // The (k / 2)-th smallest of each component (nth_element).
+    for (int i = 1; i < k; ++i) {
+        const int kx = xs[i], ky = ys[i];
+        int j = i - 1;
+        while (j >= 0 && xs[j] > kx) { xs[j + 1] = xs[j]; --j; }
+        xs[j + 1] = kx;
+        j = i - 1;
+        while (j >= 0 && ys[j] > ky) { ys[j + 1] = ys[j]; --j; }
+        ys[j + 1] = ky;
+    }
+    const ivec2 med = ivec2(xs[k / 2], ys[k / 2]);
+    bool dup = false;
+    for (int i = 0; i < n; ++i) dup = dup || (cands[i] == med);
+    if (!dup) cands[n++] = med;
+    ivec2 best = fields[src + by * pc.bw + bx];
+    uint bestC = mid ? CostMid(bx, by, best, true, med) : CostOne(anchor, other, sign, bx, by, best, true, med);
+    for (int i = 0; i < n; ++i) {
+        const uint c = mid ? CostMid(bx, by, cands[i], true, med) : CostOne(anchor, other, sign, bx, by, cands[i], true, med);
+        if (c < bestC) { bestC = c; best = cands[i]; }
+    }
+    fields[dst + by * pc.bw + bx] = best;
+}
+
+#elif PASS == P_MIDINIT
+// The in-between field: among the motions measured around the block (both one-sided fields at
+// the block and its four neighbours, no motion, the game's vector), the one whose two ends
+// agree best. a0/a1 = the back/fwd level-0 field offsets.
+void main() {
+    const int bx = int(gl_GlobalInvocationID.x), by = int(gl_GlobalInvocationID.y);
+    if (bx >= pc.bw || by >= pc.bh) return;
+    ivec2 cands[12];
+    int n = 0;
+    const ivec2 nb[5] = ivec2[5](ivec2(0, 0), ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+    for (int k = 0; k < 5; ++k) {
+        const int qx = bx + nb[k].x, qy = by + nb[k].y;
+        if (qx < 0 || qy < 0 || qx >= pc.bw || qy >= pc.bh) continue;
+        for (int s = 0; s < 2; ++s) {
+            const ivec2 v = ClampV(fields[(s == 0 ? pc.a0 : pc.a1) + qy * pc.bw + qx]);
+            bool dup = false;
+            for (int i = 0; i < n; ++i) dup = dup || (cands[i] == v);
+            if (!dup) cands[n++] = v;
+        }
+    }
+    {
+        const ivec2 v = ivec2(0);
+        bool dup = false;
+        for (int i = 0; i < n; ++i) dup = dup || (cands[i] == v);
+        if (!dup) cands[n++] = v;
+    }
+    if (pc.gOff >= 0) {
+        const ivec2 g = gvec[pc.gOff + by * pc.bw + bx];
+        if (g.x != kNoVec) {
+            const ivec2 v = ClampV(g);
+            bool dup = false;
+            for (int i = 0; i < n; ++i) dup = dup || (cands[i] == v);
+            if (!dup) cands[n++] = v;
+        }
+    }
+    ivec2 best = ivec2(0);
+    uint bestC = 0xffffffffu;
+    for (int i = 0; i < n; ++i) {
+        const uint c = CostMid(bx, by, cands[i], false, ivec2(0));
+        if (c < bestC) { bestC = c; best = cands[i]; }
+    }
+    fields[pc.dst0 + by * pc.bw + bx] = best;
+}
+#endif

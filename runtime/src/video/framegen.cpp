@@ -13,6 +13,8 @@
 #include <string>
 #include <thread>
 
+#include "gpu/fg_live.h"
+#include "video/framegen_gpu.h"
 #include "video/framegen_warp.h"
 #include "video/presenter.h"
 
@@ -80,6 +82,9 @@ void Worker() {
     }
     const double delayOverride = EnvDouble("LBP3_FRAMEGEN_DELAY_MS", -1.0);
     const double cutThreshold = EnvDouble("LBP3_FRAMEGEN_CUT", 40.0);
+    // A camera cut: the camera's translation jumped (perf/fg_inputs.md: 5,753 at a cut, at most
+    // ~250 in play). 0 turns it off.
+    const double camJumpThreshold = EnvDouble("LBP3_FRAMEGEN_CAMJUMP", 1000.0);
     {
         std::lock_guard lk(g_mutex);
         g_generatorName = gen->Name();
@@ -114,6 +119,8 @@ void Worker() {
         d.periodNs = s.info.periodNs;
         d.simSteps = s.info.simSteps;
         d.cutThreshold = cutThreshold;
+        d.camJump = s.info.camJump;
+        d.camJumpThreshold = camJumpThreshold;
         if (d.sameSize) {
             d.cutDiff = MeanAbsDiff(old, cur);
             std::lock_guard lk(g_mutex);
@@ -129,6 +136,7 @@ void Worker() {
             GenInputs in;
             in.prev = old;
             in.cur = cur;
+            in.gpu = s.info.gpu;
             const bool ok = gen->Generate(in, g.pixels);
             const int64_t t1 = NowNs();
             {
@@ -233,12 +241,40 @@ void PrintStatus() {
                  attempts ? s.genMsSum / double(attempts) : 0.0, s.genMsMax,
                  s.diffCount ? s.diffSum / double(s.diffCount) : 0.0, s.diffMax, (unsigned long long)shownReal,
                  (unsigned long long)shownGen, (unsigned long long)skipped);
+    if (s.gpuN || s.gpuMissing)
+        std::fprintf(stderr,
+                     "[framegen] gpu: %llu fetched, %llu without GPU work, %llu declined; gpu %.2f ms avg, %.2f max; "
+                     "wait %.2f ms avg, %.2f max\n",
+                     (unsigned long long)s.gpuN, (unsigned long long)s.gpuMissing, (unsigned long long)s.gpuDeclined,
+                     s.gpuN ? s.gpuMsSum / double(s.gpuN) : 0.0, s.gpuMsMax, s.gpuN ? s.gpuWaitSum / double(s.gpuN) : 0.0,
+                     s.gpuWaitMax);
+}
+
+void NoteGpu(bool fetched, double gpuMs, double waitMs, bool declined) {
+    std::lock_guard lk(g_mutex);
+    if (!fetched) {
+        ++g_stats.gpuMissing;
+        return;
+    }
+    ++g_stats.gpuN;
+    g_stats.gpuDeclined += declined;
+    if (gpuMs >= 0) {
+        g_stats.gpuMsSum += gpuMs;
+        g_stats.gpuMsMax = std::max(g_stats.gpuMsMax, gpuMs);
+    }
+    g_stats.gpuWaitSum += waitMs;
+    g_stats.gpuWaitMax = std::max(g_stats.gpuWaitMax, waitMs);
 }
 
 std::unique_ptr<Generator> MakeGenerator(const char* name) {
     if (!name || std::strcmp(name, "blend") == 0) return std::make_unique<BlendGenerator>();
     if (std::strcmp(name, "repeat") == 0) return std::make_unique<RepeatGenerator>();
-    if (std::strcmp(name, "warp") == 0) return MakeWarpGenerator(WarpParamsFromEnv());
+    if (std::strcmp(name, "warp") == 0) {
+        if (gpu::fglive::Active()) return MakeLiveGpuWarpGenerator();
+        return MakeWarpGenerator(WarpParamsFromEnv());
+    }
+    if (std::strcmp(name, "warp-cpu") == 0) return MakeWarpGenerator(WarpParamsFromEnv());
+    if (std::strcmp(name, "warp-gpu") == 0) return MakeOfflineGpuWarpGenerator(WarpParamsFromEnv());
     return nullptr;
 }
 
@@ -266,6 +302,7 @@ Drop Decide(const DecideIn& in) {
     if (in.sinceLastSlotNs > in.periodNs + in.periodNs / 2 || in.sinceLastSlotNs < in.periodNs / 2) return Drop::Late;
     if (in.simSteps >= 0 && in.simSteps != 1) return Drop::Steps;
     if (in.cutDiff > in.cutThreshold) return Drop::Cut;
+    if (in.camJumpThreshold > 0 && in.camJump > in.camJumpThreshold) return Drop::Cut;
     return Drop::None;
 }
 

@@ -387,6 +387,77 @@ static void TestWarp() {
     }
 }
 
+// The GPU warp (perf/fg_gpu.md) gives the CPU warp's bytes and decisions in every case above.
+static void TestWarpGpu() {
+    const uint32_t w = 320, h = 192;
+    auto cpu = fg::MakeGenerator("warp-cpu");
+    auto gpu = fg::MakeGenerator("warp-gpu");
+    Check(gpu != nullptr && std::strcmp(gpu->Name(), "warp-gpu") == 0, "the GPU warp generator runs on this machine");
+    if (!cpu || !gpu) return;
+    auto same = [&](const fg::GenInputs& in, const char* what) {
+        std::vector<uint8_t> a, b;
+        const bool okA = cpu->Generate(in, a), okB = gpu->Generate(in, b);
+        Check(okA == okB && (!okA || a == b), what);
+    };
+    for (const auto& d : {std::pair<int, int>{8, 0}, {0, 8}, {-12, 4}, {20, -6}}) {
+        const auto a = Textured(w, h, 0, 0), b = Textured(w, h, d.first, d.second);
+        fg::GenInputs in;
+        in.prev = {a.data(), w, h};
+        in.cur = {b.data(), w, h};
+        char what[128];
+        std::snprintf(what, sizeof what, "GPU warp = CPU warp for a (%d,%d) pan", d.first, d.second);
+        same(in, what);
+        std::vector<uint8_t> vec(a.size());
+        for (size_t i = 0; i < vec.size(); i += 4) {
+            vec[i] = 255;
+            vec[i + 1] = uint8_t(127 + int(std::lround(d.second / 0.529)));
+            vec[i + 2] = uint8_t(127 + int(std::lround(d.first / 0.941)));
+            vec[i + 3] = 255;
+        }
+        in.motionVectors = vec.data();
+        std::snprintf(what, sizeof what, "GPU warp = CPU warp for a (%d,%d) pan with the game's vectors", d.first, d.second);
+        same(in, what);
+    }
+    {
+        const auto a = Textured(w, h, 0, 0), b = Textured(w, h, 40, 0);
+        std::vector<uint8_t> vec(a.size(), 0);
+        for (size_t i = 0; i < vec.size(); i += 4) vec[i] = 255, vec[i + 1] = 255, vec[i + 2] = 0;
+        fg::GenInputs in;
+        in.prev = {a.data(), w, h};
+        in.cur = {b.data(), w, h};
+        in.motionVectors = vec.data();
+        std::vector<uint8_t> out;
+        Check(!gpu->Generate(in, out), "the GPU warp declines when every covered vector is saturated");
+    }
+    {
+        const auto a = Textured(w, h, 0, 0), b = Textured(w, h, 8, 0);
+        auto fin = b;
+        for (uint32_t y = 10; y < 30; ++y)
+            for (uint32_t x = 10; x < 120; ++x) {
+                uint8_t* p = &fin[(size_t(y) * w + x) * 4];
+                p[0] = 250, p[1] = 250, p[2] = 250;
+            }
+        fg::GenInputs in;
+        in.prev = {a.data(), w, h};
+        in.cur = {fin.data(), w, h};
+        in.hudlessPrev = a.data();
+        in.hudless = b.data();
+        same(in, "GPU warp = CPU warp with the HUD-less images and a screen HUD");
+    }
+    // A camera cut by the camera's jump (perf/fg_inputs.md: 5,753 at a cut, at most ~250 in play).
+    fg::DecideIn d;
+    d.havePrev = d.sameSize = true;
+    d.periodNs = d.sinceLastSlotNs = 33'333'333;
+    d.simSteps = 1;
+    d.camJumpThreshold = 1000;
+    d.camJump = 250;
+    Check(fg::Decide(d) == fg::Drop::None, "a 250-unit camera move is not a cut");
+    d.camJump = 5753;
+    Check(fg::Decide(d) == fg::Drop::Cut, "a 5,753-unit camera jump is a cut");
+    d.camJumpThreshold = 0;
+    Check(fg::Decide(d) == fg::Drop::None, "the camera-jump rule can be turned off");
+}
+
 int main() {
     TestBlend();
     TestGenerators();
@@ -396,6 +467,7 @@ int main() {
     TestQueue();
     TestWorker();
     TestWarp();
+    TestWarpGpu();
     std::printf("framegentest: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

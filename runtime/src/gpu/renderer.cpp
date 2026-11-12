@@ -2,6 +2,7 @@
 // (GPL-2.0-or-later).
 #include "gpu/renderer.h"
 #include "gpu/frame_split.h"
+#include "gpu/fg_live.h"
 
 #include <algorithm>
 #include <array>
@@ -94,6 +95,13 @@ uint32_t SdkVersion() {
 }
 
 }  // namespace
+
+namespace internal {  // gpu/fg_live.cpp
+Vulkan::Instance* GetInstance() { return g_instance; }
+Vulkan::Scheduler* GetScheduler() { return g_scheduler; }
+Vulkan::Rasterizer* GetRasterizer() { return g_rasterizer; }
+AmdGpu::Liverpool* GetLiverpool() { return g_liverpool; }
+}  // namespace internal
 
 bool Init() {
     if (g_instance) return true;
@@ -232,6 +240,7 @@ bool ReadbackDisplayBuffer(const DisplayBufferDesc& d, std::vector<uint8_t>& out
         .imageExtent = {width, height, 1},
     };
     cmd.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal, g_staging.buffer, region);
+    fglive::OnReadbackCopy(static_cast<VkCommandBuffer>(cmd), &image);  // frame generation's copy (when on)
     split::Mark(split::FinishBegin);
     g_scheduler->Finish();  // wait for the GPU; fine for a first version
     split::Mark(split::FinishEnd);
