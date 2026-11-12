@@ -19,6 +19,7 @@
 #include "core/tls.h"
 #include "hle/kernel_errors.h"
 #include "hle/register.h"
+#include "gpu/gfx_wait_trace.h"
 
 namespace hle::kernel {
 namespace {
@@ -601,9 +602,13 @@ int PS4_SYSV_ABI scePthreadCondBroadcast(void** cond) {
     return SCE_OK;
 }
 
-int PS4_SYSV_ABI scePthreadCondWait(void** cond, void** mutex) { return CondWait(cond, mutex, INFINITE); }
+int PS4_SYSV_ABI scePthreadCondWait(void** cond, void** mutex) {
+    LBP3_GFXWAIT_SCOPE(-1);
+    return CondWait(cond, mutex, INFINITE);
+}
 
 int PS4_SYSV_ABI scePthreadCondTimedwait(void** cond, void** mutex, uint32_t usec) {
+    LBP3_GFXWAIT_SCOPE(usec);
     return CondWait(cond, mutex, UsecToMs(usec));
 }
 

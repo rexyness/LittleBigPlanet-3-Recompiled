@@ -16,6 +16,7 @@
 #include <timeapi.h>
 
 #include "core/runner.h"
+#include "gpu/gfx_wait_trace.h"
 #include "hle/kernel_errors.h"
 #include "hle/register.h"
 
@@ -239,6 +240,7 @@ int PS4_SYSV_ABI sceKernelGettimezone(Timezone* tz) {
 
 int PS4_SYSV_ABI sceKernelUsleep(uint32_t usec) {
     NOTE_TIME_CALL();
+    LBP3_GFXWAIT_SCOPE(usec);
     SleepUs(usec);
     return SCE_OK;
 }
@@ -251,6 +253,7 @@ int PS4_SYSV_ABI sceKernelSleep(uint32_t sec) {
 int PS4_SYSV_ABI nanosleep(const Timespec* req, Timespec* rem) {
     NOTE_TIME_CALL();
     if (!req || req->nsec < 0 || req->nsec >= 1'000'000'000) return PosixResult(SceErr(kEINVAL));
+    LBP3_GFXWAIT_SCOPE(req->sec * 1'000'000 + req->nsec / 1000);
     SleepUs(static_cast<uint64_t>(req->sec) * 1'000'000 + static_cast<uint64_t>(req->nsec) / 1000);
     if (rem) *rem = {};
     return 0;

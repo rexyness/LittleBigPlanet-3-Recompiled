@@ -2,6 +2,7 @@
 // (GPL-2.0-or-later).
 #include "gpu/renderer.h"
 #include "gpu/frame_split.h"
+#include "gpu/gfx_wait_trace.h"
 
 #include <algorithm>
 #include <array>
@@ -22,6 +23,7 @@
 #include "core/libraries/gnmdriver/gnmdriver_init.h"
 #include "core/platform.h"
 #include "sdl_window.h"
+#include "video_core/amdgpu/lbp3_gfx_wait_trace.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -35,6 +37,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <tlhelp32.h>
 
 namespace Vulkan {  // vk_pipeline_cache.cpp (LBP3 measurement counters)
 extern std::atomic<u32> g_lbp3ShaderCompiles, g_lbp3PipelineCompiles, g_lbp3DroppedDraws;
@@ -44,6 +47,8 @@ extern std::atomic<u64> g_lbp3ShaderCompileUs, g_lbp3PipelineCompileUs;
 namespace core {
 void* ProcParam();  // runtime/src/core/runner.h (not included: shadPS4 has its own core/ headers)
 uint8_t* EbootBase();
+std::string DescribeAddress(uint64_t addr);
+std::string ThreadName(unsigned long tid);
 }
 
 namespace VideoCore {
@@ -730,5 +735,119 @@ int SubmitGfx(const uint32_t* dcb, uint32_t dcbBytes, const uint32_t* ccb, uint3
     CountRelease(2, result);
     return result;
 }
+
+// LBP3_GFX_WAIT_TRACE (gpu/gfx_wait_trace.h): the guest threads' sleeps and blocking waits.
+namespace gfxwait {
+
+bool On() {
+    return AmdGpu::Lbp3Trace::On();
+}
+
+namespace {
+
+// LBP3_GFX_WAIT_SAMPLE=1 (with LBP3_GFX_WAIT_TRACE=1): while the graphics queue is blocked on a
+// wait, sample where the job threads are (Spu *, JobManagerWorker*, Orbis::Gfx::Callback,
+// ComputeSubmit, main) every ~500 us: suspend, read RIP, resume. RS rows: t flip tid rip-desc.
+// Diagnostic only: each sample stops the thread for some microseconds, so don't time with it.
+void SamplerMain() {
+    using namespace AmdGpu::Lbp3Trace;
+    struct Target {
+        DWORD tid;
+        HANDLE h;
+    };
+    std::vector<Target> targets;
+    std::map<uint64_t, std::string> desc;
+    int64_t last_scan = 0;
+    auto wanted = [](const std::string& n) {
+        return n.rfind("Spu ", 0) == 0 || n.rfind("JobManagerWorker", 0) == 0 ||
+               n == "Orbis::Gfx::Callback" || n == "ComputeSubmit" || n == "main";
+    };
+    for (;;) {
+        const bool blocked = slots[0].addr.load(std::memory_order_acquire) != 0;
+        const int64_t now = NowNs();
+        if (!blocked) {
+            if (now - last_scan > 2'000'000'000LL) {
+                last_scan = now;
+                for (auto& t : targets) CloseHandle(t.h);
+                targets.clear();
+                if (HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0); snap != INVALID_HANDLE_VALUE) {
+                    THREADENTRY32 te{sizeof(te)};
+                    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+                        if (te.th32OwnerProcessID != GetCurrentProcessId()) continue;
+                        if (!wanted(core::ThreadName(te.th32ThreadID))) continue;
+                        if (HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE,
+                                                  te.th32ThreadID)) {
+                            targets.push_back({te.th32ThreadID, h});
+                        }
+                    }
+                    CloseHandle(snap);
+                }
+            }
+            Sleep(1);
+            continue;
+        }
+        std::array<uint64_t, 32> rips{};
+        const size_t n = std::min(targets.size(), rips.size());
+        for (size_t i = 0; i < n; ++i) {
+            if (SuspendThread(targets[i].h) == static_cast<DWORD>(-1)) continue;
+            CONTEXT c{};
+            c.ContextFlags = CONTEXT_CONTROL;
+            if (GetThreadContext(targets[i].h, &c)) rips[i] = c.Rip;
+            ResumeThread(targets[i].h);
+        }
+        const int64_t t = NowNs();
+        for (size_t i = 0; i < n; ++i) {
+            if (!rips[i]) continue;
+            auto it = desc.find(rips[i]);
+            if (it == desc.end()) {
+                std::string d = core::DescribeAddress(rips[i]);
+                std::replace(d.begin(), d.end(), ',', ';');
+                it = desc.emplace(rips[i], std::move(d)).first;
+            }
+            Row("RS,%lld,%u,%u,%s\n", Us(t), flips.load(), static_cast<u32>(targets[i].tid),
+                it->second.c_str());
+        }
+        const int64_t until = t + 500'000;
+        while (NowNs() < until && slots[0].addr.load(std::memory_order_acquire)) _mm_pause();
+    }
+}
+
+}  // namespace
+
+void GuestWait(const char* fn, int64_t begin_ns, int64_t end_ns, int64_t req_us, void* caller) {
+    using namespace AmdGpu::Lbp3Trace;
+    static std::once_flag sampler;
+    std::call_once(sampler, [] {
+        const char* v = std::getenv("LBP3_GFX_WAIT_SAMPLE");
+        if (v && std::string_view{v} != "0") std::thread{SamplerMain}.detach();
+    });
+    if (end_ns - begin_ns < 20000) return;
+    const u32 tid = ThreadId();
+    thread_local bool named = false;
+    if (!named) {
+        named = true;
+        std::string name = core::ThreadName(tid);
+        std::replace(name.begin(), name.end(), ',', ';');
+        Row("TN,%u,%s\n", tid, name.c_str());
+    }
+    static std::mutex names_mutex;
+    static std::map<uint64_t, std::string> names;
+    std::string where;
+    {
+        std::scoped_lock lk{names_mutex};
+        const uint64_t at = reinterpret_cast<uint64_t>(caller);
+        auto it = names.find(at);
+        if (it == names.end()) {
+            std::string d = core::DescribeAddress(at);
+            std::replace(d.begin(), d.end(), ',', ';');
+            it = names.emplace(at, std::move(d)).first;
+        }
+        where = it->second;
+    }
+    Row("BW,%lld,%u,%u,%s,%.1f,%lld,%s\n", Us(end_ns), flips.load(), tid, fn, DUs(end_ns - begin_ns),
+        static_cast<long long>(req_us), where.c_str());
+}
+
+}  // namespace gfxwait
 
 }  // namespace gpu

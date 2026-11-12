@@ -12,6 +12,7 @@
 #include "core/address_space.h"
 #include "core/debug_state.h"
 #include "core/memory.h"
+#include "video_core/amdgpu/lbp3_gfx_wait_trace.h"
 
 // --- memory ---------------------------------------------------------------------
 // Game memory is plain host memory here (see hle/kernel_memory.cpp), so the
@@ -36,15 +37,23 @@ void AddressSpace::Protect(VAddr addr, u64 size, MemoryPermission perms) {
     else if (w) prot = PAGE_READWRITE;
     else if (r) prot = PAGE_READONLY;
     // The range can span several allocations; VirtualProtect can't, so go region by region.
+    // LBP3_GFX_WAIT_TRACE: time the two system calls (measurement only).
+    namespace T = AmdGpu::Lbp3Trace;
+    const bool lbp3_trace = T::On();
+    const bool lbp3_cp = lbp3_trace && T::ThreadId() == T::cp_tid.load();
     const VAddr end = addr + size;
     while (addr < end) {
         MEMORY_BASIC_INFORMATION mbi;
+        const s64 q0 = lbp3_trace ? T::NowNs() : 0;
         if (!::VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof(mbi))) break;
+        if (lbp3_trace) (lbp3_cp ? T::vq_cp_ns : T::vq_ns) += static_cast<u64>(T::NowNs() - q0);
         const VAddr regionEnd = reinterpret_cast<VAddr>(mbi.BaseAddress) + mbi.RegionSize;
         const VAddr chunkEnd = regionEnd < end ? regionEnd : end;
         if (mbi.State == MEM_COMMIT) {
             DWORD old;
+            const s64 p0 = lbp3_trace ? T::NowNs() : 0;
             ::VirtualProtect(reinterpret_cast<void*>(addr), chunkEnd - addr, prot, &old);
+            if (lbp3_trace) (lbp3_cp ? T::vp_cp_ns : T::vp_ns) += static_cast<u64>(T::NowNs() - p0);
         }
         addr = chunkEnd;
     }

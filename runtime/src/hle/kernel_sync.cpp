@@ -18,6 +18,7 @@
 
 #include "hle/kernel_errors.h"
 #include "hle/register.h"
+#include "gpu/gfx_wait_trace.h"
 
 namespace hle::kernel {
 namespace {
@@ -191,7 +192,10 @@ int PS4_SYSV_ABI sceKernelDeleteSema(Sema* sem) {
     return SCE_OK;
 }
 
-int PS4_SYSV_ABI sceKernelWaitSema(Sema* sem, int need, uint32_t* timeout) { return SemaWait(sem, need, timeout); }
+int PS4_SYSV_ABI sceKernelWaitSema(Sema* sem, int need, uint32_t* timeout) {
+    LBP3_GFXWAIT_SCOPE(timeout ? static_cast<int64_t>(*timeout) : -1);
+    return SemaWait(sem, need, timeout);
+}
 
 int PS4_SYSV_ABI sceKernelSignalSema(Sema* sem, int count) { return SemaSignal(sem, count); }
 
@@ -292,6 +296,7 @@ int PS4_SYSV_ABI sceKernelClearEventFlag(EventFlag* ef, uint64_t bits) {
 
 int PS4_SYSV_ABI sceKernelWaitEventFlag(EventFlag* ef, uint64_t pattern, uint32_t mode, uint64_t* result,
                                         uint32_t* timeout) {
+    LBP3_GFXWAIT_SCOPE(timeout ? static_cast<int64_t>(*timeout) : -1);
     if (!ef || !pattern) return SceErr(kEINVAL);
     {
         static const bool trace = std::getenv("LBP3_TRACE_EF") != nullptr;
@@ -337,6 +342,7 @@ int PS4_SYSV_ABI sceKernelDeleteEqueue(Equeue* eq) {
 }
 
 int PS4_SYSV_ABI sceKernelWaitEqueue(Equeue* eq, Event* events, int num, int* out, uint32_t* timeout) {
+    LBP3_GFXWAIT_SCOPE(timeout ? static_cast<int64_t>(*timeout) : -1);
     if (!eq || !events || num < 1) return SceErr(kEINVAL);
     std::unique_lock lk(eq->m);
     bool ok = WaitWithTimeout(eq->cv, lk, timeout, [&] { return !eq->pending.empty(); });
