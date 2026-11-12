@@ -318,6 +318,9 @@ uint64_t g_bufferLabels[16];
 // The game leaves a 64-dword "prepare flip" NOP at the end of the last command
 // buffer of a flipped frame; the Gnm driver rewrites it into a label write
 // and/or an end-of-pipe event. Ported from shadPS4's PatchFlipRequest.
+// The kPatchedFlip NOP always lands 59 dwords before the buffer's end, and the command
+// processor flips only on a marker at exactly that position of a top-level buffer
+// (shadPS4 liverpool.cpp, PatchedFlip case; perf/early_flip.md): keep the two in step.
 bool PatchFlipRequest(uint32_t* cmd, uint32_t sizeDw, uint32_t bufferIndex) {
     constexpr uint32_t kPrepareFlipHeader = 0xC03E1000;  // type-3 NOP, 63 body dwords
     enum Payload : uint32_t {
@@ -375,6 +378,39 @@ bool PatchFlipRequest(uint32_t* cmd, uint32_t sizeDw, uint32_t bufferIndex) {
         e[5] = 0;
     }
     return true;
+}
+
+// LBP3_FLIP_TRACE=1 (perf/early_flip.md's proof run): one line per flip submit with each
+// command buffer's game address and size and where PatchFlipRequest put the flip marker (the
+// NOP 59 dwords before the last buffer's end). The command processor parses snapshot copies,
+// so its "[gnm] ignored a stale flip marker" line gives only a dword offset and a buffer size;
+// this line maps that back to game memory and to the frame that left the marker. Off normally.
+void TraceFlipSubmit(uint32_t count, void* const* dcbs, const uint32_t* dcbSizes, uint64_t splitFrame) {
+    static const bool on = [] {
+        const char* v = std::getenv("LBP3_FLIP_TRACE");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    if (!on || count == 0) return;
+    static uint64_t submits = 0;
+    ++submits;
+    std::string line;
+    char part[96];
+    std::snprintf(part, sizeof(part), "[flip] submit %llu (split frame %llu): %u buffer(s):",
+                  static_cast<unsigned long long>(submits), static_cast<unsigned long long>(splitFrame), count);
+    line = part;
+    for (uint32_t i = 0; i < count; ++i) {
+        std::snprintf(part, sizeof(part), " %u@0x%llx/%u", i,
+                      static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(dcbs[i])), dcbSizes[i] / 4);
+        line += part;
+    }
+    const uint32_t lastDw = dcbSizes[count - 1] / 4;
+    if (lastDw >= 64) {
+        const uint64_t nop = reinterpret_cast<uintptr_t>(dcbs[count - 1]) + uint64_t(lastDw - 59) * 4;
+        std::snprintf(part, sizeof(part), "; patched NOP at 0x%llx (dword %u of buffer %u)",
+                      static_cast<unsigned long long>(nop), lastDw - 59, count - 1);
+        line += part;
+    }
+    std::fprintf(stderr, "%s\n", line.c_str());
 }
 
 // Runs the memory-writing packets of each buffer, then raises the GPU
@@ -510,6 +546,7 @@ int PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void* const* 
                 std::lock_guard pl(videoout::g_pendingMutex);
                 videoout::g_pendingFlips.push_back({static_cast<int>(displayBufferIndex), flipArg, splitFrame});
             }
+            TraceFlipSubmit(count, dcbs, dcbSizes, splitFrame);
             const int submitResult = Process(count, dcbs, dcbSizes, ccbs, ccbSizes);
             gpu::split::SetResults(idleResult, submitResult);
             gpu::split::Mark(gpu::split::Released);
