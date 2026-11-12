@@ -37,11 +37,17 @@ struct WarpParams {
     bool perPixelAlt = true;    // per-pixel choice among the neighbouring blocks' vectors
     bool staticCopy = true;
     int fallback = 1;           // 0 = average anyway, 1 = the frame nearer t, 2 = always N
-    // The game's velocity target (RGBA8): decoded motion (to the previous frame, in pixels) =
-    // ((G or B) - bias) * scale * sign, used as candidates when useGameVectors.
-    bool useGameVectors = false;
-    float vecBias = 127.0f, vecScaleX = 0.0f, vecScaleY = 0.0f;  // scale 0 = unknown: not used
-    int vecChanX = 1, vecChanY = 2;
+    // The game's velocity target (RGBA8, perf/fg_inputs.md): the pixel at p in N was at p - m in
+    // N-1, m.x = (B - 127) * 0.941, m.y = (G - 127) * 0.529 px; R = 255 where it has a vector.
+    // Codes 0 and 255 are saturated (unknown). Used as search candidates.
+    bool useGameVectors = true;
+    float vecBias = 127.0f, vecScaleX = 0.941f, vecScaleY = 0.529f;
+    int vecChanX = 2, vecChanY = 1, vecChanCover = 0;
+    float maxSaturated = 0.97f;  // decline when nearly all covered vectors are saturated (a cut: 100%)
+    // HUD-less colour: interpolate it, then put back the real frame's HUD (where N differs from its
+    // HUD-less image by more than hudT).
+    bool useHudless = true;
+    int hudT = 8;
 };
 
 // LBP3_FRAMEGEN_WARP_* overrides of the defaults (threads, radius, thresholds, fallback, vectors).
@@ -56,7 +62,9 @@ struct WarpDebug {
     std::vector<float> hx, hy;  // half-step displacement per block (full-res pixels)
     std::vector<uint32_t> cost;
     double msLuma = 0, msSearch = 0, msCompose = 0;
-    uint64_t pixAveraged = 0, pixAlt = 0, pixFallback = 0, pixStatic = 0;
+    uint64_t pixAveraged = 0, pixAlt = 0, pixFallback = 0, pixStatic = 0, pixHud = 0;
+    double vecCovered = 0, vecSaturated = 0;  // shares of the frame
+    bool usedVectors = false, usedHudless = false, declined = false;
 };
 const WarpDebug* LastWarpDebug(const Generator* g);  // nullptr when g isn't a warp generator
 

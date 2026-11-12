@@ -147,6 +147,7 @@ struct Plane {
 
 constexpr int kLevels = 3;   // 1/2, 1/4, 1/8 of the frame
 constexpr int kBlock = 8;    // block size at every level
+constexpr int16_t kNoVec = INT16_MIN;  // no game vector for this block
 constexpr int kPad = 96;     // >= kBlock + the largest offset searched at any level
 
 struct Vec {
@@ -185,24 +186,47 @@ inline uint32_t Sad8At(const Plane& a, int ax, int ay, const Plane& b, int bx, i
     return uint32_t(_mm_cvtsi128_si32(acc) + _mm_cvtsi128_si32(_mm_srli_si128(acc, 8)));
 }
 
+inline int RoundI(float v) { return int(v + (v >= 0.0f ? 0.5f : -0.5f)); }
+
 class WarpGenerator final : public Generator {
 public:
     explicit WarpGenerator(const WarpParams& p) : p_(p), pool_(std::max(1, p.threads)) {}
     const char* Name() const override { return "warp"; }
     const WarpDebug& Debug() const { return dbg_; }
 
-    bool Generate(const GenInputs& in, std::vector<uint8_t>& out) override {
-        const uint32_t W = in.cur.width, H = in.cur.height;
-        if (!in.prev.pixels || !in.cur.pixels || in.prev.width != W || in.prev.height != H || W < 64 || H < 64)
+    bool Generate(const GenInputs& in0, std::vector<uint8_t>& out) override {
+        const uint32_t W = in0.cur.width, H = in0.cur.height;
+        if (!in0.prev.pixels || !in0.cur.pixels || in0.prev.width != W || in0.prev.height != H || W < 64 || H < 64)
             return false;
+        dbg_.usedHudless = dbg_.declined = false;
+        dbg_.pixHud = 0;
+        // With both HUD-less images, interpolate those; the screen HUD comes back from N below.
+        GenInputs in = in0;
+        if (p_.useHudless && in0.hudless && in0.hudlessPrev && HudShare(in0) < 0.4) {
+            in.prev.pixels = static_cast<const uint8_t*>(in0.hudlessPrev);
+            in.cur.pixels = static_cast<const uint8_t*>(in0.hudless);
+            dbg_.usedHudless = true;
+        }
         out.resize(size_t(W) * H * 4);
         const double t0 = NowMs();
-        BuildPyramid(in.prev, prevPyr_);
+        // In play, this call's N-1 is the last call's N: reuse its pyramid.
+        const uint64_t sigPrev = Signature(in.prev), sigCur = Signature(in.cur);
+        if (havePyr_ && sigPrev == lastCurSig_) {
+            for (int l = 0; l < kLevels; ++l) std::swap(prevPyr_[l], curPyr_[l]);
+        } else {
+            BuildPyramid(in.prev, prevPyr_);
+        }
         BuildPyramid(in.cur, curPyr_);
+        lastCurSig_ = sigCur;
+        havePyr_ = true;
         const double t1 = NowMs();
-        Search(in);
+        if (!Search(in)) {
+            dbg_.declined = true;
+            return false;
+        }
         const double t2 = NowMs();
         Compose(in, out.data());
+        if (dbg_.usedHudless) PutBackHud(in0, out.data());
         const double t3 = NowMs();
         dbg_.msLuma = t1 - t0;
         dbg_.msSearch = t2 - t1;
@@ -221,6 +245,65 @@ public:
     }
 
 private:
+    // A cheap content signature: 1024 pixels on a grid, with the size.
+    static uint64_t Signature(const HostFrame& f) {
+        uint64_t h = 1469598103934665603ull ^ (uint64_t(f.width) << 32 | f.height);
+        for (int j = 0; j < 32; ++j)
+            for (int i = 0; i < 32; ++i) {
+                const size_t x = (size_t(f.width) * (2 * i + 1)) / 64, y = (size_t(f.height) * (2 * j + 1)) / 64;
+                uint32_t px;
+                std::memcpy(&px, f.pixels + (y * f.width + x) * 4, 4);
+                h = (h ^ px) * 1099511628211ull;
+            }
+        return h;
+    }
+
+    // The share of a sparse grid where N differs from its HUD-less image.
+    double HudShare(const GenInputs& in) const {
+        const uint8_t* fin = in.cur.pixels;
+        const uint8_t* hl = static_cast<const uint8_t*>(in.hudless);
+        int n = 0, hit = 0;
+        for (uint32_t y = 4; y < in.cur.height; y += 16)
+            for (uint32_t x = 4; x < in.cur.width; x += 16, ++n) {
+                const size_t i = (size_t(y) * in.cur.width + x) * 4;
+                const int d = std::max(std::abs(fin[i] - hl[i]),
+                                       std::max(std::abs(fin[i + 1] - hl[i + 1]), std::abs(fin[i + 2] - hl[i + 2])));
+                hit += d > p_.hudT;
+            }
+        return n ? double(hit) / n : 0.0;
+    }
+
+    // The screen HUD (banners, subtitles, bars; drawn after the composite) from the real frame N,
+    // where N differs from its HUD-less image by more than hudT; elsewhere that small difference
+    // is added to the interpolated HUD-less image.
+    void PutBackHud(const GenInputs& in, uint8_t* out) {
+        const int W = int(in.cur.width), H = int(in.cur.height);
+        const uint8_t* fin = in.cur.pixels;
+        const uint8_t* hl = static_cast<const uint8_t*>(in.hudless);
+        std::atomic<uint64_t> n{0};
+        pool_.Run(32, [&](int band) {
+            uint64_t c = 0;
+            const int y0 = H * band / 32, y1 = H * (band + 1) / 32;
+            for (int y = y0; y < y1; ++y)
+                for (int x = 0; x < W; ++x) {
+                    const size_t i = (size_t(y) * W + x) * 4;
+                    const int d = std::max(std::abs(fin[i] - hl[i]),
+                                           std::max(std::abs(fin[i + 1] - hl[i + 1]), std::abs(fin[i + 2] - hl[i + 2])));
+                    if (d > p_.hudT) {
+                        std::memcpy(out + i, fin + i, 4);
+                        ++c;
+                    } else {
+                        // Elsewhere N differs from its HUD-less image only by the display pass's
+                        // small change: carry it over, so unchanged areas come out exactly as N.
+                        for (int k = 0; k < 3; ++k)
+                            out[i + k] = uint8_t(std::clamp(int(out[i + k]) + int(fin[i + k]) - int(hl[i + k]), 0, 255));
+                    }
+                }
+            n += c;
+        });
+        dbg_.pixHud = n;
+    }
+
     // Level 0 = half resolution luma, (R + 2G + B) / 4 over each 2x2.
     void BuildPyramid(const HostFrame& f, Plane (&pyr)[kLevels]) {
         const int w0 = int(f.width / 2), h0 = int(f.height / 2);
@@ -246,13 +329,15 @@ private:
             const Plane& s = pyr[l - 1];
             Plane& d = pyr[l];
             d.Alloc(s.w / 2, s.h / 2, kPad);
-            for (int y = 0; y < d.h; ++y) {
-                const uint8_t* r0 = s.Row(2 * y);
-                const uint8_t* r1 = s.Row(2 * y + 1);
-                uint8_t* o = d.Row(y);
-                for (int x = 0; x < d.w; ++x)
-                    o[x] = uint8_t((r0[2 * x] + r0[2 * x + 1] + r1[2 * x] + r1[2 * x + 1] + 2) >> 2);
-            }
+            pool_.Run(16, [&](int band) {
+                for (int y = d.h * band / 16; y < d.h * (band + 1) / 16; ++y) {
+                    const uint8_t* r0 = s.Row(2 * y);
+                    const uint8_t* r1 = s.Row(2 * y + 1);
+                    uint8_t* o = d.Row(y);
+                    for (int x = 0; x < d.w; ++x)
+                        o[x] = uint8_t((r0[2 * x] + r0[2 * x + 1] + r1[2 * x] + r1[2 * x + 1] + 2) >> 2);
+                }
+            });
             d.PadEdges();
         }
     }
@@ -344,7 +429,7 @@ private:
                             const uint32_t c = CostOne(anchor[l], other[l], sign, bx, by, m, nullptr);
                             if (c < bestC) bestC = c, best = m;
                         }
-                    if (!gameL2_.empty()) {
+                    if (!gameL2_.empty() && gameL2_[size_t(by) * fl.bw + bx].x != kNoVec) {
                         const Vec g = Clamp(gameL2_[size_t(by) * fl.bw + bx]);
                         const uint32_t c = CostOne(anchor[l], other[l], sign, bx, by, g, nullptr);
                         if (c < bestC) bestC = c, best = g;
@@ -373,7 +458,8 @@ private:
                         cands[n++] = Clamp(Vec{int16_t(pv.x * 2), int16_t(pv.y * 2)});
                     }
                     cands[n++] = Vec{};
-                    if (l == 0 && !gameL0_.empty()) cands[n++] = Clamp(gameL0_[size_t(by) * fl.bw + bx]);
+                    if (l == 0 && !gameL0_.empty() && gameL0_[size_t(by) * fl.bw + bx].x != kNoVec)
+                        cands[n++] = Clamp(gameL0_[size_t(by) * fl.bw + bx]);
                     Vec best{};
                     uint32_t bestC = UINT32_MAX;
                     for (int i = 0; i < n; ++i) {
@@ -425,6 +511,8 @@ private:
                     add(fw.v[size_t(qy) * fw.bw + qx]);
                 }
                 add(Vec{});
+                if (!gameL0_.empty() && gameL0_[size_t(by) * mid_.bw + bx].x != kNoVec)
+                    add(gameL0_[size_t(by) * mid_.bw + bx]);
                 Vec best{};
                 uint32_t bestC = UINT32_MAX;
                 for (int i = 0; i < n; ++i) {
@@ -438,40 +526,66 @@ private:
         SmoothField(mid_, [&](int bx, int by, Vec m, const Vec* med) { return CostMid(bx, by, m, med); });
     }
 
-    void Search(const GenInputs& in) {
-        GameCandidates(in);
+    bool Search(const GenInputs& in) {
+        if (!GameCandidates(in)) return false;
         OneSided(curPyr_, prevPyr_, -1, back_);
         OneSided(prevPyr_, curPyr_, +1, fwd_);
         MidField();
+        return true;
     }
 
-    // The game's motion vectors (total motion N-1 -> N in level pixels) as candidates, when
-    // enabled and their decoding is configured.
-    void GameCandidates(const GenInputs& in) {
+    // The game's motion vectors (total motion N-1 -> N in level pixels) as candidates: per block,
+    // the median of its valid vectors (covered and not saturated). Returns false (decline the
+    // frame) when most of the covered vectors are saturated: a camera swoop or a cut.
+    bool GameCandidates(const GenInputs& in) {
         gameL0_.clear();
         gameL2_.clear();
-        if (!p_.useGameVectors || !in.motionVectors || p_.vecScaleX == 0.0f || p_.vecScaleY == 0.0f) return;
+        dbg_.usedVectors = false;
+        dbg_.vecCovered = dbg_.vecSaturated = 0;
+        if (!p_.useGameVectors || !in.motionVectors) return true;
         const uint8_t* mv = static_cast<const uint8_t*>(in.motionVectors);
-        const uint32_t W = in.cur.width, H = in.cur.height;
-        auto motion = [&](int x, int y, float& mx, float& my) {
-            x = std::clamp<int>(x, 0, int(W) - 1);
-            y = std::clamp<int>(y, 0, int(H) - 1);
-            const uint8_t* q = mv + (size_t(y) * W + x) * 4;
-            mx = (float(q[p_.vecChanX]) - p_.vecBias) * p_.vecScaleX;
-            my = (float(q[p_.vecChanY]) - p_.vecBias) * p_.vecScaleY;
-        };
+        const int W = int(in.cur.width), H = int(in.cur.height);
+        const float sx = p_.vecScaleX * in.motionScale, sy = p_.vecScaleY * in.motionScale;
+        uint64_t covered = 0, saturated = 0, total = 0;
         for (int l : {0, kLevels - 1}) {
             const int bw = (prevPyr_[l].w + kBlock - 1) / kBlock, bh = (prevPyr_[l].h + kBlock - 1) / kBlock;
             auto& dst = l == 0 ? gameL0_ : gameL2_;
-            dst.resize(size_t(bw) * bh);
-            const int scale = 2 << l;  // full-res pixels per level pixel
+            dst.assign(size_t(bw) * bh, Vec{kNoVec, kNoVec});
+            const int scale = 2 << l;               // full-res pixels per level pixel
+            const int span = kBlock * scale;        // full-res pixels per block
+            const int step = std::max(2, span / 4); // a 4x4 sample grid per block
+            const float sxl = sx / float(scale), syl = sy / float(scale);
             for (int by = 0; by < bh; ++by)
                 for (int bx = 0; bx < bw; ++bx) {
-                    float mx, my;
-                    motion((bx * kBlock + kBlock / 2) * scale, (by * kBlock + kBlock / 2) * scale, mx, my);
-                    dst[size_t(by) * bw + bx] = Vec{int16_t(std::lround(mx / scale)), int16_t(std::lround(my / scale))};
+                    int xs[64], ys[64], n = 0;
+                    for (int y = by * span + step / 2; y < (by + 1) * span && y < H; y += step)
+                        for (int x = bx * span + step / 2; x < (bx + 1) * span && x < W; x += step) {
+                            const uint8_t* q = mv + (size_t(y) * W + x) * 4;
+                            if (l == 0) ++total;
+                            if (q[p_.vecChanCover] != 255) continue;
+                            if (l == 0) ++covered;
+                            const uint8_t cx = q[p_.vecChanX], cy = q[p_.vecChanY];
+                            if (cx == 0 || cx == 255 || cy == 0 || cy == 255) {
+                                if (l == 0) ++saturated;
+                                continue;
+                            }
+                            if (n < 64) {
+                                xs[n] = RoundI((float(cx) - p_.vecBias) * sxl);
+                                ys[n] = RoundI((float(cy) - p_.vecBias) * syl);
+                                ++n;
+                            }
+                        }
+                    if (n < 4) continue;
+                    std::nth_element(xs, xs + n / 2, xs + n);
+                    std::nth_element(ys, ys + n / 2, ys + n);
+                    dst[size_t(by) * bw + bx] = Vec{int16_t(xs[n / 2]), int16_t(ys[n / 2])};
                 }
         }
+        dbg_.vecCovered = total ? double(covered) / double(total) : 0;
+        dbg_.vecSaturated = total ? double(saturated) / double(total) : 0;
+        dbg_.usedVectors = true;
+        if (covered && double(saturated) > p_.maxSaturated * double(covered)) return false;
+        return true;
     }
 
     // Bilinear sample of a BGRA frame at (x, y) in 1/256 pixel units, clamped to the frame:
@@ -485,8 +599,13 @@ private:
         if (ix >= W - 1) ix = W - 2, fx = 256;
         if (iy >= H - 1) iy = H - 2, fy = 256;
         const uint8_t* p0 = f.pixels + (size_t(iy) * W + ix) * 4;
-        const uint8_t* p1 = p0 + size_t(W) * 4;
         const __m128i z = _mm_setzero_si128();
+        if (fx == 0 && fy == 0) {  // on a pixel: the field is integral away from block edges
+            int px;
+            std::memcpy(&px, p0, 4);
+            return _mm_unpacklo_epi16(_mm_unpacklo_epi8(_mm_cvtsi32_si128(px), z), z);
+        }
+        const uint8_t* p1 = p0 + size_t(W) * 4;
         // [p00 c0..3, p01 c0..3] and the row below, as 16-bit.
         const __m128i r0 = _mm_unpacklo_epi8(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(p0)), z);
         const __m128i r1 = _mm_unpacklo_epi8(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(p1)), z);
@@ -542,6 +661,25 @@ private:
             colI_[x] = i0;
             colW_[x] = w;
         }
+        // Per block, the distinct vectors of its 3x3 neighbourhood (the per-pixel alternatives).
+        altN_.assign(f.v.size(), 0);
+        alt_.resize(f.v.size() * 9);
+        for (int bj = 0; bj < f.bh; ++bj)
+            for (int bi = 0; bi < f.bw; ++bi) {
+                const size_t b = size_t(bj) * f.bw + bi;
+                Vec* list = &alt_[b * 9];
+                int n = 0;
+                for (int dj = -1; dj <= 1; ++dj)
+                    for (int di = -1; di <= 1; ++di) {
+                        const int qi = bi + di, qj = bj + dj;
+                        if (qi < 0 || qj < 0 || qi >= f.bw || qj >= f.bh) continue;
+                        const Vec v = f.v[size_t(qj) * f.bw + qi];
+                        bool dup = false;
+                        for (int k = 0; k < n; ++k) dup |= list[k] == v;
+                        if (!dup) list[n++] = v;
+                    }
+                altN_[b] = uint8_t(n > 1 ? n : 0);  // one vector only: nothing to try
+            }
         // Prev samples at p - h * 2t, cur samples at p + h * 2(1 - t); in 1/256.
         const int tP = int(std::lround(in.t * 512.0f)), tC = 512 - tP;
         const int wt = int(std::lround(in.t * 256.0f));
@@ -587,16 +725,15 @@ private:
                     __m128i b = Sample(in.cur, (x << 8) + ((hx * tC) >> 8), (y << 8) + ((hy * tC) >> 8));
                     int d = MaxDiff3(a, b);
                     if (d > p_.agreeT && p_.perPixelAlt) {
-                        // Try the vectors of the 3x3 blocks around this pixel's block.
-                        const int bi = std::min(x / blockFull, f.bw - 1);
+                        // Try the distinct vectors of the 3x3 blocks around this pixel's block.
+                        const size_t blk = size_t(bj) * f.bw + std::min(x / blockFull, f.bw - 1);
+                        const int nAltV = altN_[blk];
+                        const Vec* list = &alt_[blk * 9];
                         int bestD = d;
                         __m128i ba = a, bb = b;
-                        for (int dj = -1; dj <= 1; ++dj)
-                            for (int di = -1; di <= 1; ++di) {
-                                const int qi = bi + di, qj = bj + dj;
-                                if (qi < 0 || qj < 0 || qi >= f.bw || qj >= f.bh) continue;
-                                const size_t q = size_t(qj) * f.bw + qi;
-                                const int vx = fx256_[q], vy = fy256_[q];
+                        for (int k = 0; k < nAltV; ++k) {
+                            {
+                                const int vx = list[k].x * 256, vy = list[k].y * 256;
                                 const __m128i ta =
                                     Sample(in.prev, (x << 8) - ((vx * tP) >> 8), (y << 8) - ((vy * tP) >> 8));
                                 const __m128i tb =
@@ -604,6 +741,7 @@ private:
                                 const int td = MaxDiff3(ta, tb);
                                 if (td < bestD) bestD = td, ba = ta, bb = tb;
                             }
+                        }
                         if (bestD < d) {
                             ++cAlt;
                             d = bestD;
@@ -640,7 +778,11 @@ private:
     Field back_[kLevels], fwd_[kLevels], mid_;
     std::vector<Vec> tmp_, gameL0_, gameL2_;
     std::vector<int> fx256_, fy256_, colI_, colW_;
+    std::vector<uint8_t> altN_;
+    std::vector<Vec> alt_;
     WarpDebug dbg_;
+    uint64_t lastCurSig_ = 0;
+    bool havePyr_ = false;
 };
 
 }  // namespace
@@ -659,12 +801,15 @@ WarpParams WarpParamsFromEnv() {
     p.perPixelAlt = EnvInt("LBP3_FRAMEGEN_WARP_PIXALT", p.perPixelAlt ? 1 : 0) != 0;
     p.staticCopy = EnvInt("LBP3_FRAMEGEN_WARP_STATICCOPY", p.staticCopy ? 1 : 0) != 0;
     p.fallback = EnvInt("LBP3_FRAMEGEN_WARP_FALLBACK", p.fallback);
-    p.useGameVectors = EnvInt("LBP3_FRAMEGEN_WARP_VEC", 0) != 0;
+    p.useGameVectors = EnvInt("LBP3_FRAMEGEN_WARP_VEC", p.useGameVectors ? 1 : 0) != 0;
     p.vecBias = EnvFloat("LBP3_FRAMEGEN_WARP_VEC_BIAS", p.vecBias);
     p.vecScaleX = EnvFloat("LBP3_FRAMEGEN_WARP_VEC_SX", p.vecScaleX);
     p.vecScaleY = EnvFloat("LBP3_FRAMEGEN_WARP_VEC_SY", p.vecScaleY);
     p.vecChanX = EnvInt("LBP3_FRAMEGEN_WARP_VEC_CX", p.vecChanX);
     p.vecChanY = EnvInt("LBP3_FRAMEGEN_WARP_VEC_CY", p.vecChanY);
+    p.maxSaturated = EnvFloat("LBP3_FRAMEGEN_WARP_VEC_MAXSAT", p.maxSaturated);
+    p.useHudless = EnvInt("LBP3_FRAMEGEN_WARP_HUDLESS", p.useHudless ? 1 : 0) != 0;
+    p.hudT = EnvInt("LBP3_FRAMEGEN_WARP_HUD_T", p.hudT);
     return p;
 }
 

@@ -162,13 +162,13 @@ std::vector<std::string> Split(const std::string& s) {
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr, "usage: fgeval <set dir> [--gens warp,blend,repeat] [--out dir] [--stills k,..] "
-                             "[--from k] [--to k] [--image final|hudless] [--crop x,y,w,h] [--quiet]\n");
+                             "[--from k] [--to k] [--image final|hudless] [--crop x,y,w,h] [--novec] [--nohud] [--quiet]\n");
         return 2;
     }
     const std::string dir = argv[1];
     std::string gens = "warp,blend,repeat", outDir, stills, image = "final", crop;
     int from = 1, to = 1 << 30;
-    bool quiet = false;
+    bool quiet = false, useVec = true, useHud = true;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : std::string(); };
@@ -180,6 +180,8 @@ int main(int argc, char** argv) {
         else if (a == "--image") image = next();
         else if (a == "--crop") crop = next();
         else if (a == "--quiet") quiet = true;
+        else if (a == "--novec") useVec = false;
+        else if (a == "--nohud") useHud = false;
     }
     const std::vector<long long> sims = ManifestSims(dir);
     if (sims.size() < 3) {
@@ -199,8 +201,9 @@ int main(int argc, char** argv) {
 
     // Skip-one scores.
     std::vector<double> sumAll(gs.size()), sumMov(gs.size()), sumMae(gs.size()), sumMs(gs.size()), maxMs(gs.size());
+    std::vector<int> declined(gs.size());
     int scored = 0, skipped = 0;
-    std::vector<uint8_t> a, t, b, out;
+    std::vector<uint8_t> a, t, b, out, vel, hlA, hlB;
     for (int k = std::max(1, from); k < std::min(n - 1, to + 1); ++k) {
         if (sims[k] - sims[k - 1] != 1 || sims[k + 1] - sims[k] != 1) {
             ++skipped;
@@ -211,16 +214,25 @@ int main(int argc, char** argv) {
             ++skipped;
             continue;
         }
+        const bool haveVel = useVec && LoadRaw(Frame(dir, k + 1, "velocity"), vel);
+        const bool haveHud = useHud && LoadRaw(Frame(dir, k - 1, "hudless"), hlA) && LoadRaw(Frame(dir, k + 1, "hudless"), hlB);
         if (!quiet) std::printf("k=%3d", k);
         for (size_t gi = 0; gi < gs.size(); ++gi) {
             fg::GenInputs in;
             in.prev = {a.data(), kW, kH};
             in.cur = {b.data(), kW, kH};
             in.t = 0.5f;
+            if (haveVel) in.motionVectors = vel.data(), in.motionScale = 2.0f;
+            if (haveHud) in.hudlessPrev = hlA.data(), in.hudless = hlB.data();
             const auto t0 = std::chrono::steady_clock::now();
-            const bool ok = gs[gi]->Generate(in, out);
+            bool ok = gs[gi]->Generate(in, out);
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-            if (!ok) continue;
+            if (!ok) {
+                // Declined: the window keeps showing N-1 (scored as such).
+                ++declined[gi];
+                out = a;
+                ok = true;
+            }
             const Score s = Compare(out, t, a, b);
             sumAll[gi] += Psnr(s.mseAll);
             sumMov[gi] += Psnr(s.mseMoving);
@@ -230,9 +242,11 @@ int main(int argc, char** argv) {
             if (!quiet) {
                 std::printf("  %s %.2f/%.2f dB %.1f ms", gs[gi]->Name(), Psnr(s.mseAll), Psnr(s.mseMoving), ms);
                 if (const fg::WarpDebug* d = fg::LastWarpDebug(gs[gi].get()))
-                    std::printf(" [luma %.1f search %.1f compose %.1f; static %.0f%% alt %.1f%% fall %.1f%%]", d->msLuma,
-                                d->msSearch, d->msCompose, 100.0 * d->pixStatic / (kW * kH),
-                                100.0 * d->pixAlt / (kW * kH), 100.0 * d->pixFallback / (kW * kH));
+                    std::printf(" [luma %.1f search %.1f compose %.1f; static %.0f%% alt %.1f%% fall %.1f%% hud %.1f%%; vec cov %.0f%% sat %.0f%%%s]",
+                                d->msLuma, d->msSearch, d->msCompose, 100.0 * d->pixStatic / (kW * kH),
+                                100.0 * d->pixAlt / (kW * kH), 100.0 * d->pixFallback / (kW * kH),
+                                100.0 * d->pixHud / (kW * kH), 100.0 * d->vecCovered, 100.0 * d->vecSaturated,
+                                d->declined ? " DECLINED" : "");
             }
         }
         if (!quiet) std::printf("  moving %.1f%%\n", 100.0 * Compare(a, b, a, b).moving / (kW * kH));
@@ -240,8 +254,9 @@ int main(int argc, char** argv) {
     }
     std::printf("\n%s: %d triples scored, %d skipped (steps != 1 or missing)\n", dir.c_str(), scored, skipped);
     for (size_t gi = 0; gi < gs.size() && scored; ++gi)
-        std::printf("  %-7s PSNR all %.2f dB, moving %.2f dB, MAE moving %.2f; %.2f ms avg, %.2f max\n", gs[gi]->Name(),
-                    sumAll[gi] / scored, sumMov[gi] / scored, sumMae[gi] / scored, sumMs[gi] / scored, maxMs[gi]);
+        std::printf("  %-7s PSNR all %.2f dB, moving %.2f dB, MAE moving %.2f; %.2f ms avg, %.2f max; %d declined\n",
+                    gs[gi]->Name(), sumAll[gi] / scored, sumMov[gi] / scored, sumMae[gi] / scored, sumMs[gi] / scored,
+                    maxMs[gi], declined[gi]);
 
     // Stills.
     if (!outDir.empty() && !stills.empty()) {
@@ -251,7 +266,10 @@ int main(int argc, char** argv) {
         for (const auto& ks : Split(stills)) {
             const int k = std::atoi(ks.c_str());
             if (k < 1 || k + 1 >= n) continue;
-            std::vector<uint8_t> f0, f1, f2;
+            std::vector<uint8_t> f0, f1, f2, v2, h0, h1, h2;
+            const bool sv = useVec && LoadRaw(Frame(dir, k + 1, "velocity"), v2);
+            const bool sh = useHud && LoadRaw(Frame(dir, k - 1, "hudless"), h0) && LoadRaw(Frame(dir, k, "hudless"), h1) &&
+                            LoadRaw(Frame(dir, k + 1, "hudless"), h2);
             if (!LoadRaw(Frame(dir, k - 1, image), f0) || !LoadRaw(Frame(dir, k, image), f1) ||
                 !LoadRaw(Frame(dir, k + 1, image), f2))
                 continue;
@@ -260,8 +278,10 @@ int main(int argc, char** argv) {
                 fg::GenInputs in;
                 in.prev = {f1.data(), kW, kH};
                 in.cur = {f2.data(), kW, kH};
+                if (sv) in.motionVectors = v2.data();
+                if (sh) in.hudlessPrev = h1.data(), in.hudless = h2.data();
                 std::vector<uint8_t> g;
-                gs[gi]->Generate(in, g);
+                if (!gs[gi]->Generate(in, g)) g = f1;
                 char base[256];
                 std::snprintf(base, sizeof base, "%s/%s_k%03d_%s", outDir.c_str(), setName.c_str(), k, gs[gi]->Name());
                 WriteRow(std::string(base) + "_mid.png", {&f1, &g, &f2});
@@ -287,8 +307,10 @@ int main(int argc, char** argv) {
                 // Skip-one: generated vs the real k, with the error map.
                 in.prev = {f0.data(), kW, kH};
                 in.cur = {f2.data(), kW, kH};
+                if (sv) in.motionVectors = v2.data(), in.motionScale = 2.0f;
+                if (sh) in.hudlessPrev = h0.data(), in.hudless = h2.data();
                 std::vector<uint8_t> s1;
-                gs[gi]->Generate(in, s1);
+                if (!gs[gi]->Generate(in, s1)) s1 = f0;
                 const std::vector<uint8_t> err = ErrorMap(s1, f1);
                 WriteRow(std::string(base) + "_skip.png", {&s1, &f1, &err});
                 if (cw > 0) WriteCrop(std::string(base) + "_skip_crop.png", {&s1, &f1, &err}, cx, cy, cw, ch);

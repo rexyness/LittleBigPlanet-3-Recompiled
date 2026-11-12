@@ -48,10 +48,14 @@ struct GenInputs {
     HostFrame prev, cur;  // the real frames N-1 and N
     float t = 0.5f;       // where between them (0 = prev, 1 = cur)
     uint32_t flags = 0;
-    // Later (lane A): the game's motion vectors, depth and HUD-less colour for this frame.
+    // Optional (perf/fg_inputs.md): the game's velocity target for frame N (RGBA8, 1920x1080:
+    // R = coverage, B/G = motion), its depth (float32), and the HUD-less colour (the display image
+    // right after the composite, same layout as the frames) of N and N-1.
     const void* motionVectors = nullptr;
     const void* depth = nullptr;
     const void* hudless = nullptr;
+    const void* hudlessPrev = nullptr;
+    float motionScale = 1.0f;  // multiplies the decoded vectors (the offline skip-one test uses 2)
 };
 class Generator {
 public:

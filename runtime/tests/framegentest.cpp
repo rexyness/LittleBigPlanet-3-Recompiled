@@ -3,10 +3,12 @@
 // end to end with synthetic frames on the real clock. No window, no GPU, no game.
 // Exit code 0 = all passed.
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "video/framegen.h"
@@ -261,6 +263,130 @@ static void TestWorker() {
     PopBy(tF + delay + period / 2 + 100'000'000, t);  // drain
 }
 
+// A textured frame (hash noise, 3x3 box-blurred) shifted by (dx, dy): the warp generator's
+// midpoint must match the frame shifted by half that in the interior, identical frames must come
+// out unchanged, and the game's vectors (when given) must not make a pure pan worse.
+static uint8_t Noise(int x, int y) {
+    uint32_t h = uint32_t(x) * 374761393u + uint32_t(y) * 668265263u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return uint8_t((h ^ (h >> 16)) & 255);
+}
+static std::vector<uint8_t> Textured(uint32_t w, uint32_t h, int dx, int dy) {
+    std::vector<uint8_t> px(size_t(w) * h * 4);
+    for (uint32_t y = 0; y < h; ++y)
+        for (uint32_t x = 0; x < w; ++x) {
+            int sum = 0;
+            for (int j = -1; j <= 1; ++j)
+                for (int i = -1; i <= 1; ++i) sum += Noise(int(x) - dx + i, int(y) - dy + j);
+            const uint8_t v = uint8_t(sum / 9);
+            uint8_t* p = &px[(size_t(y) * w + x) * 4];
+            p[0] = v;
+            p[1] = uint8_t(255 - v);
+            p[2] = uint8_t(v / 2 + 64);
+            p[3] = 255;
+        }
+    return px;
+}
+static double InteriorMae(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, uint32_t w, uint32_t h, int m) {
+    double sum = 0;
+    size_t n = 0;
+    for (uint32_t y = m; y < h - m; ++y)
+        for (uint32_t x = m; x < w - m; ++x)
+            for (int c = 0; c < 3; ++c) {
+                const size_t i = (size_t(y) * w + x) * 4 + c;
+                sum += std::abs(int(a[i]) - int(b[i]));
+                ++n;
+            }
+    return n ? sum / double(n) : 0;
+}
+static void TestWarp() {
+    const uint32_t w = 320, h = 192;
+    auto g = fg::MakeGenerator("warp");
+    Check(g != nullptr && std::strcmp(g->Name(), "warp") == 0, "warp generator exists");
+    if (!g) return;
+    for (const auto& d : {std::pair<int, int>{8, 0}, {0, 8}, {-12, 4}, {20, -6}}) {
+        const auto a = Textured(w, h, 0, 0), b = Textured(w, h, d.first, d.second);
+        const auto truth = Textured(w, h, d.first / 2, d.second / 2);
+        fg::GenInputs in;
+        in.prev = {a.data(), w, h};
+        in.cur = {b.data(), w, h};
+        std::vector<uint8_t> out;
+        Check(g->Generate(in, out) && out.size() == a.size(), "warp generates a frame");
+        const double warpErr = InteriorMae(out, truth, w, h, 32);
+        std::vector<uint8_t> blend(a.size());
+        fg::Blend(a.data(), b.data(), blend.data(), a.size());
+        const double blendErr = InteriorMae(blend, truth, w, h, 32);
+        char what[160];
+        std::snprintf(what, sizeof what, "warp midpoint of a (%d,%d) pan within 2 levels (got %.2f; blend %.2f)", d.first,
+                      d.second, warpErr, blendErr);
+        Check(warpErr < 2.0 && warpErr < blendErr / 4, what);
+        // The game's vectors for the same pan (B/G codes = 127 + motion / scale; R = covered).
+        std::vector<uint8_t> vec(a.size());
+        for (size_t i = 0; i < vec.size(); i += 4) {
+            vec[i] = 255;
+            vec[i + 1] = uint8_t(127 + int(std::lround(d.second / 0.529)));
+            vec[i + 2] = uint8_t(127 + int(std::lround(d.first / 0.941)));
+            vec[i + 3] = 255;
+        }
+        in.motionVectors = vec.data();
+        std::vector<uint8_t> out2;
+        Check(g->Generate(in, out2), "warp with the game's vectors generates a frame");
+        std::snprintf(what, sizeof what, "the game's vectors keep a (%d,%d) pan right (got %.2f)", d.first, d.second,
+                      InteriorMae(out2, truth, w, h, 32));
+        Check(InteriorMae(out2, truth, w, h, 32) < 2.0, what);
+    }
+    {
+        const auto a = Textured(w, h, 3, 5);
+        fg::GenInputs in;
+        in.prev = {a.data(), w, h};
+        in.cur = {a.data(), w, h};
+        std::vector<uint8_t> out;
+        Check(g->Generate(in, out) && out == a, "warp of two identical frames is that frame");
+    }
+    {
+        // Saturated vectors everywhere (a cut): the generator declines.
+        const auto a = Textured(w, h, 0, 0), b = Textured(w, h, 40, 0);
+        std::vector<uint8_t> vec(a.size(), 0);
+        for (size_t i = 0; i < vec.size(); i += 4) vec[i] = 255, vec[i + 1] = 255, vec[i + 2] = 0;
+        fg::GenInputs in;
+        in.prev = {a.data(), w, h};
+        in.cur = {b.data(), w, h};
+        in.motionVectors = vec.data();
+        std::vector<uint8_t> out;
+        Check(!g->Generate(in, out), "warp declines when every covered vector is saturated");
+    }
+    {
+        // A HUD drawn after the composite comes back from N exactly; elsewhere N's small display
+        // difference is carried over.
+        const auto a = Textured(w, h, 0, 0), b = Textured(w, h, 8, 0);
+        auto fin = b;
+        for (uint32_t y = 10; y < 30; ++y)
+            for (uint32_t x = 10; x < 120; ++x) {
+                uint8_t* p = &fin[(size_t(y) * w + x) * 4];
+                p[0] = 250, p[1] = 250, p[2] = 250;
+            }
+        fg::GenInputs in;
+        in.prev = {a.data(), w, h};
+        in.cur = {fin.data(), w, h};
+        in.hudlessPrev = a.data();
+        in.hudless = b.data();
+        std::vector<uint8_t> out;
+        bool hudOk = g->Generate(in, out);
+        for (uint32_t y = 10; y < 30 && hudOk; ++y)
+            for (uint32_t x = 10; x < 120; ++x)
+                hudOk &= out[(size_t(y) * w + x) * 4] == 250 && out[(size_t(y) * w + x) * 4 + 1] == 250;
+        Check(hudOk, "the screen HUD comes back from the real frame");
+        const auto truth = Textured(w, h, 4, 0);
+        double err = 0;
+        size_t n = 0;
+        for (uint32_t y = 60; y < h - 32; ++y)
+            for (uint32_t x = 32; x < w - 32; ++x)
+                for (int c = 0; c < 3; ++c, ++n)
+                    err += std::abs(int(out[(size_t(y) * w + x) * 4 + c]) - int(truth[(size_t(y) * w + x) * 4 + c]));
+        Check(n && err / double(n) < 2.0, "below the HUD the HUD-less images are interpolated");
+    }
+}
+
 int main() {
     TestBlend();
     TestGenerators();
@@ -269,6 +395,7 @@ int main() {
     TestDelay();
     TestQueue();
     TestWorker();
+    TestWarp();
     std::printf("framegentest: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }
