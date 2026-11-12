@@ -21,6 +21,8 @@
 #include <memory>
 #include <vector>
 
+#include "video/upscale_ticket.h"
+
 namespace video::framegen {
 
 // LBP3_FRAMEGEN=1 (read once). Everything below is inert when it's off.
@@ -32,6 +34,7 @@ struct GpuTicket {
     uint64_t id = 0;
     uint64_t tick = 0;
     int slot = 0;
+    UpscaleTicket up;  // the in-between frame upscaled to the window (LBP3_UPSCALE=fsr1), in the same submission
 };
 
 // A real frame as the command-processor thread hands it over.
@@ -41,6 +44,7 @@ struct RealInfo {
     int simSteps = -1;     // simulation steps the game ran for this frame (-1 = unknown)
     double camJump = -1;   // the camera's translation change since the last flip submit (-1 = unknown)
     GpuTicket gpu;         // the GPU generator's work for this frame (LBP3_FRAMEGEN_MODE=warp)
+    UpscaleTicket upReal;  // this frame upscaled to the window (LBP3_UPSCALE=fsr1)
 };
 // Takes the frame (pixels comes back holding a spare buffer to refill) and returns at once.
 void SubmitReal(std::vector<uint8_t>& pixels, uint32_t width, uint32_t height, const RealInfo& info);

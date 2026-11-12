@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "video/upscale_ticket.h"
+
 namespace video {
 
 struct DisplayBuffer {
@@ -31,8 +33,9 @@ void PresentBuffer(int index);
 // their hand-over times in times.txt (also LBP3_DUMP_FRAMES=skip:count at startup).
 void RequestFrameDump(int count);
 
-// Hands over a frame; pixels comes back holding an older buffer to reuse.
-void PresentPixels(std::vector<uint8_t>& pixels, uint32_t width, uint32_t height);
+// Hands over a frame; pixels comes back holding an older buffer to reuse. up: its upscaled copy
+// (LBP3_UPSCALE=fsr1, gpu/upscale.h), which the presenter thread fetches and shows instead.
+void PresentPixels(std::vector<uint8_t>& pixels, uint32_t width, uint32_t height, const UpscaleTicket& up = {});
 
 // Frame generation (video/framegen.h, LBP3_FRAMEGEN=1): frames with display times. Once the
 // first one arrives the window shows these instead of PresentPixels' frames: at each refresh,

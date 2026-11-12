@@ -15,6 +15,7 @@
 #include <thread>
 
 #include "gpu/fg_live.h"
+#include "gpu/upscale.h"
 #include "video/framegen_gpu.h"
 #include "video/framegen_warp.h"
 #include "video/presenter.h"
@@ -201,6 +202,18 @@ void Worker() {
                         still = g.pixels;
                     }
                 }
+                // The window's upscaler (LBP3_UPSCALE=fsr1): the in-between frame upscaled in the
+                // generator's own submission is shown instead (the still keeps the 1080p one).
+                if (in.gpu.up.id) {
+                    std::vector<uint8_t> up = TakeBuffer();
+                    uint32_t uw = 0, uh = 0;
+                    if (gpu::upscale::Fetch(in.gpu.up, up, uw, uh)) {
+                        g.pixels.swap(up);
+                        g.width = uw;
+                        g.height = uh;
+                    }
+                    ReturnBuffer(std::move(up));
+                }
                 PresentTimed(g);
                 {
                     std::lock_guard lk(g_mutex);
@@ -221,9 +234,26 @@ void Worker() {
         prevSlot = s.info.slotNs;
         havePrev = true;
         TimedFrame n;
-        n.pixels.swap(s.pixels);
-        n.width = s.width;
-        n.height = s.height;
+        // The window's upscaler: this frame's upscaled copy, when there is one, is shown instead.
+        bool upscaled = false;
+        if (s.info.upReal.id) {
+            n.pixels = TakeBuffer();
+            uint32_t uw = 0, uh = 0;
+            upscaled = gpu::upscale::Fetch(s.info.upReal, n.pixels, uw, uh);
+            if (upscaled) {
+                n.width = uw;
+                n.height = uh;
+                ReturnBuffer(std::move(s.pixels));
+            } else {
+                ReturnBuffer(std::move(n.pixels));
+                n.pixels.clear();
+            }
+        }
+        if (!upscaled) {
+            n.pixels.swap(s.pixels);
+            n.width = s.width;
+            n.height = s.height;
+        }
         n.dueNs = realDue;
         n.slotNs = s.info.slotNs;
         n.queuedNs = NowNs();

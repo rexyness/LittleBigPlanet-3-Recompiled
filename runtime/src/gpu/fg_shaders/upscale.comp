@@ -1,0 +1,90 @@
+// The window's upscaler (LBP3_UPSCALE=fsr1; gpu/upscale.h, perf/upscale.md in the planning repo):
+// AMD FidelityFX Super Resolution 1 (EASU upscale, then RCAS sharpening), the 32-bit versions
+// from shadPS4's in-tree ffx_fsr1.h (MIT), run on storage buffers instead of images. Compiled
+// once per pass (-DPASS=1 EASU, -DPASS=2 RCAS).
+//
+//   in    the frame as the game stores it: one uint per pixel, RGBA8 in memory order (the
+//         channels go through as they are: both filters weigh the first and third alike)
+//   mid   EASU's output: two uints per pixel, four halves (c0 c1 c2 1)
+//   out   RCAS's output: one uint per pixel, the same byte order as in, alpha 255
+// FSR 1 works on the values as stored (perceptual, sRGB-encoded), as AMD recommends.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(push_constant) uniform PC {
+    uvec4 con0;
+    uvec4 con1;
+    uvec4 con2;
+    uvec4 con3;
+    uvec4 sizes;  // in width, in height, out width, out height
+} pc;
+
+layout(std430, binding = 0) readonly buffer InBuf { uint inPix[]; };
+layout(std430, binding = 1) buffer MidBuf { uvec2 mid[]; };
+layout(std430, binding = 2) writeonly buffer OutBuf { uint outPix[]; };
+
+#define A_GPU 1
+#define A_GLSL 1
+#include "fsr/ffx_a.h"
+
+#if PASS == 1
+#define FSR_EASU_F 1
+
+vec4 Texel(ivec2 p) {
+    p = clamp(p, ivec2(0), ivec2(pc.sizes.xy) - 1);
+    return unpackUnorm4x8(inPix[p.y * int(pc.sizes.x) + p.x]);
+}
+
+// textureGather on a clamp-to-edge sampler at p (normalised): the 2x2 texels around p, in
+// gather order (x = (i0, j1), y = (i1, j1), z = (i1, j0), w = (i0, j0)). EASU asks for the
+// three channels of one position in a row, so the four texels are kept for the next two.
+vec2 g_at = vec2(-1.0);
+vec4 g_t[4];
+void Gather4(vec2 p) {
+    if (p == g_at) return;
+    g_at = p;
+    // EASU's positions sit on texel corners, so t is a half-integer and floor() is exact.
+    const ivec2 i0 = ivec2(floor(p * vec2(pc.sizes.xy) - 0.5));
+    g_t[0] = Texel(i0 + ivec2(0, 1));
+    g_t[1] = Texel(i0 + ivec2(1, 1));
+    g_t[2] = Texel(i0 + ivec2(1, 0));
+    g_t[3] = Texel(i0);
+}
+AF4 FsrEasuRF(AF2 p) { Gather4(p); return AF4(g_t[0].x, g_t[1].x, g_t[2].x, g_t[3].x); }
+AF4 FsrEasuGF(AF2 p) { Gather4(p); return AF4(g_t[0].y, g_t[1].y, g_t[2].y, g_t[3].y); }
+AF4 FsrEasuBF(AF2 p) { Gather4(p); return AF4(g_t[0].z, g_t[1].z, g_t[2].z, g_t[3].z); }
+
+#include "fsr/ffx_fsr1.h"
+
+void main() {
+    const uvec2 ip = gl_GlobalInvocationID.xy;
+    if (ip.x >= pc.sizes.z || ip.y >= pc.sizes.w) return;
+    AF3 c;
+    FsrEasuF(c, ip, pc.con0, pc.con1, pc.con2, pc.con3);
+    c = clamp(c, 0.0, 1.0);
+    mid[ip.y * pc.sizes.z + ip.x] = uvec2(packHalf2x16(c.xy), packHalf2x16(vec2(c.z, 1.0)));
+}
+
+#elif PASS == 2
+#define FSR_RCAS_F 1
+
+AF4 FsrRcasLoadF(ASU2 p) {
+    p = clamp(p, ivec2(0), ivec2(pc.sizes.zw) - 1);
+    const uvec2 m = mid[p.y * int(pc.sizes.z) + p.x];
+    return AF4(unpackHalf2x16(m.x), unpackHalf2x16(m.y));
+}
+void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}
+
+#include "fsr/ffx_fsr1.h"
+
+void main() {
+    const uvec2 ip = gl_GlobalInvocationID.xy;
+    if (ip.x >= pc.sizes.z || ip.y >= pc.sizes.w) return;
+    AF1 r, g, b;
+    FsrRcasF(r, g, b, ip, pc.con0);
+    outPix[ip.y * pc.sizes.z + ip.x] = packUnorm4x8(vec4(r, g, b, 1.0));
+}
+
+#endif

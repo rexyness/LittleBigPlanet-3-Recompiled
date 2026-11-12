@@ -1,4 +1,5 @@
 #include "video/presenter.h"
+#include "gpu/upscale.h"
 #include "ui/overlay.h"
 
 #include <SDL3/SDL.h>
@@ -36,6 +37,7 @@ uint32_t g_frameW = 0, g_frameH = 0;
 bool g_haveFrame = false;
 uint64_t g_frameSeq = 0;  // bumps with every new frame, so unchanged ones aren't re-uploaded
 int64_t g_frameHandoffNs = 0;  // when PresentPixels handed it over (LBP3_FRAMEGEN_LOG only)
+UpscaleTicket g_frameUp;       // its upscaled copy (LBP3_UPSCALE=fsr1), fetched by the presenter thread
 
 // Frame generation's timed frames (PresentTimed), guarded by g_mutex, sorted by due time.
 std::atomic<bool> g_timedMode{false};  // set by the first timed frame; then PresentPixels' frames aren't shown
@@ -224,6 +226,11 @@ void PresenterThread() {
     std::vector<uint8_t> frame;
     uint32_t timedW = 0, timedH = 0;  // the timed frame on screen (frame generation)
     bool haveTimed = false;
+    uint32_t frameW = 0, frameH = 0;  // PresentPixels' frame on screen
+    // Its upscaled copy (LBP3_UPSCALE=fsr1, gpu/upscale.h), when there is one: shown instead.
+    std::vector<uint8_t> upFrame;
+    uint32_t upW = 0, upH = 0;
+    bool showingUp = false;
 
     // LBP3_FRAMEGEN_LOG=1: a row per new frame on screen, written at the next wake-up (the
     // refresh it was scanned out on, when the present made it in time).
@@ -260,6 +267,14 @@ void PresenterThread() {
             std::unique_lock lock(g_vblankMutex);
             g_vblankCv.wait_for(lock, std::chrono::milliseconds(50), [&] { return g_vblanks > presentedAtVblank; });
             presentedAtVblank = g_vblanks;
+        }
+
+        // The window's size in pixels, for the upscaler (0 x 0 while minimised).
+        {
+            int pw = 0, ph = 0;
+            SDL_GetWindowSizeInPixels(window, &pw, &ph);
+            if (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) pw = ph = 0;
+            gpu::upscale::SetWindowPixels(static_cast<uint32_t>(std::max(pw, 0)), static_cast<uint32_t>(std::max(ph, 0)));
         }
 
         const int64_t wakeNs = NowNs();
@@ -299,21 +314,34 @@ void PresenterThread() {
             if (haveTimed) buf = {frame.data(), timedW, timedH, timedW, 0, 0};
             upload = fresh;
         } else {
-            std::lock_guard lock(g_mutex);
-            if (g_haveFrame) {
-                fresh = g_frameSeq != shownSeq;
-                if (fresh) {
-                    frame.swap(g_frame);  // take it; our previous buffer goes back to the GPU thread
-                    shownSeq = g_frameSeq;
-                    shown = {'R', g_frameSeq, g_frameHandoffNs, g_frameHandoffNs, g_frameHandoffNs, 0, 0};
-                    newFrame = true;
+            UpscaleTicket up;
+            bool haveGpuFrame = false;
+            {
+                std::lock_guard lock(g_mutex);
+                if (g_haveFrame) {
+                    haveGpuFrame = true;
+                    fresh = g_frameSeq != shownSeq;
+                    if (fresh) {
+                        frame.swap(g_frame);  // take it; our previous buffer goes back to the GPU thread
+                        shownSeq = g_frameSeq;
+                        shown = {'R', g_frameSeq, g_frameHandoffNs, g_frameHandoffNs, g_frameHandoffNs, 0, 0};
+                        newFrame = true;
+                        up = g_frameUp;
+                    }
+                    frameW = g_frameW;
+                    frameH = g_frameH;
+                } else {
+                    const int i = g_shown.load();
+                    if (i >= 0 && i < kMaxBuffers) buf = g_buffers[i];
                 }
-                buf = {frame.data(), g_frameW, g_frameH, g_frameW, 0, 0};
-            } else {
-                const int i = g_shown.load();
-                if (i >= 0 && i < kMaxBuffers) buf = g_buffers[i];
+                upload = fresh || !g_haveFrame;
             }
-            upload = fresh || !g_haveFrame;
+            // The upscaled copy: waits for its GPU work (usually done by now) and copies it, here
+            // rather than on the command-processor thread.
+            if (fresh && haveGpuFrame) showingUp = up.id && gpu::upscale::Fetch(up, upFrame, upW, upH);
+            if (haveGpuFrame)
+                buf = showingUp ? DisplayBuffer{upFrame.data(), upW, upH, upW, 0, 0}
+                                : DisplayBuffer{frame.data(), frameW, frameH, frameW, 0, 0};
         }
 
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
@@ -493,7 +521,7 @@ static void MaybeDumpFrame(const std::vector<uint8_t>& px, uint32_t w, uint32_t 
     }
 }
 
-void PresentPixels(std::vector<uint8_t>& pixels, uint32_t width, uint32_t height) {
+void PresentPixels(std::vector<uint8_t>& pixels, uint32_t width, uint32_t height, const UpscaleTicket& up) {
     MaybeDumpFrame(pixels, width, height);
     {
         // Frame delivery stats: uneven gaps between frames look like judder/tearing.
@@ -521,6 +549,7 @@ void PresentPixels(std::vector<uint8_t>& pixels, uint32_t width, uint32_t height
     g_haveFrame = true;
     ++g_frameSeq;
     g_frameHandoffNs = handoffNs;
+    g_frameUp = up;
 }
 
 void PresentTimed(TimedFrame& frame) {

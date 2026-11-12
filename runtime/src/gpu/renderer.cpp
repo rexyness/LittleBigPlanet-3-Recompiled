@@ -3,6 +3,7 @@
 #include "gpu/renderer.h"
 #include "gpu/frame_split.h"
 #include "gpu/fg_live.h"
+#include "gpu/upscale.h"
 
 #include <algorithm>
 #include <array>
@@ -241,6 +242,7 @@ bool ReadbackDisplayBuffer(const DisplayBufferDesc& d, std::vector<uint8_t>& out
     };
     cmd.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal, g_staging.buffer, region);
     fglive::OnReadbackCopy(static_cast<VkCommandBuffer>(cmd), &image);  // frame generation's copy (when on)
+    upscale::OnReadbackCopy(static_cast<VkCommandBuffer>(cmd), &image);  // the window's upscaler's (when on)
     split::Mark(split::FinishBegin);
     g_scheduler->Finish();  // wait for the GPU; fine for a first version
     split::Mark(split::FinishEnd);

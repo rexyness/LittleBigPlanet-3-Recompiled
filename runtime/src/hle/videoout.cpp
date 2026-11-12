@@ -27,6 +27,7 @@
 #include "gpu/frame_split.h"
 #include "gpu/renderer.h"
 #include "gpu/fg_live.h"
+#include "gpu/upscale.h"
 #include "video/framegen.h"
 #include "video/framegen_warp.h"
 #include "video/presenter.h"
@@ -188,6 +189,7 @@ void PrintPerfLine() {
                  static_cast<unsigned long long>(Core::g_lbp3ProtectFast.exchange(0)),
                  static_cast<unsigned long long>(Core::g_lbp3ProtectWalk.exchange(0)));
     video::framegen::PrintStatus();  // nothing unless LBP3_FRAMEGEN=1
+    gpu::upscale::PrintStatus();     // nothing unless LBP3_UPSCALE=fsr1
     gpu::split::Flush();
 }
 
@@ -249,6 +251,9 @@ int PS4_SYSV_ABI sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index,
                 if (mode && std::strcmp(mode, "warp") == 0 && !(onGpu && std::strcmp(onGpu, "0") == 0))
                     gpu::fglive::Configure(video::framegen::WarpParamsFromEnv());
             }
+            // The window's upscaler (LBP3_UPSCALE=fsr1, gpu/upscale.h): with frame generation only
+            // when its in-between frames are made on the GPU too (so both kinds can be upscaled).
+            gpu::upscale::ConfigureFromEnv(!video::framegen::Enabled() || gpu::fglive::Active());
         } catch (const std::exception& e) {
             std::fprintf(stderr, "[gpu] renderer unavailable (%s); using the scaffolding path\n", e.what());
             return false;
@@ -280,8 +285,13 @@ int PS4_SYSV_ABI sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index,
                     if (got) gpu::fg::OnFinal(pixels, w, h, g_displayBuffers[f.buffer].pixelFormat);
                     // GPU frame generation: submit this frame's in-between work now (its inputs
                     // were copied during the frame and by the readback); the worker waits for it.
+                    // The window's upscaler: a changed window size first, the in-between frame's
+                    // upscale goes with frame generation's work, then this frame's (both submitted,
+                    // not waited for: the presenter or the worker waits).
+                    gpu::upscale::BeginFrame();
                     video::framegen::GpuTicket gpuTicket;
                     if (gpu::fglive::Active()) gpuTicket = gpu::fglive::Kick();
+                    const video::UpscaleTicket upReal = gpu::upscale::KickReal();
                     WaitFlipSlot();
                     gpu::fg::OnShown();
                     if (got) {
@@ -299,9 +309,10 @@ int PS4_SYSV_ABI sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index,
                             info.simSteps = f.simSteps;
                             info.camJump = f.camJump;
                             info.gpu = gpuTicket;
+                            info.upReal = upReal;
                             video::framegen::SubmitReal(pixels, w, h, info);
                         } else {
-                            video::PresentPixels(pixels, w, h);
+                            video::PresentPixels(pixels, w, h, upReal);
                         }
                     }
                     SignalFlip(f.arg);

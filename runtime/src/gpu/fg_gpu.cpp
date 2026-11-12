@@ -480,6 +480,7 @@ bool WarpGpu::Ready() const { return impl_->ok && impl_->finals[0].buf; }
 void* WarpGpu::FinalBuffer(int slot) const { return static_cast<VkBuffer>(impl_->finals[slot & 1].buf); }
 void* WarpGpu::HudBuffer(int slot) const { return static_cast<VkBuffer>(impl_->huds[slot & 1].buf); }
 void* WarpGpu::VelBuffer() const { return static_cast<VkBuffer>(impl_->vel.buf); }
+void* WarpGpu::OutBuffer() const { return static_cast<VkBuffer>(impl_->out.buf); }
 uint64_t WarpGpu::FrameBytes() const { return uint64_t(impl_->W) * impl_->H * 4; }
 
 void WarpGpu::RecordUpload(void* cmdp, void* dst, const void* pixels, int index) {

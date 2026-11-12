@@ -58,6 +58,8 @@ public:
     void* FinalBuffer(int slot) const;  // VkBuffer
     void* HudBuffer(int slot) const;
     void* VelBuffer() const;
+    // Device-local: the in-between frame the last Record composed (the upscaler reads it).
+    void* OutBuffer() const;
     uint64_t FrameBytes() const;
 
     // Offline: records a copy of host pixels (FrameBytes) into dst through a staging buffer

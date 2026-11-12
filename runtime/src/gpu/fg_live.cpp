@@ -10,6 +10,7 @@
 
 #include "gpu/fg_gpu.h"
 #include "gpu/fg_offline.h"
+#include "gpu/upscale.h"
 #include "sdl_window.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -211,8 +212,12 @@ Ticket Kick() {
         sched->EndRendering();
         // A command buffer of its own: the readback's Finish ended the frame's, and this one is
         // submitted at once, before the game records its next frame.
-        g_gen->Record(static_cast<VkCommandBuffer>(sched->CommandBuffer()), flags, t.slot);
+        const VkCommandBuffer cmd = static_cast<VkCommandBuffer>(sched->CommandBuffer());
+        g_gen->Record(cmd, flags, t.slot);
+        // The window's upscaler (LBP3_UPSCALE=fsr1): the in-between frame too, in this submission.
+        t.up = upscale::RecordGen(cmd, g_gen->OutBuffer(), g_gen->Width(), g_gen->Height());
         t.tick = sched->CurrentTick();
+        upscale::SetGenTick(t.up, t.tick);
         sched->Flush();
     }
     g_slot = cur ^ 1;

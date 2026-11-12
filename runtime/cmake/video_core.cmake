@@ -42,6 +42,8 @@ add_library(video_core STATIC
     src/gpu/frame_split.cpp
     src/gpu/fg_gpu.cpp
     src/gpu/fg_live.cpp
+    src/gpu/upscale_gpu.cpp
+    src/gpu/upscale.cpp
 )
 add_dependencies(video_core host_shaders fg_shaders)
 set_target_properties(video_core PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)

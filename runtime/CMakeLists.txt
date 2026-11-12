@@ -128,7 +128,18 @@ add_executable(fgeval tests/fgeval.cpp)
 target_link_libraries(fgeval PRIVATE hle)
 target_include_directories(fgeval PRIVATE ${SHADPS4_EXT}/stb)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval)
+# The window's upscaler offline (gpu/upscale, LBP3_UPSCALE=fsr1): the size rules, and the FSR 1
+# passes on a headless device against what they must do.
+add_executable(upscaletest tests/upscaletest.cpp)
+target_link_libraries(upscaletest PRIVATE hle)
+
+# The upscaler on dumped frames (analysis/fg_dump): bilinear (the window's stretch) against FSR 1
+# at chosen sharpness values, as PNG crops side by side, with the GPU time.
+add_executable(upeval tests/upeval.cpp)
+target_link_libraries(upeval PRIVATE hle)
+target_include_directories(upeval PRIVATE ${SHADPS4_EXT}/stb)
+
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval upscaletest upeval)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()
