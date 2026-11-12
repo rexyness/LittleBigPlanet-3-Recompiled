@@ -1,5 +1,6 @@
 #include "core/linker.h"
 #include "core/patches.h"
+#include "core/runner.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -10,6 +11,7 @@
 #include <cstdlib>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <vector>
 #include <cstring>
 #include <random>
@@ -107,6 +109,33 @@ uint64_t Linker::CountingThunk(const std::string& lib, const std::string& name, 
 
 uint64_t PS4_SYSV_ABI UnimplementedCall(Linker::Stub* s) {
     NoteStubCall(s->lib, s->name);
+    if (s->name.find("RaiseException") != std::string::npos) {
+        // The game's fatal path: say where it came from (the stub is jumped to, so the return
+        // address is the game's call site; then its frame-pointer chain).
+        std::fprintf(stderr, "[stub] %s called from %s" "\n", s->name.c_str(),
+                     DescribeAddress(reinterpret_cast<uint64_t>(__builtin_return_address(0))).c_str());
+        // libc's abort path has no frame pointers: scan the stack for game-module return addresses.
+        auto* sp = static_cast<uint64_t*>(__builtin_frame_address(0));
+        int shown = 0;
+        for (int k = 0; k < 2048 && shown < 16; ++k) {
+            const std::string d = DescribeAddress(sp[k]);
+            if (d.find(".prx+") == std::string::npos && d.find(".bin+") == std::string::npos) continue;
+            std::fprintf(stderr, "[stub]   [sp+0x%x] %s" "\n", k * 8, d.c_str());
+            ++shown;
+        }
+        // exp/res1440: the render-target pools (FUN_004626a0) and the block descriptors they come from.
+        if (uint8_t* b = EbootBase()) {
+            auto u64 = [&](uint64_t off) { uint64_t v; std::memcpy(&v, b + off, 8); return v; };
+            auto u32 = [&](uint64_t off) { uint32_t v; std::memcpy(&v, b + off, 4); return v; };
+            std::fprintf(stderr, "[res] blocks: 0x1190050 {%#llx, cap %#x}  0x1190060 {%#llx, cap %#x}" "\n",
+                         (unsigned long long)u64(0x1190050), u32(0x1190058), (unsigned long long)u64(0x1190060), u32(0x1190068));
+            for (uint64_t o = 0x50; o != 800; o += 0x30)
+                if (const uint32_t size = u32(0x13403fc + o))
+                    std::fprintf(stderr, "[res] rt pool %#llx: %u bytes (%.1f MB), type %u" "\n", (unsigned long long)o, size,
+                                 size / 1048576.0, b[0x1340400 + o]);
+        }
+        std::fflush(stderr);
+    }
     if (s->calls++ < kStubLogLimit)
         std::fprintf(stderr, "[stub] %s :: %s\n", s->lib.c_str(), s->name.c_str());
     return 0;
