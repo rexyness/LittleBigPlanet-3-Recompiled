@@ -134,7 +134,12 @@ target_include_directories(fgeval PRIVATE ${SHADPS4_EXT}/stb)
 add_executable(audiotest tests/audiotest.cpp)
 target_link_libraries(audiotest PRIVATE hle)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest)
+# Add-on content offline (ticket 18): param.sfo parsing, the pack scan, and the list/key calls
+# the way LBP3 makes them (addconttest [real add-on root] also summarises a real folder).
+add_executable(addconttest tests/addconttest.cpp)
+target_link_libraries(addconttest PRIVATE hle)
+
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()

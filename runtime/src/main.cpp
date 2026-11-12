@@ -26,6 +26,7 @@
 #include "video/presenter.h"
 
 #include <SDL3/SDL_keycode.h>
+#include "hle/app_content.h"
 #include "hle/hle.h"
 
 namespace fs = std::filesystem;
@@ -91,6 +92,8 @@ int main(int argc, char** argv) {
     }
 
     try {
+        // The user's extracted add-on packs, next to the game dump (hle/app_content.h).
+        hle::appcontent::SetAddcontRoot(roots[1].parent_path() / "CUSA00473-DLC");
         core::Linker linker;
         hle::RegisterAll(linker);
         if (!namesFile.empty()) {
