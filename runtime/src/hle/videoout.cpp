@@ -33,6 +33,9 @@ extern std::atomic<uint32_t> g_lbp3Refreshes, g_lbp3RefreshesCpu, g_lbp3FillClea
     g_lbp3PreSyncSkips;
 extern std::atomic<uint64_t> g_lbp3RefreshBytes, g_lbp3FillClearBytes, g_lbp3PreSyncBytes;
 }
+namespace Core {
+extern std::atomic<uint64_t> g_lbp3ProtectFast, g_lbp3ProtectWalk;  // gpu/video_core_glue.cpp
+}
 
 namespace hle::kernel {
 void NoteFlip(int64_t steadyNs);  // kernel_time.cpp: the main thread's frame-steady clock
@@ -173,6 +176,11 @@ void PrintPerfLine() {
                  VideoCore::g_lbp3PreSyncs.exchange(0) / double(kFlipsPerStatus),
                  VideoCore::g_lbp3PreSyncBytes.exchange(0) / kMB,
                  VideoCore::g_lbp3PreSyncSkips.exchange(0) / double(kFlipsPerStatus));
+    // Write-tracking Protect calls in the window: one VirtualProtect, or the region walk
+    // (LBP3_PROTECT=old, or the single call failed). perf/gfx_wait.md fix 1.
+    std::fprintf(stderr, "[protect] %llu fast, %llu walked\n",
+                 static_cast<unsigned long long>(Core::g_lbp3ProtectFast.exchange(0)),
+                 static_cast<unsigned long long>(Core::g_lbp3ProtectWalk.exchange(0)));
     gpu::split::Flush();
 }
 

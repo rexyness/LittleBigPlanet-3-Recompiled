@@ -1,5 +1,7 @@
 // Stand-ins for the emulator pieces shadPS4's video_core links against
 // (memory manager, address space, debug state, clocks, RenderDoc, threads).
+#include <atomic>
+#include <cstdlib>
 #include <map>
 #include <shared_mutex>
 #include <cstring>
@@ -28,6 +30,11 @@ AddressSpace::~AddressSpace() = default;
 // CPU write faults into the page manager, which marks the cache dirty and
 // unprotects. Our HLE file reads go through a bounce buffer (kernel_fs.cpp)
 // because ReadFile into a protected page fails instead of faulting.
+// Milestone 5 counters for the [protect] status line (hle/videoout.cpp): Protect calls done
+// by one VirtualProtect, and those that walked the regions (LBP3_PROTECT=old, or the single
+// call failed).
+std::atomic<uint64_t> g_lbp3ProtectFast{0}, g_lbp3ProtectWalk{0};
+
 void AddressSpace::Protect(VAddr addr, u64 size, MemoryPermission perms) {
     DWORD prot = PAGE_NOACCESS;
     const bool r = True(perms & MemoryPermission::Read), w = True(perms & MemoryPermission::Write),
@@ -35,6 +42,25 @@ void AddressSpace::Protect(VAddr addr, u64 size, MemoryPermission perms) {
     if (x) prot = w ? PAGE_EXECUTE_READWRITE : r ? PAGE_EXECUTE_READ : PAGE_EXECUTE;
     else if (w) prot = PAGE_READWRITE;
     else if (r) prot = PAGE_READONLY;
+    // Milestone 5 (perf/gfx_wait.md): first try one VirtualProtect over the whole range. That
+    // works when the range is committed memory inside one allocation, which is nearly every call
+    // (a write-tracking fault unprotects a page or two), and saves a VirtualQuery per region:
+    // most of the fault handler's system-call time on the game's job threads. If it fails (the
+    // range spans allocations or reaches uncommitted pages), the region walk below sets `prot`
+    // on every committed page of the range, so the pages end up the same either way.
+    // LBP3_PROTECT=old always walks.
+    static const bool walkOnly = [] {
+        const char* v = std::getenv("LBP3_PROTECT");
+        return v && std::strcmp(v, "old") == 0;
+    }();
+    if (!walkOnly && size) {
+        DWORD old;
+        if (::VirtualProtect(reinterpret_cast<void*>(addr), size, prot, &old)) {
+            g_lbp3ProtectFast.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
+    g_lbp3ProtectWalk.fetch_add(1, std::memory_order_relaxed);
     // The range can span several allocations; VirtualProtect can't, so go region by region.
     const VAddr end = addr + size;
     while (addr < end) {
