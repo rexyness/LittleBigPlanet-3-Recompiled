@@ -318,7 +318,18 @@ int PS4_SYSV_ABI sceVideoOutRegisterBuffers(int32_t handle, int32_t start, void*
 int PS4_SYSV_ABI sceVideoOutSetFlipRate(int32_t handle, int32_t rate) {
     if (handle != kHandle) return static_cast<int>(0x80290001);  // INVALID_HANDLE
     if (rate < 0 || rate > 2) return static_cast<int>(0x80290006);  // INVALID_VALUE
-    std::fprintf(stderr, "[video] flip rate %d Hz\n", 60 / (rate + 1));
+    // Experiment (exp/flip60): LBP3_FLIP_RATE=0|1|2 ignores the game's request.
+    static const int forced = [] {
+        const char* v = std::getenv("LBP3_FLIP_RATE");
+        return v && v[0] >= '0' && v[0] <= '2' && !v[1] ? v[0] - '0' : -1;
+    }();
+    if (forced >= 0) {
+        std::fprintf(stderr, "[video] flip rate: the game asked for %d Hz, forced to %d Hz (LBP3_FLIP_RATE)\n",
+                     60 / (rate + 1), 60 / (forced + 1));
+        rate = forced;
+    } else {
+        std::fprintf(stderr, "[video] flip rate %d Hz\n", 60 / (rate + 1));
+    }
     g_flipRate = rate;
     return kernel::SCE_OK;
 }
