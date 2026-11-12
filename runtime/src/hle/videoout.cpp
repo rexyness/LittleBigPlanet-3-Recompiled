@@ -25,6 +25,7 @@
 #include "hle/register.h"
 #include "gpu/frame_split.h"
 #include "gpu/renderer.h"
+#include "video/framegen.h"
 #include "video/presenter.h"
 
 namespace VideoCore {
@@ -63,7 +64,9 @@ gpu::DisplayBufferDesc g_displayBuffers[16];
 
 // With the GPU model active, a flip completes when the command processor
 // reaches the frame's flip packet (GfxFlip interrupt), not at submit time.
-struct PendingFlip { int buffer; int64_t arg; uint64_t splitFrame = 0; };  // splitFrame: gpu/frame_split.h
+// splitFrame: gpu/frame_split.h. simSteps: the frame's simulation steps, read only with frame
+// generation on (video/framegen.h), else -1.
+struct PendingFlip { int buffer; int64_t arg; uint64_t splitFrame = 0; int simSteps = -1; };
 std::mutex g_pendingMutex;
 std::deque<PendingFlip> g_pendingFlips;
 constexpr uint32_t kIrqGfxFlip = 0x08;
@@ -181,6 +184,7 @@ void PrintPerfLine() {
     std::fprintf(stderr, "[protect] %llu fast, %llu walked\n",
                  static_cast<unsigned long long>(Core::g_lbp3ProtectFast.exchange(0)),
                  static_cast<unsigned long long>(Core::g_lbp3ProtectWalk.exchange(0)));
+    video::framegen::PrintStatus();  // nothing unless LBP3_FRAMEGEN=1
     gpu::split::Flush();
 }
 
@@ -262,7 +266,24 @@ int PS4_SYSV_ABI sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index,
                     // Show the frame on its slot, not whenever the GPU finished it:
                     // uneven hand-over times make a moving camera judder.
                     WaitFlipSlot();
-                    if (got) video::PresentPixels(pixels, w, h);
+                    if (got) {
+                        if (video::framegen::Enabled()) {
+                            // Frame generation: the same hand-over point and cost (a buffer swap);
+                            // the window shows the frame later, with an in-between frame first.
+                            // The slot, the game's clock and the flip event below don't change.
+                            video::framegen::RealInfo info;
+                            info.slotNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                              Clock::now().time_since_epoch())
+                                              .count();
+                            info.periodNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                kFrameTime * (g_flipRate.load() + 1))
+                                                .count();
+                            info.simSteps = f.simSteps;
+                            video::framegen::SubmitReal(pixels, w, h, info);
+                        } else {
+                            video::PresentPixels(pixels, w, h);
+                        }
+                    }
                     SignalFlip(f.arg);
                     gpu::split::Mark(gpu::split::Flipped);
                     gpu::split::SetCpFrame(0);
@@ -548,6 +569,23 @@ void TraceSimSteps() {
     }
 }
 
+// Frame generation only (video/framegen.h): the simulation steps since the previous flip
+// submit (GetSimFrame__, read as TraceSimSteps does), so no in-between frame is made across a
+// 0- or 2-step frame. -1 when frame generation is off (nothing is read) or for the first flip.
+int FrameGenSimSteps() {
+    if (!video::framegen::Enabled()) return -1;
+    uint8_t* base = core::EbootBase();
+    if (!base) return -1;
+    using Counter = int(PS4_SYSV_ABI*)();
+    const int sim = reinterpret_cast<Counter>(base + 0x7c79e0)();
+    static bool haveLast = false;
+    static int last = 0;
+    const int steps = haveLast ? sim - last : -1;
+    haveLast = true;
+    last = sim;
+    return steps;
+}
+
 int PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void* const* dcbs, const uint32_t* dcbSizes,
                                                    void* const* ccbs, const uint32_t* ccbSizes, int32_t videoOutHandle,
                                                    uint32_t displayBufferIndex, uint32_t flipMode, int64_t flipArg) {
@@ -555,6 +593,7 @@ int PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void* const* 
     static const bool noted = (kernel::NoteMainThread(), true);  // the game's frame thread
     (void)noted;
     TraceSimSteps();
+    const int simSteps = FrameGenSimSteps();
     if (count && gpu::Active()) {
         const uint64_t splitFrame = gpu::split::BeginFrame();  // LBP3_FRAME_SPLIT measurement
         if (splitFrame) {
@@ -568,7 +607,7 @@ int PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void* const* 
         if (PatchFlipRequest(static_cast<uint32_t*>(dcbs[count - 1]), dcbSizes[count - 1] / 4, displayBufferIndex)) {
             {
                 std::lock_guard pl(videoout::g_pendingMutex);
-                videoout::g_pendingFlips.push_back({static_cast<int>(displayBufferIndex), flipArg, splitFrame});
+                videoout::g_pendingFlips.push_back({static_cast<int>(displayBufferIndex), flipArg, splitFrame, simSteps});
             }
             TraceFlipSubmit(count, dcbs, dcbSizes, splitFrame);
             const int submitResult = Process(count, dcbs, dcbSizes, ccbs, ccbSizes);

@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <iterator>
 #include <mutex>
 #include <thread>
 
@@ -33,6 +35,29 @@ std::vector<uint8_t> g_frame;  // latest GPU-rendered frame, guarded by g_mutex
 uint32_t g_frameW = 0, g_frameH = 0;
 bool g_haveFrame = false;
 uint64_t g_frameSeq = 0;  // bumps with every new frame, so unchanged ones aren't re-uploaded
+int64_t g_frameHandoffNs = 0;  // when PresentPixels handed it over (LBP3_FRAMEGEN_LOG only)
+
+// Frame generation's timed frames (PresentTimed), guarded by g_mutex, sorted by due time.
+std::atomic<bool> g_timedMode{false};  // set by the first timed frame; then PresentPixels' frames aren't shown
+std::deque<TimedFrame> g_timed;
+constexpr size_t kMaxTimed = 8;
+std::mutex g_poolMutex;  // never held while taking g_mutex
+std::vector<std::vector<uint8_t>> g_pool;
+constexpr size_t kMaxPool = 8;
+std::atomic<uint64_t> g_shownReal{0}, g_shownGen{0}, g_skippedTimed{0};
+
+int64_t NowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+bool TimingLogEnabled() {
+    static const bool on = [] {
+        const char* v = std::getenv("LBP3_FRAMEGEN_LOG");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    return on;
+}
 
 // Real display refreshes. With LBP3_PACING=present (upstream) the present loop counts
 // them, trusting SDL_RenderPresent to block on vsync. A driver can force vsync off
@@ -197,6 +222,21 @@ void PresenterThread() {
     uint32_t texW = 0, texH = 0;
     uint64_t shownSeq = ~0ull;
     std::vector<uint8_t> frame;
+    uint32_t timedW = 0, timedH = 0;  // the timed frame on screen (frame generation)
+    bool haveTimed = false;
+
+    // LBP3_FRAMEGEN_LOG=1: a row per new frame on screen, written at the next wake-up (the
+    // refresh it was scanned out on, when the present made it in time).
+    struct Shown { char kind; uint64_t seq; int64_t slotNs, dueNs, queuedNs, presentNs; uint64_t vblank; };
+    FILE* timingLog = nullptr;
+    if (TimingLogEnabled()) {
+        timingLog = std::fopen("analysis\\framegen.csv", "w");
+        if (timingLog)
+            std::fprintf(timingLog, "index,kind,seq,slot_ms,due_ms,queued_ms,present_ms,scanout_ms,vblank\n");
+    }
+    Shown pendingShown{};
+    bool havePendingShown = false;
+    uint64_t shownIndex = 0, timedSeq = 0;
 
     for (;;) {
         SDL_Event e;
@@ -222,21 +262,58 @@ void PresenterThread() {
             presentedAtVblank = g_vblanks;
         }
 
+        const int64_t wakeNs = NowNs();
+        if (havePendingShown && timingLog) {
+            const Shown& s = pendingShown;
+            std::fprintf(timingLog, "%llu,%c,%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%llu\n",
+                         static_cast<unsigned long long>(shownIndex++), s.kind, static_cast<unsigned long long>(s.seq),
+                         s.slotNs / 1e6, s.dueNs / 1e6, s.queuedNs / 1e6, s.presentNs / 1e6, wakeNs / 1e6,
+                         static_cast<unsigned long long>(s.vblank));
+            if (shownIndex % 120 == 0) std::fflush(timingLog);
+            havePendingShown = false;
+        }
+
         DisplayBuffer buf;
         bool fresh = true;
-        {
+        bool upload = false;
+        Shown shown{};
+        bool newFrame = false;
+        if (g_timedMode.load()) {
+            // Frame generation: the latest frame due by the next refresh.
+            const double hz = g_refreshHz.load();
+            const int64_t refreshNs = hz > 0 ? static_cast<int64_t>(1e9 / hz) : 16'666'667;
+            TimedFrame t;
+            int skipped = 0;
+            fresh = PopDue(wakeNs, refreshNs, t, &skipped);
+            if (skipped) g_skippedTimed += static_cast<uint64_t>(skipped);
+            if (fresh) {
+                frame.swap(t.pixels);
+                ReturnBuffer(std::move(t.pixels));  // the frame it replaces
+                timedW = t.width;
+                timedH = t.height;
+                haveTimed = true;
+                ++(t.kind == 'G' ? g_shownGen : g_shownReal);
+                shown = {t.kind, ++timedSeq, t.slotNs, t.dueNs, t.queuedNs, 0, 0};
+                newFrame = true;
+            }
+            if (haveTimed) buf = {frame.data(), timedW, timedH, timedW, 0, 0};
+            upload = fresh;
+        } else {
             std::lock_guard lock(g_mutex);
             if (g_haveFrame) {
                 fresh = g_frameSeq != shownSeq;
                 if (fresh) {
                     frame.swap(g_frame);  // take it; our previous buffer goes back to the GPU thread
                     shownSeq = g_frameSeq;
+                    shown = {'R', g_frameSeq, g_frameHandoffNs, g_frameHandoffNs, g_frameHandoffNs, 0, 0};
+                    newFrame = true;
                 }
                 buf = {frame.data(), g_frameW, g_frameH, g_frameW, 0, 0};
             } else {
                 const int i = g_shown.load();
                 if (i >= 0 && i < kMaxBuffers) buf = g_buffers[i];
             }
+            upload = fresh || !g_haveFrame;
         }
 
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
@@ -250,13 +327,18 @@ void PresenterThread() {
                 texH = buf.height;
             }
             // 32-bit BGRA rows. Only upload when a new frame arrived.
-            if (fresh || !g_haveFrame)
-                SDL_UpdateTexture(texture, nullptr, buf.address, static_cast<int>(buf.pitchPixels * 4));
+            if (upload) SDL_UpdateTexture(texture, nullptr, buf.address, static_cast<int>(buf.pitchPixels * 4));
             SDL_RenderTexture(renderer, texture, nullptr, nullptr);
         }
         ui::overlay::Draw();
         SDL_RenderPresent(renderer);  // paced by vsync, unless a driver forces it off
         ++g_presents;
+        if (newFrame && timingLog) {
+            shown.presentNs = NowNs();
+            shown.vblank = VBlankCount();
+            pendingShown = shown;
+            havePendingShown = true;
+        }
         if (pacing == Pacing::Present) CountVBlank();
 
         // Presents and vblanks per second, every 5 s.
@@ -431,12 +513,84 @@ void PresentPixels(std::vector<uint8_t>& pixels, uint32_t width, uint32_t height
             minMs = 1e9, maxMs = 0, sumMs = 0, n = 0;
         }
     }
+    const int64_t handoffNs = TimingLogEnabled() ? NowNs() : 0;
     std::lock_guard lock(g_mutex);
     g_frame.swap(pixels);  // the caller gets an older buffer back to refill: no allocation per frame
     g_frameW = width;
     g_frameH = height;
     g_haveFrame = true;
     ++g_frameSeq;
+    g_frameHandoffNs = handoffNs;
+}
+
+void PresentTimed(TimedFrame& frame) {
+    MaybeDumpFrame(frame.pixels, frame.width, frame.height);
+    TimedFrame q;
+    q.pixels.swap(frame.pixels);
+    q.width = frame.width;
+    q.height = frame.height;
+    q.dueNs = frame.dueNs;
+    q.slotNs = frame.slotNs;
+    q.queuedNs = frame.queuedNs;
+    q.kind = frame.kind;
+    std::vector<uint8_t> dropped;
+    {
+        std::lock_guard lock(g_mutex);
+        auto at = g_timed.end();
+        while (at != g_timed.begin() && std::prev(at)->dueNs > q.dueNs) --at;
+        g_timed.insert(at, std::move(q));
+        if (g_timed.size() > kMaxTimed) {  // the window isn't taking frames (minimized?): drop the oldest
+            dropped.swap(g_timed.front().pixels);
+            g_timed.pop_front();
+            ++g_skippedTimed;
+        }
+        g_timedMode = true;
+    }
+    ReturnBuffer(std::move(dropped));
+}
+
+bool PopDue(int64_t wakeNs, int64_t refreshNs, TimedFrame& out, int* skipped) {
+    const int64_t limit = wakeNs + refreshNs - 1'000'000;
+    bool got = false;
+    int skip = 0;
+    std::vector<std::vector<uint8_t>> spare;
+    {
+        std::lock_guard lock(g_mutex);
+        while (!g_timed.empty() && g_timed.front().dueNs <= limit) {
+            if (got) {
+                spare.push_back(std::move(out.pixels));
+                ++skip;
+            }
+            out = std::move(g_timed.front());
+            g_timed.pop_front();
+            got = true;
+        }
+    }
+    for (auto& b : spare) ReturnBuffer(std::move(b));
+    if (skipped) *skipped = skip;
+    return got;
+}
+
+std::vector<uint8_t> TakeBuffer() {
+    std::lock_guard lock(g_poolMutex);
+    if (g_pool.empty()) return {};
+    std::vector<uint8_t> b = std::move(g_pool.back());
+    g_pool.pop_back();
+    return b;
+}
+
+void ReturnBuffer(std::vector<uint8_t>&& buffer) {
+    if (buffer.capacity() == 0) return;
+    std::lock_guard lock(g_poolMutex);
+    if (g_pool.size() < kMaxPool) g_pool.push_back(std::move(buffer));
+}
+
+double RefreshHz() { return g_refreshHz.load(); }
+
+void TakePresentCounts(uint64_t& shownReal, uint64_t& shownGenerated, uint64_t& skipped) {
+    shownReal = g_shownReal.exchange(0);
+    shownGenerated = g_shownGen.exchange(0);
+    skipped = g_skippedTimed.exchange(0);
 }
 
 }  // namespace video

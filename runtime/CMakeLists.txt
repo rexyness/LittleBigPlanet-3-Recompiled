@@ -72,6 +72,7 @@ add_library(hle STATIC
     src/input/game_state.cpp
     src/core/native_trace.cpp
     src/video/presenter.cpp
+    src/video/framegen.cpp
     src/ui/osk_model.cpp
     src/ui/overlay.cpp
     src/ui/osk_overlay.cpp
@@ -114,7 +115,12 @@ target_link_libraries(osktest PRIVATE hle)
 add_executable(dlgtest tests/dlgtest.cpp)
 target_link_libraries(dlgtest PRIVATE hle)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest)
+# Frame generation offline (video/framegen, LBP3_FRAMEGEN=1): the generators, the drop rules,
+# the presenter's due-time queue and the worker end to end.
+add_executable(framegentest tests/framegentest.cpp)
+target_link_libraries(framegentest PRIVATE hle)
+
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()
