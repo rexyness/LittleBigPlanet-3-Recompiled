@@ -54,7 +54,18 @@ constexpr int kHandle = 1;  // single main display port
 // Flip events use an internal ident and pack the flip argument above bit 16.
 constexpr uint64_t kInternalFlipEventId = 0x6;
 constexpr auto kFrameTime = std::chrono::nanoseconds(1'000'000'000 / 60);
-constexpr uint64_t kFlipsPerStatus = 30;  // a status line every ~0.5 s
+// Status lines ([video], [perf], [fills], [protect], [framegen]) every this many flips: 30 by
+// default (one set a second at 30 fps). Their counters accumulate until printed, so a longer
+// interval only makes each window longer. LBP3_STATUS_FLIPS=N (30..3600) sets it; play
+// sessions can use a longer one to keep their logs small (perf/log_audit.md: ~4 MB/h at 30).
+const uint64_t kFlipsPerStatus = [] {
+    const char* s = std::getenv("LBP3_STATUS_FLIPS");
+    const long n = s ? std::strtol(s, nullptr, 10) : 30;
+    const uint64_t v = static_cast<uint64_t>(std::clamp(n, 30L, 3600L));
+    if (s) std::fprintf(stderr, "[video] status lines every %llu flips (LBP3_STATUS_FLIPS)\n",
+                        static_cast<unsigned long long>(v));
+    return v;
+}();
 
 std::mutex g_mutex;
 std::vector<void*> g_flipQueues;
@@ -170,7 +181,7 @@ void PrintPerfLine() {
     for (int s = 0; s < 3; ++s)
         for (int k = 0; k < 2; ++k) lastRel[s][k] = rel[s][k];
     // Image refreshes and the game's render-target fills, per frame (perf/reuploads.md).
-    constexpr double kMB = 1024.0 * 1024.0 * kFlipsPerStatus;
+    const double kMB = 1024.0 * 1024.0 * kFlipsPerStatus;
     std::fprintf(stderr,
                  "[fills] per frame: %.1f refreshes (%.1f MB, %.1f CPU-dirty), %.1f cleared (%.1f MB), "
                  "%.1f pre-syncs (%.1f MB), %.1f skipped\n",
