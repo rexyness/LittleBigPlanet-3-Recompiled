@@ -12,6 +12,7 @@
 #include "core/address_space.h"
 #include "core/debug_state.h"
 #include "core/memory.h"
+#include "video_core/lbp3_perf.h"
 
 // --- memory ---------------------------------------------------------------------
 // Game memory is plain host memory here (see hle/kernel_memory.cpp), so the
@@ -99,6 +100,18 @@ void MemoryManager::CopySparseMemory(VAddr source, u8* dest, u64 size) {
     const u64 readable = ClampRangeSize(source, size);
     std::memcpy(dest, reinterpret_cast<const void*>(source), readable);
     if (readable < size) std::memset(dest + readable, 0, size - readable);
+    // Milestone 5 measurement (LBP3_FIRST_FRAME): how much of what is uploaded is all zero
+    // (memory the game never wrote, or unmapped), in 4 KB chunks of the source.
+    if (Lbp3Perf::g_gpuOn) {
+        uint64_t zero = size - readable;
+        const auto* p = reinterpret_cast<const uint64_t*>(source);
+        for (u64 chunk = 0; chunk + 4096 <= readable; chunk += 4096, p += 512) {
+            uint64_t any = 0;
+            for (int i = 0; i < 512; ++i) any |= p[i];
+            if (!any) zero += 4096;
+        }
+        Lbp3Perf::Add(Lbp3Perf::ZeroCopy, 0, zero);
+    }
 }
 
 // The GPU thread also writes small values here all the time (fences, event

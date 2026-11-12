@@ -58,6 +58,7 @@
 //   ff_memcpy_*       guest memory -> staging copies (CopySparseMemory) inside buffer sync and
 //                     image refresh
 //   ff_page_faults    the whole process's page faults over the window (GetProcessMemoryInfo)
+//   ff_memcpy_zero_kb of the memcpy bytes, 4 KB chunks that were all zero (LBP3_FIRST_FRAME only)
 // LBP3_FIRST_FRAME=1 turns all of this on (and the GPU timestamps); LBP3_FRAME_SPLIT=1 alone
 // gives the CPU counters. A frame whose ff_record_us exceeds 50 ms also prints a one-line
 // "[first-frame] ..." breakdown to stderr.
@@ -149,6 +150,7 @@ constexpr FfColumn kFfColumns[] = {
     {"ff_img_free_n", 20, N},     {"ff_img_free_us", 20, US},     {"ff_vma_free_n", 21, N},
     {"ff_vma_free_kb", 21, KB},   {"ff_gpu_imgcopy_n", 22, N},    {"ff_gpu_imgcopy_us", 22, US},
     {"ff_memcpy_n", 23, N},       {"ff_memcpy_us", 23, US},       {"ff_memcpy_kb", 23, KB},
+    {"ff_memcpy_zero_kb", 24, KB},
 };
 
 // The counters plus the process's page-fault count (a snapshot for the whole-frame columns).
@@ -253,8 +255,8 @@ void WriteRow(uint64_t frame, Slot& s) {
                      "%llu KB | detile %llu x %.1f ms | expand %llu x %.1f ms | bind %.1f ms, descriptors %.1f ms | "
                      "GPU copy %llu x %.1f ms, upload %llu x %.1f ms, detile %llu x %.1f ms (overflow %llu) | "
                      "image free %llu x %.1f ms | VMA free %llu x %llu KB | GPU image copy %llu x %.1f ms | "
-                     "window %.1f ms, flip after %u of %u buffers | memcpy %llu x %.1f ms %llu KB | "
-                     "page faults %llu\n",
+                     "window %.1f ms, flip after %u of %u buffers | memcpy %llu x %.1f ms %llu KB "
+                     "(%llu KB all-zero) | page faults %llu\n",
                      static_cast<unsigned long long>(frame), ffRecordUs / 1000.0, s.flipBufs.load(),
                      Span(s, FinishBegin, FinishEnd) / 1000.0, v(14, N), v(15, N), v(0, N), v(0, US) / 1000.0,
                      v(0, KB), v(1, US) / 1000.0, v(2, N), v(3, N), v(3, US) / 1000.0, v(3, KB), v(4, N), v(5, N),
@@ -263,7 +265,7 @@ void WriteRow(uint64_t frame, Slot& s) {
                      v(11, US) / 1000.0, v(12, US) / 1000.0, v(13, US) / 1000.0, v(16, N), v(16, US) / 1000.0,
                      v(17, N), v(17, US) / 1000.0, v(18, N), v(18, US) / 1000.0, v(19, N), v(20, N),
                      v(20, US) / 1000.0, v(21, N), v(21, KB), v(22, N), v(22, US) / 1000.0, windowUs / 1000.0,
-                     bufsAtFlip, flipBufs, v(23, N), v(23, US) / 1000.0, v(23, KB), pageFaults);
+                     bufsAtFlip, flipBufs, v(23, N), v(23, US) / 1000.0, v(23, KB), v(24, KB), pageFaults);
     }
     static unsigned rows = 0;
     if (++rows % 60 == 0) std::fflush(g_csv);
