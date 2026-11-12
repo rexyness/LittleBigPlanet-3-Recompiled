@@ -211,6 +211,8 @@ public:
         const double t0 = NowMs();
         // In play, this call's N-1 is the last call's N: reuse its pyramid.
         const uint64_t sigPrev = Signature(in.prev), sigCur = Signature(in.cur);
+        sigPrev_ = sigPrev;
+        sigCur_ = sigCur;
         if (havePyr_ && sigPrev == lastCurSig_) {
             for (int l = 0; l < kLevels; ++l) std::swap(prevPyr_[l], curPyr_[l]);
         } else {
@@ -635,11 +637,77 @@ private:
         return std::max(v[0], std::max(v[1], v[2]));
     }
 
+    // A thin bright stroke at pixel (x, y) of f (clamped to the frame): min channel >= textW, and
+    // along x or along y, at least textC brighter than some pixel within textR on each side
+    // (luma (c0 + 2 c1 + c2) / 4). The GPU version (fg_warp.comp, ThinBright) is the same test.
+    bool ThinBright(const HostFrame& f, int x, int y) const {
+        const int W = int(f.width), H = int(f.height);
+        x = std::clamp(x, 0, W - 1);
+        y = std::clamp(y, 0, H - 1);
+        const uint8_t* p = f.pixels + (size_t(y) * W + x) * 4;
+        if (std::min(p[0], std::min(p[1], p[2])) < p_.textW) return false;
+        const int l = (p[0] + 2 * p[1] + p[2]) >> 2;
+        auto luma = [&](int qx, int qy) {
+            const uint8_t* q = f.pixels + (size_t(std::clamp(qy, 0, H - 1)) * W + std::clamp(qx, 0, W - 1)) * 4;
+            return (q[0] + 2 * q[1] + q[2]) >> 2;
+        };
+        for (int axis = 0; axis < 2; ++axis) {
+            const int ex = axis == 0 ? 1 : 0, ey = 1 - ex;
+            bool lo = false, hi = false;
+            for (int k = 1; k <= p_.textR && !(lo && hi); ++k) {
+                lo = lo || l - luma(x - k * ex, y - k * ey) >= p_.textC;
+                hi = hi || l - luma(x + k * ex, y + k * ey) >= p_.textC;
+            }
+            if (lo && hi) return true;
+        }
+        return false;
+    }
+
     static inline void Store(uint8_t* op, __m128i v) {
         const __m128i p16 = _mm_packs_epi32(v, v);
         const __m128i p8 = _mm_packus_epi16(p16, p16);
         const int px = _mm_cvtsi128_si32(p8);
         std::memcpy(op, &px, 4);
+    }
+
+    // textNear_: bit 1 = within textD (square) of a thin bright stroke of N-1, bit 2 = of N.
+    void TextMasks(const GenInputs& in) {
+        const int W = int(in.cur.width), H = int(in.cur.height), D = p_.textD;
+        textRaw_.assign(size_t(W) * H, 0);
+        textTmp_.assign(size_t(W) * H, 0);
+        textNear_.assign(size_t(W) * H, 0);
+        // In play, N-1 is the last call's N: reuse its strokes.
+        const bool reuse = haveTextCur_ && lastTextSig_ == sigPrev_ && lastTextCur_.size() == size_t(W) * H;
+        textCur_.assign(size_t(W) * H, 0);
+        pool_.Run(64, [&](int band) {
+            for (int y = H * band / 64; y < H * (band + 1) / 64; ++y)
+                for (int x = 0; x < W; ++x) {
+                    const size_t i = size_t(y) * W + x;
+                    const uint8_t sp = reuse ? lastTextCur_[i] : uint8_t(ThinBright(in.prev, x, y) ? 1 : 0);
+                    const uint8_t sc = ThinBright(in.cur, x, y) ? 1 : 0;
+                    textCur_[i] = sc;
+                    textRaw_[i] = uint8_t(sp | (sc << 1));
+                }
+        });
+        std::swap(lastTextCur_, textCur_);
+        lastTextSig_ = sigCur_;
+        haveTextCur_ = true;
+        pool_.Run(64, [&](int band) {  // horizontal OR over +-D
+            for (int y = H * band / 64; y < H * (band + 1) / 64; ++y)
+                for (int x = 0; x < W; ++x) {
+                    uint8_t m = 0;
+                    for (int k = std::max(0, x - D); k <= std::min(W - 1, x + D); ++k) m |= textRaw_[size_t(y) * W + k];
+                    textTmp_[size_t(y) * W + x] = m;
+                }
+        });
+        pool_.Run(64, [&](int band) {  // vertical OR over +-D
+            for (int y = H * band / 64; y < H * (band + 1) / 64; ++y)
+                for (int x = 0; x < W; ++x) {
+                    uint8_t m = 0;
+                    for (int k = std::max(0, y - D); k <= std::min(H - 1, y + D); ++k) m |= textTmp_[size_t(k) * W + x];
+                    textNear_[size_t(y) * W + x] = m;
+                }
+        });
     }
 
     void Compose(const GenInputs& in, uint8_t* out) {
@@ -687,10 +755,20 @@ private:
         const int tP = int(std::lround(in.t * 512.0f)), tC = 512 - tP;
         const int wt = int(std::lround(in.t * 256.0f));
         const __m128i wPrev = _mm_set1_epi32(256 - wt), wCur = _mm_set1_epi32(wt), half = _mm_set1_epi32(128);
+        static const bool wantKinds = EnvInt("LBP3_FRAMEGEN_WARP_KINDS", 0) != 0;
+        uint8_t* kinds = nullptr;
+        if (wantKinds) {
+            dbg_.kinds.assign(size_t(W) * H, 0);
+            kinds = dbg_.kinds.data();
+        }
+        auto kind = [&](int x, int y, uint8_t k) {
+            if (kinds) kinds[size_t(y) * W + x] = k;
+        };
+        if (p_.textKeep) TextMasks(in);
         const int bands = 64;
-        std::atomic<uint64_t> nAvg{0}, nAlt{0}, nFall{0}, nStatic{0};
+        std::atomic<uint64_t> nAvg{0}, nAlt{0}, nFall{0}, nStatic{0}, nText{0};
         pool_.Run(bands, [&](int band) {
-            uint64_t cAvg = 0, cAlt = 0, cFall = 0, cStatic = 0;
+            uint64_t cAvg = 0, cAlt = 0, cFall = 0, cStatic = 0, cText = 0;
             std::vector<int> rowX(f.bw), rowY(f.bw);
             const int y0 = H * band / bands, y1 = H * (band + 1) / bands;
             for (int y = y0; y < y1; ++y) {
@@ -712,21 +790,44 @@ private:
                     const uint8_t* pp = prow + x * 4;
                     const uint8_t* cp = crow + x * 4;
                     uint8_t* op = orow + x * 4;
+                    bool whiteNearText = false;
                     if (p_.staticCopy) {
                         const int sd = std::max(std::abs(pp[0] - cp[0]),
                                                 std::max(std::abs(pp[1] - cp[1]), std::abs(pp[2] - cp[2])));
                         if (sd <= p_.staticT) {
-                            std::memcpy(op, cp, 4);
-                            ++cStatic;
-                            continue;
+                            // Near in-world text (the map's "Loading..." ring), a near-white pixel that
+                            // is the same in both frames is mostly a coincidence: white letters
+                            // crossing the map's white stripes as they move. Copying it unwarped
+                            // erases the letters, which only their soft shadow makes readable; unless
+                            // it is a stroke in both frames (static text), it is drawn below instead.
+                            whiteNearText = p_.textKeep && textNear_[size_t(y) * W + x] != 0 &&
+                                            textRaw_[size_t(y) * W + x] != 3 &&
+                                            std::min(cp[0], std::min(cp[1], cp[2])) >= p_.textW;
+                            if (!whiteNearText) {
+                                std::memcpy(op, cp, 4);
+                                ++cStatic;
+                                kind(x, y, 3);
+                                continue;
+                            }
                         }
                     }
                     const int i0 = colI_[x], wx = colW_[x], i1 = std::min(i0 + 1, f.bw - 1);
                     const int hx = (rowX[i0] * (256 - wx) + rowX[i1] * wx) >> 8;
                     const int hy = (rowY[i0] * (256 - wx) + rowY[i1] * wx) >> 8;
-                    __m128i a = Sample(in.prev, (x << 8) - ((hx * tP) >> 8), (y << 8) - ((hy * tP) >> 8));
-                    __m128i b = Sample(in.cur, (x << 8) + ((hx * tC) >> 8), (y << 8) + ((hy * tC) >> 8));
+                    const int ax256 = (x << 8) - ((hx * tP) >> 8), ay256 = (y << 8) - ((hy * tP) >> 8);
+                    const int bx256 = (x << 8) + ((hx * tC) >> 8), by256 = (y << 8) + ((hy * tC) >> 8);
+                    __m128i a = Sample(in.prev, ax256, ay256);
+                    __m128i b = Sample(in.cur, bx256, by256);
                     int d = MaxDiff3(a, b);
+                    if (whiteNearText) {
+                        // ... from the nearer frame alone, moved with the scene: one copy of the
+                        // letters with their shadow, not two misaligned halves averaged together.
+                        Store(op, (p_.fallback == 2 || in.t >= 0.5f) ? b : a);
+                        ++cText;
+                        kind(x, y, 4);
+                        continue;
+                    }
+                    bool usedAlt = false;
                     if (d > p_.agreeT && p_.perPixelAlt) {
                         // Try the distinct vectors of the 3x3 blocks around this pixel's block.
                         const size_t blk = size_t(bj) * f.bw + std::min(x / blockFull, f.bw - 1);
@@ -747,6 +848,7 @@ private:
                         }
                         if (bestD < d) {
                             ++cAlt;
+                            usedAlt = true;
                             d = bestD;
                             a = ba;
                             b = bb;
@@ -755,6 +857,7 @@ private:
                     if (d > p_.altT && p_.fallback != 0) {
                         Store(op, (p_.fallback == 2 || in.t >= 0.5f) ? b : a);
                         ++cFall;
+                        kind(x, y, 2);
                         continue;
                     }
                     // Lanes hold 0..255 in their low 16 bits, so a 16-bit multiply is exact.
@@ -762,17 +865,20 @@ private:
                         _mm_add_epi32(_mm_add_epi32(_mm_mullo_epi16(a, wPrev), _mm_mullo_epi16(b, wCur)), half), 8);
                     Store(op, mix);
                     ++cAvg;
+                    kind(x, y, usedAlt ? 1 : 0);
                 }
             }
             nAvg += cAvg;
             nAlt += cAlt;
             nFall += cFall;
             nStatic += cStatic;
+            nText += cText;
         });
         dbg_.pixAveraged = nAvg;
         dbg_.pixAlt = nAlt;
         dbg_.pixFallback = nFall;
         dbg_.pixStatic = nStatic;
+        dbg_.pixText = nText;
     }
 
     WarpParams p_;
@@ -781,7 +887,9 @@ private:
     Field back_[kLevels], fwd_[kLevels], mid_;
     std::vector<Vec> tmp_, gameL0_, gameL2_;
     std::vector<int> fx256_, fy256_, colI_, colW_;
-    std::vector<uint8_t> altN_;
+    std::vector<uint8_t> altN_, textRaw_, textTmp_, textNear_, textCur_, lastTextCur_;
+    uint64_t sigPrev_ = 0, sigCur_ = 0, lastTextSig_ = 0;
+    bool haveTextCur_ = false;
     std::vector<Vec> alt_;
     WarpDebug dbg_;
     uint64_t lastCurSig_ = 0;
@@ -813,6 +921,12 @@ WarpParams WarpParamsFromEnv() {
     p.maxSaturated = EnvFloat("LBP3_FRAMEGEN_WARP_VEC_MAXSAT", p.maxSaturated);
     p.useHudless = EnvInt("LBP3_FRAMEGEN_WARP_HUDLESS", p.useHudless ? 1 : 0) != 0;
     p.hudT = EnvInt("LBP3_FRAMEGEN_WARP_HUD_T", p.hudT);
+    if (const char* t = std::getenv("LBP3_FRAMEGEN_TEXT"); t && (std::strcmp(t, "off") == 0 || std::strcmp(t, "0") == 0))
+        p.textKeep = false;
+    p.textW = EnvInt("LBP3_FRAMEGEN_WARP_TEXT_W", p.textW);
+    p.textC = EnvInt("LBP3_FRAMEGEN_WARP_TEXT_C", p.textC);
+    p.textR = std::clamp(EnvInt("LBP3_FRAMEGEN_WARP_TEXT_R", p.textR), 1, 32);
+    p.textD = std::clamp(EnvInt("LBP3_FRAMEGEN_WARP_TEXT_D", p.textD), 0, 16);
     return p;
 }
 

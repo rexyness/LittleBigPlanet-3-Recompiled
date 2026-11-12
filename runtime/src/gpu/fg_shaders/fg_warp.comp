@@ -9,6 +9,8 @@
 //            that level's pixels)
 //   gvec     the game's vectors per block (level 0 and level 2), x = -32768 for none
 //   stats    counters (see the S_ constants)
+//   text     in-world text masks, three regions of one uint per pixel: raw strokes (bit 0 N-1,
+//            bit 1 N), the horizontal dilation, and the full dilation ("near a stroke")
 // Reads outside a plane are clamped to its edge, which is what the CPU version's edge-padded
 // planes give for every offset it can search.
 #version 450
@@ -23,6 +25,8 @@
 #define P_SMOOTH 8
 #define P_MIDINIT 9
 #define P_COMPOSE 10
+#define P_TEXTRAW 11
+#define P_TEXTDIL 12
 
 #if PASS == P_COARSE
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
@@ -40,6 +44,7 @@ layout(std430, set = 0, binding = 6) buffer Fields { ivec2 fields[]; };
 layout(std430, set = 0, binding = 7) buffer GVec { ivec2 gvec[]; };
 layout(std430, set = 0, binding = 8) buffer Stats { uint stats[]; };
 layout(std430, set = 0, binding = 9) writeonly buffer Out { uint outPx[]; };
+layout(std430, set = 0, binding = 10) buffer Text { uint text[]; };
 
 // stats[]
 #define S_TOTAL 0
@@ -53,6 +58,7 @@ layout(std430, set = 0, binding = 9) writeonly buffer Out { uint outPx[]; };
 #define S_FALL 8
 #define S_STATIC 9
 #define S_HUDPIX 10
+#define S_TEXTPIX 11
 
 layout(push_constant) uniform PC {
     int W, H;          // full-resolution frame
@@ -118,8 +124,9 @@ uint MaxDiff3(uint a, uint b) {
 #if PASS == P_COMPOSE
 // ---- compose -------------------------------------------------------------------------------
 // a0 = mid field offset, a1 = agreeT, a2 = altT, a3 = staticT, a4 = flags (1 perPixelAlt,
-// 2 staticCopy, 4 hud allowed, 8 t >= 0.5), a5 = fallback, a6 = tP, a7 = tC, a8 = wt, a9 = hudT.
-shared uint sCount[5];
+// 2 staticCopy, 4 hud allowed, 8 t >= 0.5), a5 = fallback, a6 = tP, a7 = tC, a8 = wt, a9 = hudT,
+// a10 = text masks on (framegen_warp.h textKeep), a11 = textW.
+shared uint sCount[6];
 
 uint Px(bool prev, bool hud, int i) {
     if (hud) return prev ? hudPrev[i] : hudCur[i];
@@ -164,7 +171,7 @@ uint Pack(ivec4 v) {
 
 void main() {
     const bool first = gl_LocalInvocationIndex == 0u;
-    if (first) for (int i = 0; i < 5; ++i) sCount[i] = 0u;
+    if (first) for (int i = 0; i < 6; ++i) sCount[i] = 0u;
     barrier();
     const int x = int(gl_GlobalInvocationID.x), y = int(gl_GlobalInvocationID.y);
     const int W = pc.W, H = pc.H;
@@ -173,10 +180,19 @@ void main() {
         const int i = y * W + x;
         const int bw = pc.bw, bh = pc.bh;
         uint result;
-        int kind;  // 0 avg, 1 alt (counted with avg or fall too), 2 fall, 3 static
+        int kind;  // 0 avg, 1 alt (counted with avg or fall too), 2 fall, 3 static, 4 white near text
         bool usedAlt = false;
         const uint pp = Px(true, hud, i), cp = Px(false, hud, i);
-        if ((pc.a4 & 2) != 0 && MaxDiff3(pp, cp) <= uint(pc.a3)) {
+        bool staticPx = (pc.a4 & 2) != 0 && MaxDiff3(pp, cp) <= uint(pc.a3);
+        // Near in-world text, a near-white pixel that is the same in both frames is mostly a
+        // coincidence (white letters crossing the map's white stripes): unless it is a stroke in
+        // both frames, it is drawn from the nearer frame below (the CPU version's whiteNearText).
+        bool whiteNearText = false;
+        if (staticPx && pc.a10 != 0) {
+            const int cmin = min(int(cp & 0xffu), min(int((cp >> 8) & 0xffu), int((cp >> 16) & 0xffu)));
+            whiteNearText = text[2 * W * H + i] != 0u && text[i] != 3u && cmin >= pc.a11;
+        }
+        if (staticPx && !whiteNearText) {
             result = cp;
             kind = 3;
         } else {
@@ -205,45 +221,51 @@ void main() {
             ivec4 a = Sample(true, hud, (x << 8) - ((hx * tP) >> 8), (y << 8) - ((hy * tP) >> 8));
             ivec4 b = Sample(false, hud, (x << 8) + ((hx * tC) >> 8), (y << 8) + ((hy * tC) >> 8));
             int d = MaxD(a, b);
-            if (d > pc.a1 && (pc.a4 & 1) != 0) {
-                // The distinct vectors of the 3x3 blocks around this pixel's block.
-                const int bj = min(y / blockFull, bh - 1), bi = min(x / blockFull, bw - 1);
-                ivec2 list[9];
-                int n = 0;
-                for (int dj = -1; dj <= 1; ++dj)
-                    for (int di = -1; di <= 1; ++di) {
-                        const int qi = bi + di, qj = bj + dj;
-                        if (qi < 0 || qj < 0 || qi >= bw || qj >= bh) continue;
-                        const ivec2 v = fields[mo + qj * bw + qi];
-                        bool dup = false;
-                        for (int k = 0; k < n; ++k) dup = dup || (list[k] == v);
-                        if (!dup) list[n++] = v;
-                    }
-                if (n > 1) {
-                    int bestD = d;
-                    ivec4 ba = a, bb = b;
-                    for (int k = 0; k < n; ++k) {
-                        const int vx = list[k].x * 256, vy = list[k].y * 256;
-                        const ivec4 ta = Sample(true, hud, (x << 8) - ((vx * tP) >> 8), (y << 8) - ((vy * tP) >> 8));
-                        const ivec4 tb = Sample(false, hud, (x << 8) + ((vx * tC) >> 8), (y << 8) + ((vy * tC) >> 8));
-                        const int td = MaxD(ta, tb);
-                        if (td < bestD) { bestD = td; ba = ta; bb = tb; }
-                    }
-                    if (bestD < d) {
-                        usedAlt = true;
-                        d = bestD;
-                        a = ba;
-                        b = bb;
+            if (whiteNearText) {
+                // From the nearer frame alone, moved with the scene.
+                result = Pack((pc.a5 == 2 || (pc.a4 & 8) != 0) ? b : a);
+                kind = 4;
+            } else {
+                if (d > pc.a1 && (pc.a4 & 1) != 0) {
+                    // The distinct vectors of the 3x3 blocks around this pixel's block.
+                    const int bj = min(y / blockFull, bh - 1), bi = min(x / blockFull, bw - 1);
+                    ivec2 list[9];
+                    int n = 0;
+                    for (int dj = -1; dj <= 1; ++dj)
+                        for (int di = -1; di <= 1; ++di) {
+                            const int qi = bi + di, qj = bj + dj;
+                            if (qi < 0 || qj < 0 || qi >= bw || qj >= bh) continue;
+                            const ivec2 v = fields[mo + qj * bw + qi];
+                            bool dup = false;
+                            for (int k = 0; k < n; ++k) dup = dup || (list[k] == v);
+                            if (!dup) list[n++] = v;
+                        }
+                    if (n > 1) {
+                        int bestD = d;
+                        ivec4 ba = a, bb = b;
+                        for (int k = 0; k < n; ++k) {
+                            const int vx = list[k].x * 256, vy = list[k].y * 256;
+                            const ivec4 ta = Sample(true, hud, (x << 8) - ((vx * tP) >> 8), (y << 8) - ((vy * tP) >> 8));
+                            const ivec4 tb = Sample(false, hud, (x << 8) + ((vx * tC) >> 8), (y << 8) + ((vy * tC) >> 8));
+                            const int td = MaxD(ta, tb);
+                            if (td < bestD) { bestD = td; ba = ta; bb = tb; }
+                        }
+                        if (bestD < d) {
+                            usedAlt = true;
+                            d = bestD;
+                            a = ba;
+                            b = bb;
+                        }
                     }
                 }
-            }
-            if (d > pc.a2 && pc.a5 != 0) {
-                result = Pack((pc.a5 == 2 || (pc.a4 & 8) != 0) ? b : a);
-                kind = 2;
-            } else {
-                const int wt = pc.a8;
-                result = Pack((a * (256 - wt) + b * wt + 128) >> 8);
-                kind = 0;
+                if (d > pc.a2 && pc.a5 != 0) {
+                    result = Pack((pc.a5 == 2 || (pc.a4 & 8) != 0) ? b : a);
+                    kind = 2;
+                } else {
+                    const int wt = pc.a8;
+                    result = Pack((a * (256 - wt) + b * wt + 128) >> 8);
+                    kind = 0;
+                }
             }
         }
         if (hud) {
@@ -264,7 +286,7 @@ void main() {
             }
         }
         outPx[i] = result;
-        atomicAdd(sCount[kind == 3 ? 3 : (kind == 2 ? 2 : 0)], 1u);
+        atomicAdd(sCount[kind == 4 ? 5 : (kind == 3 ? 3 : (kind == 2 ? 2 : 0))], 1u);
         if (usedAlt) atomicAdd(sCount[1], 1u);
     }
     barrier();
@@ -274,6 +296,7 @@ void main() {
         atomicAdd(stats[S_FALL], sCount[2]);
         atomicAdd(stats[S_STATIC], sCount[3]);
         atomicAdd(stats[S_HUDPIX], sCount[4]);
+        atomicAdd(stats[S_TEXTPIX], sCount[5]);
     }
 }
 
@@ -584,5 +607,51 @@ void main() {
         if (c < bestC) { bestC = c; best = cands[i]; }
     }
     fields[pc.dst0 + by * pc.bw + bx] = best;
+}
+#elif PASS == P_TEXTRAW
+// In-world text: the thin bright strokes of both frames (framegen_warp.cpp's ThinBright), into
+// text region 0 (bit 0 N-1, bit 1 N). a0 = HUD-less allowed, a1 = textW, a2 = textC, a3 = textR.
+uint Pix(bool prev, bool hud, int x, int y) {
+    const int i = clamp(y, 0, pc.H - 1) * pc.W + clamp(x, 0, pc.W - 1);
+    if (hud) return prev ? hudPrev[i] : hudCur[i];
+    return prev ? finalPrev[i] : finalCur[i];
+}
+int TextLuma(uint p) { return (int(p & 0xffu) + 2 * int((p >> 8) & 0xffu) + int((p >> 16) & 0xffu)) >> 2; }
+bool ThinBright(bool prev, bool hud, int x, int y) {
+    const uint p = Pix(prev, hud, x, y);
+    if (min(int(p & 0xffu), min(int((p >> 8) & 0xffu), int((p >> 16) & 0xffu))) < pc.a1) return false;
+    const int l = TextLuma(p);
+    for (int axis = 0; axis < 2; ++axis) {
+        const int ex = axis == 0 ? 1 : 0, ey = 1 - ex;
+        bool lo = false, hi = false;
+        for (int k = 1; k <= pc.a3 && !(lo && hi); ++k) {
+            lo = lo || l - TextLuma(Pix(prev, hud, x - k * ex, y - k * ey)) >= pc.a2;
+            hi = hi || l - TextLuma(Pix(prev, hud, x + k * ex, y + k * ey)) >= pc.a2;
+        }
+        if (lo && hi) return true;
+    }
+    return false;
+}
+void main() {
+    const int x = int(gl_GlobalInvocationID.x), y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.W || y >= pc.H) return;
+    const bool hud = pc.a0 != 0 && stats[S_USEHUD] != 0u;
+    text[y * pc.W + x] = (ThinBright(true, hud, x, y) ? 1u : 0u) | (ThinBright(false, hud, x, y) ? 2u : 0u);
+}
+
+#elif PASS == P_TEXTDIL
+// One axis of the square dilation of the stroke masks: a0 = axis (0 x, 1 y), a1 = radius,
+// a2 = source region, a3 = destination region (offsets in pixels).
+void main() {
+    const int x = int(gl_GlobalInvocationID.x), y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.W || y >= pc.H) return;
+    const int D = pc.a1;
+    uint m = 0u;
+    if (pc.a0 == 0) {
+        for (int k = max(0, x - D); k <= min(pc.W - 1, x + D); ++k) m |= text[pc.a2 + y * pc.W + k];
+    } else {
+        for (int k = max(0, y - D); k <= min(pc.H - 1, y + D); ++k) m |= text[pc.a2 + k * pc.W + x];
+    }
+    text[pc.a3 + y * pc.W + x] = m;
 }
 #endif

@@ -29,7 +29,7 @@ public:
             return false;
         }
         const gpu::fglive::Fetched f = gpu::fglive::Fetch(in.gpu, out);
-        NoteGpu(f.ok, f.gpuMs, f.waitMs, f.declined, f.usedHudless, f.usedVectors);
+        NoteGpu(f.ok, f.gpuMs, f.waitMs, f.declined, f.usedHudless, f.usedVectors, f.pixText);
         if (!f.ok) return false;
         last_ = gpu::fggpu::Result{};
         last_.gpuMs = f.gpuMs;

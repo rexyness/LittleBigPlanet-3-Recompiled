@@ -40,6 +40,7 @@ struct Fetched {
     double gpuMs = -1;
     double waitMs = 0;
     uint32_t covered = 0, saturated = 0, total = 0;
+    uint32_t pixText = 0;  // white pixels near in-world text drawn moved (framegen_warp.h textKeep)
 };
 // From the worker: waits for the ticket's work and copies the generated frame into out.
 Fetched Fetch(const Ticket& t, std::vector<uint8_t>& out);

@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "video/framegen.h"
+#include "video/framegen_warp.h"
 #include "video/presenter.h"
 
 namespace fg = video::framegen;
@@ -287,6 +288,28 @@ static std::vector<uint8_t> Textured(uint32_t w, uint32_t h, int dx, int dy) {
         }
     return px;
 }
+// The map's in-world text over its white stripes (perf/fg_gpu.md, "Loading..."): horizontal
+// white/blue stripes moved down by bgDy, and a white bar glyph with a darker outline at
+// (gx, gy). Where a white stripe pixel is the same in both frames next to the glyph, the
+// generator must not copy it as static (that erased the letters) but draw it moved with the
+// scene (framegen_warp.h, textKeep).
+static std::vector<uint8_t> TextScene(uint32_t w, uint32_t h, int bgDy, int gx, int gy) {
+    std::vector<uint8_t> px(size_t(w) * h * 4);
+    for (uint32_t y = 0; y < h; ++y)
+        for (uint32_t x = 0; x < w; ++x) {
+            const bool white = ((int(y) - bgDy + 480) / 24) % 2 == 0;
+            uint8_t* p = &px[(size_t(y) * w + x) * 4];
+            p[0] = white ? 255 : 90, p[1] = white ? 255 : 90, p[2] = white ? 255 : 230, p[3] = 255;
+        }
+    for (int y = gy; y < gy + 72; ++y)
+        for (int x = gx - 3; x < gx + 9; ++x) {
+            if (x < 0 || y < 0 || x >= int(w) || y >= int(h)) continue;
+            uint8_t* p = &px[(size_t(y) * w + x) * 4];
+            const bool core = x >= gx && x < gx + 6;
+            p[0] = core ? 255 : 170, p[1] = core ? 255 : 170, p[2] = core ? 255 : 230;
+        }
+    return px;
+}
 static double InteriorMae(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, uint32_t w, uint32_t h, int m) {
     double sum = 0;
     size_t n = 0;
@@ -385,6 +408,28 @@ static void TestWarp() {
                     err += std::abs(int(out[(size_t(y) * w + x) * 4 + c]) - int(truth[(size_t(y) * w + x) * 4 + c]));
         Check(n && err / double(n) < 2.0, "below the HUD the HUD-less images are interpolated");
     }
+    {
+        // In-world text over white stripes: drawn from the nearer frame, not copied as static.
+        const uint32_t tw = 320, th = 192;
+        const auto a = TextScene(tw, th, 0, 150, 60), b = TextScene(tw, th, 8, 156, 68);
+        fg::GenInputs in;
+        in.prev = {a.data(), tw, th};
+        in.cur = {b.data(), tw, th};
+        std::vector<uint8_t> on, off;
+        const bool okOn = g->Generate(in, on);
+        const fg::WarpDebug* dOn = fg::LastWarpDebug(g.get());
+        const uint64_t textOn = dOn ? dOn->pixText : 0;
+        _putenv_s("LBP3_FRAMEGEN_TEXT", "off");
+        auto gOff = fg::MakeGenerator("warp");
+        _putenv_s("LBP3_FRAMEGEN_TEXT", "");
+        const bool okOff = gOff && gOff->Generate(in, off);
+        const fg::WarpDebug* dOff = gOff ? fg::LastWarpDebug(gOff.get()) : nullptr;
+        char what[160];
+        std::snprintf(what, sizeof what, "white pixels near in-world text are drawn moved, not copied (%llu px)",
+                      (unsigned long long)textOn);
+        Check(okOn && textOn > 0, what);
+        Check(okOff && dOff && dOff->pixText == 0 && off != on, "LBP3_FRAMEGEN_TEXT=off keeps the old static copy");
+    }
 }
 
 // The GPU warp (perf/fg_gpu.md) gives the CPU warp's bytes and decisions in every case above.
@@ -443,6 +488,13 @@ static void TestWarpGpu() {
         in.hudlessPrev = a.data();
         in.hudless = b.data();
         same(in, "GPU warp = CPU warp with the HUD-less images and a screen HUD");
+    }
+    {
+        const auto a = TextScene(w, h, 0, 150, 60), b = TextScene(w, h, 8, 156, 68);
+        fg::GenInputs in;
+        in.prev = {a.data(), w, h};
+        in.cur = {b.data(), w, h};
+        same(in, "GPU warp = CPU warp for in-world text over white stripes");
     }
     // A camera cut by the camera's jump (perf/fg_inputs.md: 5,753 at a cut, at most ~250 in play).
     fg::DecideIn d;

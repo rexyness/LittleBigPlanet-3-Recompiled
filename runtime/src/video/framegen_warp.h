@@ -48,6 +48,15 @@ struct WarpParams {
     // HUD-less image by more than hudT).
     bool useHudless = true;
     int hudT = 8;
+    // In-world text drawn into the scene (the map's "Loading..." ring) is white, like the map's
+    // white stripes. Where a near-white pixel is the same in both frames within textD pixels of a
+    // thin bright stroke (min channel >= textW, and at least textC brighter than the luma within
+    // textR pixels on both sides along x or y), and isn't a stroke in both frames itself, it is
+    // not taken as static (copied unwarped, which erases letters crossing the stripes) but drawn
+    // from the nearer frame, moved with the scene. LBP3_FRAMEGEN_TEXT=off restores the old
+    // behaviour.
+    bool textKeep = true;
+    int textW = 236, textC = 48, textR = 8, textD = 8;
 };
 
 // LBP3_FRAMEGEN_WARP_* overrides of the defaults (threads, radius, thresholds, fallback, vectors).
@@ -62,9 +71,12 @@ struct WarpDebug {
     std::vector<float> hx, hy;  // half-step displacement per block (full-res pixels)
     std::vector<uint32_t> cost;
     double msLuma = 0, msSearch = 0, msCompose = 0;
-    uint64_t pixAveraged = 0, pixAlt = 0, pixFallback = 0, pixStatic = 0, pixHud = 0;
+    uint64_t pixAveraged = 0, pixAlt = 0, pixFallback = 0, pixStatic = 0, pixHud = 0, pixText = 0;
     double vecCovered = 0, vecSaturated = 0;  // shares of the frame
     bool usedVectors = false, usedHudless = false, declined = false;
+    // Per pixel, when LBP3_FRAMEGEN_WARP_KINDS=1 (fgeval): 0 averaged, 1 averaged after an
+    // alternative vector, 2 nearer frame (fallback), 3 static copy, 4 white near text (nearer frame).
+    std::vector<uint8_t> kinds;
 };
 const WarpDebug* LastWarpDebug(const Generator* g);  // nullptr when g isn't a warp generator
 

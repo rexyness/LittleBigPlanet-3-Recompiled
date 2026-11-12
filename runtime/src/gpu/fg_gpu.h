@@ -34,7 +34,7 @@ struct Result {
     uint32_t total = 0, covered = 0, saturated = 0;  // the game's vectors (level-0 sample grid)
     uint32_t hudHit = 0, hudN = 0;
     bool usedHudless = false, usedVectors = false;
-    uint32_t pixAvg = 0, pixAlt = 0, pixFall = 0, pixStatic = 0, pixHud = 0;
+    uint32_t pixAvg = 0, pixAlt = 0, pixFall = 0, pixStatic = 0, pixHud = 0, pixText = 0;
     double gpuMs = -1;  // timestamps around the passes (-1 = not available)
     bool declined = false;  // most covered vectors saturated (a cut): don't show it
 };
