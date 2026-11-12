@@ -8,6 +8,9 @@ set SKIP_INTRO=1
 rem Frame generation: a generated frame between each pair of real ones, so 60 on screen
 rem while the game itself still runs at 30 (about +17 ms input lag): 1 = on, 0 = off.
 set FRAMEGEN=1
+rem Render resolution: 1440 = the game draws at 2560x1440 (patched; the PS4 version draws
+rem 1920x1080), 1080 = the original 1920x1080, stretched to the window.
+set RES=1440
 rem ---------------------------------------------------------------------------
 
 cd /d "%~dp0"
@@ -29,6 +32,10 @@ if "%SKIP_INTRO%"=="1" set EXTRA=--skip-intro
 if "%FRAMEGEN%"=="1" (
     set LBP3_FRAMEGEN=1
     set LBP3_FRAMEGEN_MODE=warp
+)
+if "%RES%"=="1440" (
+    set LBP3_RES=1440
+    set LBP3_RES_SHADERS=1
 )
 echo Starting LittleBigPlanet 3... close the game window to quit.
 if not exist analysis mkdir analysis
