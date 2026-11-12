@@ -5,6 +5,9 @@ rem Logs go to analysis\play_log.txt (errors, crashes) and analysis\play_stdout.
 rem --- options -------------------------------------------------------------
 rem Skip the startup logos and live-action intro: 1 = skip, 0 = play them.
 set SKIP_INTRO=1
+rem Frame generation: a generated frame between each pair of real ones, so 60 on screen
+rem while the game itself still runs at 30 (about +17 ms input lag): 1 = on, 0 = off.
+set FRAMEGEN=1
 rem ---------------------------------------------------------------------------
 
 cd /d "%~dp0"
@@ -23,6 +26,10 @@ if not exist build\lbp3.exe (
 )
 set EXTRA=
 if "%SKIP_INTRO%"=="1" set EXTRA=--skip-intro
+if "%FRAMEGEN%"=="1" (
+    set LBP3_FRAMEGEN=1
+    set LBP3_FRAMEGEN_MODE=warp
+)
 echo Starting LittleBigPlanet 3... close the game window to quit.
 if not exist analysis mkdir analysis
 rem Every session's log is also kept for good in analysis\play_logs\, named by its last write.
