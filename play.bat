@@ -13,7 +13,8 @@ rem 1920x1080), 1080 = the original 1920x1080, stretched to the window.
 set RES=1440
 rem LBP1/LBP2 items (the old "My Unlocks", whose servers are gone): 1 = run the game's own
 rem import once, the first time the start menu opens; wait for "successfully imported",
-rem don't press Circle. Already-imported profiles gain nothing. Back up your saves first.
+rem don't press Circle, then close the game and set this back to 0 (a session that ran the
+rem import crashed later when Options was pressed again). Back up your saves first.
 set MY_UNLOCKS=0
 rem ---------------------------------------------------------------------------
 
