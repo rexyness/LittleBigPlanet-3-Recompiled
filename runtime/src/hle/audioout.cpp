@@ -6,18 +6,28 @@
 // hands over one buffer per period and relies on the call to pace it in real
 // time. We keep about two periods queued and wait while more than that is
 // pending. LBP3_VOLUME=0..100 scales everything.
+//
+// 7.1 on a stereo device (ticket 16): LBP3's FMOD mixes to an 8-channel port, and SDL's
+// own 7.1 -> stereo matrix puts the front pair at 0.212 (about -13.5 dB), so the game played
+// far too quietly on stereo speakers and headphones. The runtime downmixes such ports itself
+// (hle/audio_downmix.h: fronts 1, centre and surrounds 0.707, a limiter above -1 dBFS) and
+// hands SDL plain stereo. LBP3_DOWNMIX=sdl brings back SDL's matrix. Devices with more than
+// two channels still get SDL's conversion. An [audio] line every 5 s gives each port's level.
 #include <SDL3/SDL.h>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
+#include "hle/audio_downmix.h"
 #include "hle/kernel_errors.h"
 #include "hle/register.h"
 
@@ -66,12 +76,30 @@ struct Port {
     std::vector<float> scratch;
     float gain = 1.0f;
     uint64_t outputs = 0, underruns = 0;
+    // 8-channel port on a stereo device: the runtime's downmix (else SDL's).
+    bool downmix = false;
+    bool stereoDevice = false;  // 8-channel port on a stereo device (either downmix)
+    std::vector<float> stereo, sdlStereo;
+    Limiter limiter;
+    // Levels for the [audio] line, reset every window (before the port volume).
+    Level inLevel, sdlLevel, oursLevel, outLevel;
+    uint64_t windowOutputs = 0;
+    int volumeLogs = 0;
 };
 
 std::mutex g_mutex;
 bool g_init = false;
 SDL_AudioDeviceID g_device = 0;
+int g_deviceChannels = 0;
 Port g_ports[kMaxPorts];
+std::chrono::steady_clock::time_point g_lastLevels{};
+constexpr auto kLevelsEvery = std::chrono::seconds(5);
+
+// LBP3_DOWNMIX=sdl: leave 7.1 -> stereo to SDL (the old path).
+bool RuntimeDownmix() {
+    const char* s = std::getenv("LBP3_DOWNMIX");
+    return !(s && std::strcmp(s, "sdl") == 0);
+}
 
 float MasterVolume() {
     static const float v = [] {
@@ -94,9 +122,46 @@ bool OpenDevice() {
     }
     SDL_AudioSpec spec{};
     SDL_GetAudioDeviceFormat(g_device, &spec, nullptr);
+    g_deviceChannels = spec.channels;
     std::fprintf(stderr, "[audio] output device: %s (%d Hz, %d ch)\n", SDL_GetAudioDeviceName(g_device), spec.freq,
                  spec.channels);
     return true;
+}
+
+// One [audio] line: each port that played in the window, its level before the port volume.
+// For an 8-channel port on a stereo device: what came in, what went to SDL, and what SDL's
+// own downmix and the runtime's (before the limiter) would make of it.
+void PrintLevels(double seconds) {
+    std::string line;
+    char buf[512];
+    for (int i = 0; i < kMaxPorts; ++i) {
+        Port& p = g_ports[i];
+        if (!p.open || !p.windowOutputs) continue;
+        if (p.stereoDevice) {
+            std::snprintf(buf, sizeof(buf),
+                          "%sport %d (8 ch, %s downmix): in rms %.1f pk %.1f; out rms %.1f pk %.1f; SDL's would be "
+                          "rms %.1f pk %.1f, the runtime's rms %.1f pk %.1f; limiter %llu buffers, min %.1f dB, %llu "
+                          "soft",
+                          line.empty() ? "" : " | ", i + 1, p.downmix ? "runtime" : "SDL", p.inLevel.RmsDb(),
+                          p.inLevel.PeakDb(), p.outLevel.RmsDb(), p.outLevel.PeakDb(), p.sdlLevel.RmsDb(),
+                          p.sdlLevel.PeakDb(), p.oursLevel.RmsDb(), p.oursLevel.PeakDb(),
+                          static_cast<unsigned long long>(p.limiter.reducedBuffers),
+                          20.0 * std::log10(std::max(p.limiter.minGain, 1e-6f)),
+                          static_cast<unsigned long long>(p.limiter.softClipped));
+            p.limiter.reducedBuffers = p.limiter.softClipped = 0;
+            p.limiter.minGain = p.limiter.gain;
+        } else {
+            std::snprintf(buf, sizeof(buf), "%sport %d (%d ch): rms %.1f pk %.1f", line.empty() ? "" : " | ", i + 1,
+                          p.fmt.channels, p.inLevel.RmsDb(), p.inLevel.PeakDb());
+        }
+        line += buf;
+        p.inLevel.Reset();
+        p.sdlLevel.Reset();
+        p.oursLevel.Reset();
+        p.outLevel.Reset();
+        p.windowOutputs = 0;
+    }
+    if (!line.empty()) std::fprintf(stderr, "[audio] levels over %.0f s, dBFS: %s\n", seconds, line.c_str());
 }
 
 Port* GetPort(int handle) {
@@ -149,7 +214,9 @@ int PS4_SYSV_ABI sceAudioOutOpen(int32_t userId, int32_t type, int32_t index, ui
         if (!g_ports[i].open) { slot = i; break; }
     if (slot < 0) return kErrorPortFull;
 
-    const SDL_AudioSpec src{SDL_AUDIO_F32, fmt.channels, static_cast<int>(rate)};
+    const bool stereoDevice = fmt.channels == 8 && g_deviceChannels == 2;
+    const bool downmix = stereoDevice && RuntimeDownmix();
+    const SDL_AudioSpec src{SDL_AUDIO_F32, downmix ? 2 : fmt.channels, static_cast<int>(rate)};
     SDL_AudioStream* stream = SDL_CreateAudioStream(&src, nullptr);
     if (!stream || !SDL_BindAudioStream(g_device, stream)) {
         std::fprintf(stderr, "[audio] stream creation failed: %s\n", SDL_GetError());
@@ -165,9 +232,18 @@ int PS4_SYSV_ABI sceAudioOutOpen(int32_t userId, int32_t type, int32_t index, ui
     p.fmt = fmt;
     p.stream = stream;
     p.scratch.resize(static_cast<size_t>(frames) * fmt.channels);
+    p.stereoDevice = stereoDevice;
+    p.downmix = downmix;
+    if (stereoDevice) {
+        p.stereo.resize(static_cast<size_t>(frames) * 2);
+        p.sdlStereo.resize(static_cast<size_t>(frames) * 2);
+    }
     SDL_SetAudioStreamGain(stream, MasterVolume());
-    std::fprintf(stderr, "[audio] port %d: type %d, %u frames, %d ch %s\n", slot + 1, type, frames, fmt.channels,
-                 fmt.isFloat ? "float" : "s16");
+    std::fprintf(stderr, "[audio] port %d: type %d, %u frames, %d ch %s%s\n", slot + 1, type, frames, fmt.channels,
+                 fmt.isFloat ? "float" : "s16",
+                 downmix        ? ", downmixed to stereo by the runtime (LBP3_DOWNMIX=sdl: SDL's matrix)"
+                 : stereoDevice ? ", downmixed to stereo by SDL (LBP3_DOWNMIX=sdl)"
+                                : "");
     return slot + 1;
 }
 
@@ -188,7 +264,8 @@ int PS4_SYSV_ABI sceAudioOutOutput(int32_t handle, const void* buffer) {
         Port* p = GetPort(handle);
         if (!p) return kErrorNotOpened;
         stream = p->stream;
-        bytes = p->scratch.size() * sizeof(float);
+        const std::vector<float>& out = p->downmix ? p->stereo : p->scratch;
+        bytes = out.size() * sizeof(float);
         if (buffer) {
             // An empty queue here (after start-up) means the speaker ran dry: an audible gap.
             // Logged every 1000th time: the voice port (3) runs dry routinely between lines,
@@ -197,7 +274,28 @@ int PS4_SYSV_ABI sceAudioOutOutput(int32_t handle, const void* buffer) {
                 std::fprintf(stderr, "[audio] port %d underrun (%llu so far)\n", handle,
                              static_cast<unsigned long long>(p->underruns));
             Convert(*p, buffer, p->scratch.data());
-            SDL_PutAudioStreamData(stream, p->scratch.data(), static_cast<int>(bytes));
+            p->inLevel.Add(p->scratch.data(), p->scratch.size());
+            if (p->stereoDevice) {
+                // Both downmixes are measured, whichever is played, for the [audio] line.
+                Sdl71ToStereo(p->scratch.data(), p->sdlStereo.data(), p->frames);
+                Downmix71ToStereo(p->scratch.data(), p->stereo.data(), p->frames);
+                p->sdlLevel.Add(p->sdlStereo.data(), p->sdlStereo.size());
+                p->oursLevel.Add(p->stereo.data(), p->stereo.size());
+                if (p->downmix) {
+                    p->limiter.Process(p->stereo.data(), p->frames, static_cast<int>(p->rate));
+                    p->outLevel.Add(p->stereo.data(), p->stereo.size());
+                } else {
+                    p->outLevel.Add(p->sdlStereo.data(), p->sdlStereo.size());
+                }
+            }
+            ++p->windowOutputs;
+            SDL_PutAudioStreamData(stream, out.data(), static_cast<int>(bytes));
+            const auto now = std::chrono::steady_clock::now();
+            if (g_lastLevels == std::chrono::steady_clock::time_point{}) g_lastLevels = now;
+            else if (now - g_lastLevels >= kLevelsEvery) {
+                PrintLevels(std::chrono::duration<double>(now - g_lastLevels).count());
+                g_lastLevels = now;
+            }
         }
     }
     // Pace the caller: wait until the queue is back down to the latency target.
@@ -216,9 +314,22 @@ int PS4_SYSV_ABI sceAudioOutSetVolume(int32_t handle, uint32_t flag, const int32
     float loudest = 0.0f;
     for (int ch = 0; ch < 8; ++ch)
         if (flag & (1u << ch)) loudest = std::max(loudest, vol[ch] / kVolume0dB);
+    if (loudest != p->gain && p->volumeLogs < 20) {
+        ++p->volumeLogs;
+        std::fprintf(stderr, "[audio] port %d volume: flags 0x%x, gain %.3f (%.1f dB)\n", handle, flag, loudest,
+                     loudest > 0 ? 20.0 * std::log10(loudest) : -999.0);
+    }
     p->gain = loudest;
     SDL_SetAudioStreamGain(p->stream, loudest * MasterVolume());
     return kernel::SCE_OK;
+}
+
+int PortStreamChannels(int handle) {
+    std::lock_guard lock(g_mutex);
+    Port* p = GetPort(handle);
+    if (!p) return 0;
+    SDL_AudioSpec src{};
+    return SDL_GetAudioStreamFormat(p->stream, &src, nullptr) ? src.channels : 0;
 }
 
 }  // namespace hle::audio

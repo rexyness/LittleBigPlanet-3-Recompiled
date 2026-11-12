@@ -41,6 +41,7 @@ add_library(hle STATIC
     src/hle/hle.cpp
     src/hle/app_content.cpp
     src/hle/audioout.cpp
+    src/hle/audio_downmix.cpp
     src/hle/trophy.cpp
     src/hle/fiber.cpp
     src/hle/dialogs.cpp
@@ -128,7 +129,12 @@ add_executable(fgeval tests/fgeval.cpp)
 target_link_libraries(fgeval PRIVATE hle)
 target_include_directories(fgeval PRIVATE ${SHADPS4_EXT}/stb)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval)
+# Audio offline (ticket 16): the 7.1 -> stereo downmix and limiter against expected levels,
+# SDL's own matrix measured through a real SDL stream, and libSceAudioOut on SDL's dummy device.
+add_executable(audiotest tests/audiotest.cpp)
+target_link_libraries(audiotest PRIVATE hle)
+
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()
