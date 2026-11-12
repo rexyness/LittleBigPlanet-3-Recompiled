@@ -609,7 +609,8 @@ namespace fg {
 namespace {
 
 constexpr uint32_t kVelocityClear = 0x007f7f00u;
-constexpr vk::DeviceSize kSlot = vk::DeviceSize{1920} * 1088 * 4;  // one image, 4 bytes/texel
+// One image: 1920x1088 at 4 bytes/texel, or a 1024x1024 RGBA16F (the exposure diagnostics' shadow).
+constexpr vk::DeviceSize kSlot = vk::DeviceSize{2048} * 1024 * 4;
 enum Slot { kHudless = 0, kFinal = 1, kVelocity = 2, kDepth = 3, kSlots = 4 };
 
 struct Copy {
@@ -714,6 +715,13 @@ bool SceneMode() {
     return on;
 }
 uint64_t g_sceneAddr = 0;
+// With LBP3_FG_SHADOW=1 as well, the velocity slot holds the blurred shadow texture (the target
+// of ps 4750ad22, 1024x1024 RGBA16F) as the composite runs, instead of the pre-fill scene.
+bool ShadowMode() {
+    static const bool on = SceneMode() && std::getenv("LBP3_FG_SHADOW") != nullptr;
+    return on;
+}
+uint64_t g_shadowAddr = 0;
 
 // Records a GPU copy of the image into the frame's buffer slot (no wait).
 void RecordCopy(FrameRec& rec, Slot slot, uint64_t addr, bool depth, bool atFlip, const char* when = "") {
@@ -795,7 +803,8 @@ void WriteAll(std::string dir, std::vector<FrameRec>* frames) {
                        std::to_string(kSlot) + ",\n  \"frames\": [\n";
     static const char* normalNames[kSlots] = {"hudless", "final", "velocity", "depth"};
     static const char* sceneNames[kSlots] = {"hudless", "final", "scene_prefill", "scene_composite"};
-    const char* const* names = SceneMode() ? sceneNames : normalNames;
+    static const char* shadowNames[kSlots] = {"hudless", "final", "shadow", "scene_composite"};
+    const char* const* names = ShadowMode() ? shadowNames : SceneMode() ? sceneNames : normalNames;
     for (size_t k = 0; k < frames->size(); ++k) {
         FrameRec& rec = (*frames)[k];
         vmaInvalidateAllocation(g_instance->GetAllocator(), rec.allocation, 0, kSlot * kSlots);
@@ -866,6 +875,7 @@ void Init() {
         const auto& regs = g_liverpool->regs;
         const auto& cb0 = regs.color_buffers[0];
         const uint64_t rt0 = cb0 ? cb0.Address() : 0;
+        if (ps == 0x4750ad22ceaef404ull) g_shadowAddr = rt0;  // the shadow blur's target (exposure diagnostics)
         ++g_track.draws;
         const auto& db = regs.depth_buffer;
         if (rt0 && rt0 != g_track.velAddr && db.DepthValid() && regs.depth_control.depth_enable &&
@@ -885,6 +895,7 @@ void Init() {
             RecordCopy(rec, kHudless, rt0, false, false);
             if (SceneMode()) {  // the scene as the composite sampled it (its draw doesn't write it)
                 if (g_sceneAddr) RecordCopy(rec, kDepth, g_sceneAddr, false, false, "composite");
+                if (ShadowMode() && g_shadowAddr) RecordCopy(rec, kVelocity, g_shadowAddr, false, false, "composite");
                 return;
             }
             if (!rec.copies[kVelocity].ok) {  // no velocity clear yet this frame: it still holds this frame's
@@ -901,7 +912,8 @@ void Init() {
                 g_sceneAddr = dst;
                 if (g_phase == Phase::Capture && g_frameIndex < g_frames.size()) {
                     FrameRec& rec = g_frames[g_frameIndex];
-                    if (!rec.copies[kVelocity].ok) RecordCopy(rec, kVelocity, dst, false, false, "prefill");
+                    if (!rec.copies[kVelocity].ok && !ShadowMode())
+                        RecordCopy(rec, kVelocity, dst, false, false, "prefill");
                 }
             }
             return;
