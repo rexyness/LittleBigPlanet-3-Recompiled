@@ -609,7 +609,12 @@ namespace fg {
 namespace {
 
 constexpr uint32_t kVelocityClear = 0x007f7f00u;
-constexpr vk::DeviceSize kSlot = vk::DeviceSize{1920} * 1088 * 4;  // one image, 4 bytes/texel
+// One image, 4 bytes/texel: room for 1920x1088, or 2560x1440 when the game renders at 1440p
+// (LBP3_RES=1440, core/patches.cpp); a bigger image is skipped, never overflowed.
+const vk::DeviceSize kSlot = [] {
+    const char* res = std::getenv("LBP3_RES");
+    return res && std::strcmp(res, "1440") == 0 ? vk::DeviceSize{2560} * 1440 * 4 : vk::DeviceSize{1920} * 1088 * 4;
+}();
 enum Slot { kHudless = 0, kFinal = 1, kVelocity = 2, kDepth = 3, kSlots = 4 };
 
 struct Copy {

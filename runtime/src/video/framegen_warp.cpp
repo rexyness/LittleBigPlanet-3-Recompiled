@@ -545,7 +545,10 @@ private:
         if (!p_.useGameVectors || !in.motionVectors) return true;
         const uint8_t* mv = static_cast<const uint8_t*>(in.motionVectors);
         const int W = int(in.cur.width), H = int(in.cur.height);
-        const float sx = p_.vecScaleX * in.motionScale, sy = p_.vecScaleY * in.motionScale;
+        // The game's vectors are in screen fractions; vecScaleX/Y are pixels per step at
+        // 1920x1080, so other render sizes (LBP3_RES=1440) scale them by W/1920, H/1080.
+        const float sx = p_.vecScaleX * in.motionScale * (float(W) / 1920.0f),
+                    sy = p_.vecScaleY * in.motionScale * (float(H) / 1080.0f);
         uint64_t covered = 0, saturated = 0, total = 0;
         for (int l : {0, kLevels - 1}) {
             const int bw = (prevPyr_[l].w + kBlock - 1) / kBlock, bh = (prevPyr_[l].h + kBlock - 1) / kBlock;

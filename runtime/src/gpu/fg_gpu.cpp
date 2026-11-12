@@ -341,7 +341,9 @@ struct WarpGpu::Impl {
                 PC pc = Base();
                 SetLevel(pc, l);
                 pc.gOff = gvecOff[l];
-                const float sx = p.vecScaleX * f.motionScale, sy = p.vecScaleY * f.motionScale;
+                // Pixels per step at 1920x1080 (vecScaleX/Y), scaled to this render size.
+                const float sx = p.vecScaleX * f.motionScale * (float(W) / 1920.0f),
+                            sy = p.vecScaleY * f.motionScale * (float(H) / 1080.0f);
                 const int scale = 2 << l;
                 pc.a[0] = l;
                 pc.a[1] = FloatBits(sx / float(scale));
