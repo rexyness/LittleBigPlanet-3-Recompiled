@@ -260,12 +260,15 @@ int PS4_SYSV_ABI sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index,
                     // Pull the rendered image back for our window (on the GPU thread).
                     static std::vector<uint8_t> pixels;  // recycled through the presenter
                     uint32_t w = 0, h = 0;
+                    if (f.buffer < 16) gpu::fg::OnFlip(g_displayBuffers[f.buffer].address, static_cast<uint32_t>(f.buffer));
                     gpu::MaybeDumpRenderTargets();
                     const bool got =
                         f.buffer < 16 && gpu::ReadbackDisplayBuffer(g_displayBuffers[f.buffer], pixels, w, h);
                     // Show the frame on its slot, not whenever the GPU finished it:
                     // uneven hand-over times make a moving camera judder.
+                    if (got) gpu::fg::OnFinal(pixels, w, h, g_displayBuffers[f.buffer].pixelFormat);
                     WaitFlipSlot();
+                    gpu::fg::OnShown();
                     if (got) {
                         if (video::framegen::Enabled()) {
                             // Frame generation: the same hand-over point and cost (a buffer swap);
@@ -332,6 +335,7 @@ int PS4_SYSV_ABI sceVideoOutRegisterBuffers(int32_t handle, int32_t start, void*
         if (start + i < 16)
             g_displayBuffers[start + i] = {reinterpret_cast<uint64_t>(addresses[i]), attr->width, attr->height,
                                            attr->pitchInPixel, attr->pixelFormat, attr->tilingMode};
+        gpu::fg::SetDisplayBuffer(start + i, reinterpret_cast<uint64_t>(addresses[i]));
     }
     return start;  // the buffer set index
 }
@@ -594,6 +598,16 @@ int PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void* const* 
     (void)noted;
     TraceSimSteps();
     const int simSteps = FrameGenSimSteps();
+    if (gpu::fg::Enabled()) {  // LBP3_FG_DUMP: counters and the main view (camera now +0x20, before +0x160)
+        if (uint8_t* base = core::EbootBase()) {
+            using Counter = int(PS4_SYSV_ABI*)();
+            const int sim = reinterpret_cast<Counter>(base + 0x7c79e0)();
+            const int game = reinterpret_cast<Counter>(base + 0x7c79f0)();
+            uint64_t view = 0;
+            std::memcpy(&view, base + 0x13a2a60, sizeof(view));  // DAT_013a2a60 (ClearMotionBlur__)
+            gpu::fg::NoteSubmit(sim, game, displayBufferIndex, view > 0x100000 && view < (uint64_t{1} << 47) ? reinterpret_cast<const uint8_t*>(view) : nullptr);
+        }
+    }
     if (count && gpu::Active()) {
         const uint64_t splitFrame = gpu::split::BeginFrame();  // LBP3_FRAME_SPLIT measurement
         if (splitFrame) {

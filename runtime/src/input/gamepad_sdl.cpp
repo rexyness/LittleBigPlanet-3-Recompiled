@@ -6,6 +6,7 @@
 #include "input/actions.h"
 #include "input/game_state.h"
 #include "video/presenter.h"
+#include "gpu/renderer.h"
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -313,6 +314,12 @@ void Parse(const std::string& line) {
         uint64_t ms = 150;
         in >> name >> ms;
         if (!actions::HoldForTest(name, ms)) std::fprintf(stderr, "[remote] unknown action '%s'\n", name.c_str());
+        return;
+    }
+    if (word == "fgdump") {  // "fgdump <set>": frame-generation input capture (LBP3_FG_DUMP)
+        std::string set;
+        in >> set;
+        gpu::fg::Request(set);
         return;
     }
     if (word == "frames") {  // "frames N": record the next N presented frames

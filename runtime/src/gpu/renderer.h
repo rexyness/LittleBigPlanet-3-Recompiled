@@ -3,6 +3,7 @@
 #pragma once
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <vector>
 
 namespace gpu {
@@ -69,6 +70,20 @@ struct DisplayBufferDesc {
 void MaybeDumpRenderTargets();
 // F9 hotkey: trace the next frame and dump its render targets.
 void RequestTargetDump();
+
+// LBP3_FG_DUMP=<n> (exp/fg-capture): frame-generation input capture, copies only. The remote
+// command "fgdump <set>" traces the next frame and captures the n after it into
+// analysis/fg_dump/<set>/ (hudless, final, velocity, depth, per-flip counters).
+namespace fg {
+void Init();
+bool Enabled();
+void SetDisplayBuffer(int index, uint64_t address);
+void Request(const std::string& set);
+void NoteSubmit(int sim, int game, uint32_t displayIndex, const uint8_t* view);  // view: 0x200 bytes or null
+void OnFlip(uint64_t displayAddress, uint32_t buffer);
+void OnFinal(const std::vector<uint8_t>& pixels, uint32_t w, uint32_t h, uint32_t fmt);
+void OnShown();
+}  // namespace fg
 
 bool ReadbackDisplayBuffer(const DisplayBufferDesc& desc, std::vector<uint8_t>& out, uint32_t& width,
                            uint32_t& height);
