@@ -706,6 +706,15 @@ VideoCore::Image* FindByRole(uint64_t addr, bool depth) {
     return best;
 }
 
+// LBP3 exposure diagnostics (issues/17-exposure.md), LBP3_FG_SCENE=1 with LBP3_FG_DUMP: the
+// velocity and depth slots instead hold the scene buffer (the target of the alpha-only masked
+// fill, mask ff000000) just before that fill and as the final composite samples it.
+bool SceneMode() {
+    static const bool on = std::getenv("LBP3_FG_SCENE") != nullptr;
+    return on;
+}
+uint64_t g_sceneAddr = 0;
+
 // Records a GPU copy of the image into the frame's buffer slot (no wait).
 void RecordCopy(FrameRec& rec, Slot slot, uint64_t addr, bool depth, bool atFlip, const char* when = "") {
     Copy& c = rec.copies[slot];
@@ -784,7 +793,9 @@ void WriteAll(std::string dir, std::vector<FrameRec>* frames) {
     QueryPerformanceFrequency(&freq);
     std::string json = "{\n  \"qpc_hz\": " + std::to_string(freq.QuadPart) + ",\n  \"slot_bytes\": " +
                        std::to_string(kSlot) + ",\n  \"frames\": [\n";
-    static const char* names[kSlots] = {"hudless", "final", "velocity", "depth"};
+    static const char* normalNames[kSlots] = {"hudless", "final", "velocity", "depth"};
+    static const char* sceneNames[kSlots] = {"hudless", "final", "scene_prefill", "scene_composite"};
+    const char* const* names = SceneMode() ? sceneNames : normalNames;
     for (size_t k = 0; k < frames->size(); ++k) {
         FrameRec& rec = (*frames)[k];
         vmaInvalidateAllocation(g_instance->GetAllocator(), rec.allocation, 0, kSlot * kSlots);
@@ -872,6 +883,10 @@ void Init() {
         if (g_phase == Phase::Capture && g_frameIndex < g_frames.size()) {
             FrameRec& rec = g_frames[g_frameIndex];
             RecordCopy(rec, kHudless, rt0, false, false);
+            if (SceneMode()) {  // the scene as the composite sampled it (its draw doesn't write it)
+                if (g_sceneAddr) RecordCopy(rec, kDepth, g_sceneAddr, false, false, "composite");
+                return;
+            }
             if (!rec.copies[kVelocity].ok) {  // no velocity clear yet this frame: it still holds this frame's
                 const uint64_t vel = g_track.velAddr ? g_track.velAddr : g_lastVelAddr;
                 RecordCopy(rec, kVelocity, vel, false, false, "composite");
@@ -880,8 +895,17 @@ void Init() {
         }
     };
     Vulkan::g_lbp3FgOnFill = [](uint64_t dst, uint64_t bytes, uint32_t value, uint32_t mask, bool full) {
-        (void)mask;
         (void)full;
+        if (SceneMode()) {
+            if (mask == 0xff000000u && value == 0 && bytes >= uint64_t{1920} * 1080 * 4) {
+                g_sceneAddr = dst;
+                if (g_phase == Phase::Capture && g_frameIndex < g_frames.size()) {
+                    FrameRec& rec = g_frames[g_frameIndex];
+                    if (!rec.copies[kVelocity].ok) RecordCopy(rec, kVelocity, dst, false, false, "prefill");
+                }
+            }
+            return;
+        }
         if (value == kVelocityClear && bytes >= uint64_t{1920} * 1080 * 4) {
             // The game clears the velocity target after its motion blur has used it (Needlepoint
             // trace: velocity pass, motion blur, then this fill before the composite), so the
