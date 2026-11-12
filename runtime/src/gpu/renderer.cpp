@@ -11,7 +11,9 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <deque>
 #include <mutex>
+#include <thread>
 #include <span>
 #include <string>
 #include <vector>
@@ -111,6 +113,7 @@ bool Init() {
         for (auto [addr, size] : g_pendingMaps) RegisterWithRasterizer(addr, size);
         g_pendingMaps.clear();
     }
+    fg::Init();  // LBP3_FG_DUMP (exp/fg-capture)
     // LBP3's photos and icons: the texture cache writes the capture targets back for the CPU
     // while the game has a capture job queued, the byte its job runner (eboot 0x401a50) tests:
     // "lea r14, [rip + 0xf2bc38]; cmp byte ptr [r14], 0" at 0x401a5a, i.e. eboot+0x132d699.
@@ -577,6 +580,472 @@ void DumpImage(VideoCore::Image& image, const char* base) {
     }
     std::fflush(stderr);
 }
+
+// ---- LBP3_FG_DUMP=<n>: frame-generation input capture (exp/fg-capture) ----
+// Copies only: GPU-side copies of the game's images into our own buffers (no writes into
+// the game's images, no texture-cache dirty flags touched), read back after the flip's own
+// Finish. On the remote command "fgdump <set>", the next frame is draw-traced and the n
+// frames after it are captured, by role:
+//   hudless  - the display buffer right after the first draw into it in the frame (the final
+//              composite; the screen HUD comes after it)
+//   final    - what is flipped (the readback's own copy)
+//   velocity - the 1920x1080 RGBA8 target the game clears with a masked fill of 007f7f00
+//   depth    - the 1920x1080 depth with the most depth-tested draws so far in the frame,
+//              not counting draws into the velocity target
+// plus per flip: sim/game counters at submit, submit/irq/shown times and the main view's
+// first 0x200 bytes (current camera +0x20, previous +0x160). Written to
+// analysis\fg_dump\<set>\ after the last frame, by a writer thread. Without a capture, a
+// "[fg]" line every 30 flips says what the hooks found (composite, velocity, depth).
+namespace fg {
+namespace {
+
+constexpr uint32_t kVelocityClear = 0x007f7f00u;
+constexpr vk::DeviceSize kSlot = vk::DeviceSize{1920} * 1088 * 4;  // one image, 4 bytes/texel
+enum Slot { kHudless = 0, kFinal = 1, kVelocity = 2, kDepth = 3, kSlots = 4 };
+
+struct Copy {
+    uint64_t addr = 0;
+    uint32_t w = 0, h = 0, fmt = 0, bpp = 0;
+    bool ok = false;
+    bool atFlip = false;  // taken at the flip, not at the composite (no composite this frame)
+    const char* when = "";  // velocity/depth: "fill" (just before the 007f7f00 clear), "composite", "flip"
+    uint64_t imageTick = 0;
+};
+
+struct SubmitInfo {
+    int sim = 0, game = 0;
+    uint32_t displayIndex = 0;
+    uint64_t qpc = 0;
+    bool viewOk = false;
+    std::array<uint8_t, 0x200> view{};
+};
+
+struct FrameRec {
+    Copy copies[kSlots];
+    SubmitInfo submit;
+    bool haveSubmit = false;
+    uint64_t irqQpc = 0, shownQpc = 0;
+    uint32_t draws = 0, displayDraws = 0, drawsBeforeComposite = 0, flipBuffer = 0;
+    uint64_t compositeVs = 0, compositePs = 0;
+    uint32_t compositeN = 0;
+    std::vector<uint64_t> displayPs;  // pixel shaders of the draws into the display buffer
+    uint64_t velAddr = 0;
+    bool velFromFill = false;
+    std::vector<std::pair<uint64_t, uint32_t>> zTop;  // depth address, depth-tested draws
+    // GPU buffer this frame's copies go into.
+    vk::Buffer buffer{};
+    VmaAllocation allocation{};
+    void* mapped = nullptr;
+};
+
+// Per-frame tracking (GPU thread).
+struct Tracking {
+    uint32_t draws = 0, displayDraws = 0;
+    bool compositeSeen = false;
+    uint64_t compositePs = 0, compositeVs = 0;
+    uint32_t compositeN = 0, drawsBeforeComposite = 0;
+    std::vector<uint64_t> displayPs;
+    uint64_t velAddr = 0;
+    bool velFromFill = false;
+    std::map<uint64_t, uint32_t> zCount;
+} g_track;
+
+int g_n = -1;  // LBP3_FG_DUMP; -1 = off
+std::array<std::atomic<uint64_t>, 16> g_display{};
+std::atomic<bool> g_requested{false};
+std::mutex g_setMutex;
+std::string g_set = "set";
+std::mutex g_submitMutex;
+std::deque<SubmitInfo> g_submits;
+
+// Capture state (GPU thread).
+enum class Phase { Idle, Trace, Capture, Writing } g_phase = Phase::Idle;
+std::vector<FrameRec> g_frames;
+size_t g_frameIndex = 0;
+std::string g_dir;
+std::atomic<bool> g_writerDone{false};
+uint64_t g_lastVelAddr = 0;
+
+// Stats over 30 flips (no capture running).
+struct Stats {
+    uint32_t flips = 0, composite = 0, velFill = 0, displayDraws = 0;
+    std::map<uint64_t, uint32_t> compositePs, velAddr, zAddr;
+} g_stats;
+
+uint64_t Qpc() {
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return static_cast<uint64_t>(t.QuadPart);
+}
+
+bool IsDisplay(uint64_t addr) {
+    if (!addr) return false;
+    for (const auto& a : g_display)
+        if (a.load(std::memory_order_relaxed) == addr) return true;
+    return false;
+}
+
+// The newest image at addr with the wanted usage (several alias a pooled address).
+VideoCore::Image* FindByRole(uint64_t addr, bool depth) {
+    if (!addr || !g_rasterizer) return nullptr;
+    VideoCore::Image* best = nullptr;
+    g_rasterizer->GetTextureCache().ForEachImageWithAddress(addr, [&](VideoCore::ImageId, VideoCore::Image& image) {
+        if (depth ? !image.usage.depth_target : !image.usage.render_target) return;
+        if (image.info.size.width < 640 || image.info.size.height < 360) return;
+        if (!best || image.tick_accessed_last > best->tick_accessed_last) best = &image;
+    });
+    return best;
+}
+
+// Records a GPU copy of the image into the frame's buffer slot (no wait).
+void RecordCopy(FrameRec& rec, Slot slot, uint64_t addr, bool depth, bool atFlip, const char* when = "") {
+    Copy& c = rec.copies[slot];
+    c.addr = addr;
+    c.atFlip = atFlip;
+    c.when = when;
+    VideoCore::Image* image = FindByRole(addr, depth);
+    if (!image || !rec.buffer) return;
+    const vk::Format fmt = image->info.pixel_format;
+    const bool isDepth = fmt == vk::Format::eD32Sfloat || fmt == vk::Format::eD32SfloatS8Uint;
+    if (depth != isDepth) return;
+    const uint32_t bpp = isDepth ? 4 : FormatBytes(fmt);
+    const uint32_t w = image->info.size.width, h = image->info.size.height;
+    if (!bpp || vk::DeviceSize{w} * h * bpp > kSlot) return;
+    g_scheduler->EndRendering();
+    const auto cmd = g_scheduler->CommandBuffer();
+    VideoCore::Image::Barriers barriers;
+    image->GetBarriers(barriers, vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
+                       vk::PipelineStageFlagBits2::eTransfer);
+    if (!barriers.empty())
+        cmd.pipelineBarrier2(vk::DependencyInfo{.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size()),
+                                                .pImageMemoryBarriers = barriers.data()});
+    const auto aspect = isDepth ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlagBits::eColor;
+    const vk::BufferImageCopy region{.bufferOffset = kSlot * slot,
+                                     .imageSubresource = {aspect, 0, 0, 1},
+                                     .imageExtent = {w, h, 1}};
+    cmd.copyImageToBuffer(image->GetImage(), vk::ImageLayout::eTransferSrcOptimal, rec.buffer, region);
+    c.w = w;
+    c.h = h;
+    c.fmt = static_cast<uint32_t>(fmt);
+    c.bpp = bpp;
+    c.ok = true;
+    c.imageTick = image->tick_accessed_last;
+}
+
+uint64_t BestDepth() {
+    uint64_t best = 0;
+    uint32_t n = 0;
+    for (const auto& [addr, count] : g_track.zCount)
+        if (count > n) {
+            n = count;
+            best = addr;
+        }
+    return best;
+}
+
+bool AllocFrame(FrameRec& rec) {
+    const VkBufferCreateInfo info{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = kSlot * kSlots,
+                                  .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    const VmaAllocationCreateInfo alloc{.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+                                                 VMA_ALLOCATION_CREATE_MAPPED_BIT,
+                                        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST};
+    VkBuffer buf{};
+    VmaAllocationInfo out{};
+    if (vmaCreateBuffer(g_instance->GetAllocator(), &info, &alloc, &buf, &rec.allocation, &out) != VK_SUCCESS)
+        return false;
+    rec.buffer = buf;
+    rec.mapped = out.pMappedData;
+    return true;
+}
+
+void FreeFrames() {
+    for (auto& rec : g_frames)
+        if (rec.buffer) vmaDestroyBuffer(g_instance->GetAllocator(), rec.buffer, rec.allocation);
+    g_frames.clear();
+}
+
+std::string Hex(uint64_t v) {
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), "%llx", static_cast<unsigned long long>(v));
+    return buf;
+}
+
+void WriteAll(std::string dir, std::vector<FrameRec>* frames) {
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    std::string json = "{\n  \"qpc_hz\": " + std::to_string(freq.QuadPart) + ",\n  \"slot_bytes\": " +
+                       std::to_string(kSlot) + ",\n  \"frames\": [\n";
+    static const char* names[kSlots] = {"hudless", "final", "velocity", "depth"};
+    for (size_t k = 0; k < frames->size(); ++k) {
+        FrameRec& rec = (*frames)[k];
+        vmaInvalidateAllocation(g_instance->GetAllocator(), rec.allocation, 0, kSlot * kSlots);
+        const auto* base = static_cast<const uint8_t*>(rec.mapped);
+        json += "    {\"k\": " + std::to_string(k);
+        for (int s = 0; s < kSlots; ++s) {
+            const Copy& c = rec.copies[s];
+            json += ", \"" + std::string(names[s]) + "\": {\"ok\": " + (c.ok ? "true" : "false") + ", \"addr\": \"" +
+                    Hex(c.addr) + "\", \"w\": " + std::to_string(c.w) + ", \"h\": " + std::to_string(c.h) +
+                    ", \"fmt\": \"" + vk::to_string(static_cast<vk::Format>(c.fmt)) + "\", \"bpp\": " +
+                    std::to_string(c.bpp) + ", \"at_flip\": " + (c.atFlip ? "true" : "false") + ", \"when\": \"" +
+                    c.when + "\"}";
+            if (!c.ok) continue;
+            char name[64];
+            std::snprintf(name, sizeof(name), "\\f%03zu_%s.raw", k, names[s]);
+            if (FILE* f = std::fopen((dir + name).c_str(), "wb")) {
+                std::fwrite(base + kSlot * s, 1, size_t{c.w} * c.h * c.bpp, f);
+                std::fclose(f);
+            }
+        }
+        if (rec.submit.viewOk) {
+            char name[64];
+            std::snprintf(name, sizeof(name), "\\f%03zu_view.bin", k);
+            if (FILE* f = std::fopen((dir + name).c_str(), "wb")) {
+                std::fwrite(rec.submit.view.data(), 1, rec.submit.view.size(), f);
+                std::fclose(f);
+            }
+        }
+        json += ", \"sim\": " + std::to_string(rec.submit.sim) + ", \"game\": " + std::to_string(rec.submit.game) +
+                ", \"have_submit\": " + (rec.haveSubmit ? "true" : "false") +
+                ", \"submit_qpc\": " + std::to_string(rec.submit.qpc) + ", \"irq_qpc\": " + std::to_string(rec.irqQpc) +
+                ", \"shown_qpc\": " + std::to_string(rec.shownQpc) +
+                ", \"display_index\": " + std::to_string(rec.submit.displayIndex) +
+                ", \"flip_buffer\": " + std::to_string(rec.flipBuffer) + ", \"draws\": " + std::to_string(rec.draws) +
+                ", \"display_draws\": " + std::to_string(rec.displayDraws) +
+                ", \"draws_before_composite\": " + std::to_string(rec.drawsBeforeComposite) +
+                ", \"composite_vs\": \"" + Hex(rec.compositeVs) + "\", \"composite_ps\": \"" + Hex(rec.compositePs) +
+                "\", \"composite_n\": " + std::to_string(rec.compositeN) + ", \"display_ps\": [";
+        for (size_t i = 0; i < rec.displayPs.size(); ++i)
+            json += (i ? ", \"" : "\"") + Hex(rec.displayPs[i]) + "\"";
+        json += "], \"vel_addr\": \"" + Hex(rec.velAddr) + "\", \"vel_from_fill\": " +
+                (rec.velFromFill ? "true" : "false") + ", \"z_top\": [";
+        for (size_t i = 0; i < rec.zTop.size(); ++i)
+            json += (i ? ", [\"" : "[\"") + Hex(rec.zTop[i].first) + "\", " + std::to_string(rec.zTop[i].second) + "]";
+        json += "]}" + std::string(k + 1 < frames->size() ? ",\n" : "\n");
+    }
+    json += "  ]\n}\n";
+    if (FILE* f = std::fopen((dir + "\\manifest.json").c_str(), "wb")) {
+        std::fwrite(json.data(), 1, json.size(), f);
+        std::fclose(f);
+    }
+    std::fprintf(stderr, "[fg] wrote %zu frames to %s\n", frames->size(), dir.c_str());
+    std::fflush(stderr);
+    g_writerDone = true;
+}
+
+void ResetTracking() {
+    g_track = Tracking{};
+}
+
+}  // namespace
+
+void Init() {
+    const char* v = std::getenv("LBP3_FG_DUMP");
+    if (!v) return;
+    g_n = std::clamp(std::atoi(v), 1, 120);
+    Vulkan::g_lbp3FgAfterDraw = [](uint64_t vs, uint64_t ps, uint32_t n) {
+        const auto& regs = g_liverpool->regs;
+        const auto& cb0 = regs.color_buffers[0];
+        const uint64_t rt0 = cb0 ? cb0.Address() : 0;
+        ++g_track.draws;
+        const auto& db = regs.depth_buffer;
+        if (rt0 && rt0 != g_track.velAddr && db.DepthValid() && regs.depth_control.depth_enable &&
+            db.Pitch() >= 1920 && db.Height() >= 1080)
+            ++g_track.zCount[db.DepthAddress()];
+        if (!IsDisplay(rt0)) return;
+        ++g_track.displayDraws;
+        if (g_track.displayPs.size() < 24) g_track.displayPs.push_back(ps);
+        if (g_track.compositeSeen || ps == 0) return;  // the composite: the first one with a pixel shader
+        g_track.compositeSeen = true;
+        g_track.compositePs = ps;
+        g_track.compositeVs = vs;
+        g_track.compositeN = n;
+        g_track.drawsBeforeComposite = g_track.draws - 1;
+        if (g_phase == Phase::Capture && g_frameIndex < g_frames.size()) {
+            FrameRec& rec = g_frames[g_frameIndex];
+            RecordCopy(rec, kHudless, rt0, false, false);
+            if (!rec.copies[kVelocity].ok) {  // no velocity clear yet this frame: it still holds this frame's
+                const uint64_t vel = g_track.velAddr ? g_track.velAddr : g_lastVelAddr;
+                RecordCopy(rec, kVelocity, vel, false, false, "composite");
+                RecordCopy(rec, kDepth, BestDepth(), true, false, "composite");
+            }
+        }
+    };
+    Vulkan::g_lbp3FgOnFill = [](uint64_t dst, uint64_t bytes, uint32_t value, uint32_t mask, bool full) {
+        (void)mask;
+        (void)full;
+        if (value == kVelocityClear && bytes >= uint64_t{1920} * 1080 * 4) {
+            // The game clears the velocity target after its motion blur has used it (Needlepoint
+            // trace: velocity pass, motion blur, then this fill before the composite), so the
+            // frame's vectors are copied just before the clear.
+            if (g_phase == Phase::Capture && g_frameIndex < g_frames.size()) {
+                FrameRec& rec = g_frames[g_frameIndex];
+                if (!rec.copies[kVelocity].ok) {
+                    RecordCopy(rec, kVelocity, dst, false, false, "fill");
+                    RecordCopy(rec, kDepth, BestDepth(), true, false, "fill");
+                }
+            }
+            g_track.velAddr = dst;
+            g_track.velFromFill = true;
+            g_lastVelAddr = dst;
+        }
+    };
+    std::fprintf(stderr, "[fg] capture armed: %d frames on the remote command \"fgdump <set>\"\n", g_n);
+}
+
+bool Enabled() { return g_n > 0; }
+
+void SetDisplayBuffer(int index, uint64_t address) {
+    if (index >= 0 && index < 16) g_display[index] = address;
+}
+
+void Request(const std::string& set) {
+    if (g_n <= 0) {
+        std::fprintf(stderr, "[fg] fgdump ignored: LBP3_FG_DUMP is not set\n");
+        return;
+    }
+    {
+        std::lock_guard lk(g_setMutex);
+        g_set = set.empty() ? "set" : set;
+    }
+    g_requested = true;
+}
+
+void NoteSubmit(int sim, int game, uint32_t displayIndex, const uint8_t* view) {
+    if (g_n <= 0) return;
+    SubmitInfo s;
+    s.sim = sim;
+    s.game = game;
+    s.displayIndex = displayIndex;
+    s.qpc = Qpc();
+    if (view) {
+        std::memcpy(s.view.data(), view, s.view.size());
+        s.viewOk = true;
+    }
+    std::lock_guard lk(g_submitMutex);
+    g_submits.push_back(s);
+    while (g_submits.size() > 8) g_submits.pop_front();
+}
+
+// At the flip interrupt, before the readback (whose Finish completes this frame's copies).
+void OnFlip(uint64_t displayAddress, uint32_t buffer) {
+    if (g_n <= 0) return;
+    SubmitInfo submit;
+    bool haveSubmit = false;
+    {
+        std::lock_guard lk(g_submitMutex);
+        if (!g_submits.empty()) {
+            submit = g_submits.front();
+            g_submits.pop_front();
+            haveSubmit = true;
+        }
+    }
+    if (g_phase == Phase::Capture && g_frameIndex < g_frames.size()) {
+        FrameRec& rec = g_frames[g_frameIndex];
+        rec.submit = submit;
+        rec.haveSubmit = haveSubmit;
+        rec.irqQpc = Qpc();
+        rec.flipBuffer = buffer;
+        rec.draws = g_track.draws;
+        rec.displayDraws = g_track.displayDraws;
+        rec.drawsBeforeComposite = g_track.drawsBeforeComposite;
+        rec.compositeVs = g_track.compositeVs;
+        rec.compositePs = g_track.compositePs;
+        rec.compositeN = g_track.compositeN;
+        rec.displayPs = g_track.displayPs;
+        rec.velAddr = g_track.velAddr ? g_track.velAddr : g_lastVelAddr;
+        rec.velFromFill = g_track.velFromFill;
+        for (const auto& kv : g_track.zCount) rec.zTop.push_back(kv);
+        std::sort(rec.zTop.begin(), rec.zTop.end(), [](auto& a, auto& b) { return a.second > b.second; });
+        if (rec.zTop.size() > 4) rec.zTop.resize(4);
+        if (!rec.copies[kVelocity].ok) RecordCopy(rec, kVelocity, rec.velAddr, false, true, "flip");
+        if (!rec.copies[kDepth].ok) RecordCopy(rec, kDepth, BestDepth(), true, true, "flip");
+        rec.copies[kFinal].addr = displayAddress;
+    } else if (g_phase == Phase::Idle) {
+        ++g_stats.flips;
+        g_stats.composite += g_track.compositeSeen;
+        g_stats.velFill += g_track.velFromFill;
+        g_stats.displayDraws += g_track.displayDraws;
+        if (g_track.compositeSeen) ++g_stats.compositePs[g_track.compositePs];
+        if (g_track.velAddr) ++g_stats.velAddr[g_track.velAddr];
+        if (const uint64_t z = BestDepth()) ++g_stats.zAddr[z];
+        if (g_stats.flips >= 30) {
+            auto top = [](const std::map<uint64_t, uint32_t>& m) {
+                std::string s;
+                std::vector<std::pair<uint64_t, uint32_t>> v(m.begin(), m.end());
+                std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });
+                for (size_t i = 0; i < v.size() && i < 3; ++i) s += " " + Hex(v[i].first) + "x" + std::to_string(v[i].second);
+                return s.empty() ? std::string(" -") : s;
+            };
+            std::fprintf(stderr, "[fg] 30 flips: composite %u (ps%s), display draws %.1f/flip, velocity fill %u (at%s), depth%s\n",
+                         g_stats.composite, top(g_stats.compositePs).c_str(), g_stats.displayDraws / 30.0,
+                         g_stats.velFill, top(g_stats.velAddr).c_str(), top(g_stats.zAddr).c_str());
+            g_stats = Stats{};
+        }
+    }
+}
+
+// After the readback: the flipped image's bytes (the final colour).
+void OnFinal(const std::vector<uint8_t>& pixels, uint32_t w, uint32_t h, uint32_t fmt) {
+    if (g_n <= 0 || g_phase != Phase::Capture || g_frameIndex >= g_frames.size()) return;
+    FrameRec& rec = g_frames[g_frameIndex];
+    Copy& c = rec.copies[kFinal];
+    const vk::DeviceSize bytes = vk::DeviceSize{w} * h * 4;
+    if (rec.mapped && bytes <= kSlot && pixels.size() >= bytes) {
+        std::memcpy(static_cast<uint8_t*>(rec.mapped) + kSlot * kFinal, pixels.data(), bytes);
+        c.w = w;
+        c.h = h;
+        c.fmt = fmt;
+        c.bpp = 4;
+        c.ok = true;
+    }
+}
+
+// After the frame is shown (its slot): close the frame, move the phase on.
+void OnShown() {
+    if (g_n <= 0) return;
+    if (g_phase == Phase::Capture && g_frameIndex < g_frames.size()) {
+        g_frames[g_frameIndex].shownQpc = Qpc();
+        if (++g_frameIndex == g_frames.size()) {
+            g_phase = Phase::Writing;
+            g_writerDone = false;
+            std::thread(WriteAll, g_dir, &g_frames).detach();
+        }
+    } else if (g_phase == Phase::Trace) {
+        Vulkan::g_lbp3TraceDraws = false;
+        std::fprintf(stderr, "[draw] ---- fg trace frame ends ----\n");
+        g_phase = Phase::Capture;
+    } else if (g_phase == Phase::Writing && g_writerDone) {
+        FreeFrames();
+        g_phase = Phase::Idle;
+    }
+    if (g_phase == Phase::Idle && g_requested.exchange(false)) {
+        std::string set;
+        {
+            std::lock_guard lk(g_setMutex);
+            set = g_set;
+        }
+        CreateDirectoryA("analysis\\fg_dump", nullptr);
+        g_dir = "analysis\\fg_dump\\" + set;
+        CreateDirectoryA(g_dir.c_str(), nullptr);
+        g_frames.assign(static_cast<size_t>(g_n), FrameRec{});
+        bool ok = true;
+        for (auto& rec : g_frames) ok = ok && AllocFrame(rec);
+        if (!ok) {
+            std::fprintf(stderr, "[fg] could not allocate %d capture buffers\n", g_n);
+            FreeFrames();
+        } else {
+            g_frameIndex = 0;
+            g_phase = Phase::Trace;
+            std::fprintf(stderr, "[fg] capture '%s': tracing the next frame, then %d frames\n", set.c_str(), g_n);
+            std::fprintf(stderr, "[draw] ---- fg trace frame begins ----\n");
+            Vulkan::g_lbp3TraceIndex = 0;
+            Vulkan::g_lbp3TraceDraws = true;
+        }
+    }
+    ResetTracking();
+}
+
+}  // namespace fg
 
 // Waits for the GPU to finish what was submitted, or to block on a WAIT_REG_MEM: the
 // game may satisfy that only after its submit call returns, as on the console, where
