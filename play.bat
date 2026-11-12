@@ -11,6 +11,10 @@ set FRAMEGEN=1
 rem Render resolution: 1440 = the game draws at 2560x1440 (patched; the PS4 version draws
 rem 1920x1080), 1080 = the original 1920x1080, stretched to the window.
 set RES=1440
+rem LBP1/LBP2 items (the old "My Unlocks", whose servers are gone): 1 = run the game's own
+rem import once, the first time the start menu opens; wait for "successfully imported",
+rem don't press Circle. Already-imported profiles gain nothing. Back up your saves first.
+set MY_UNLOCKS=0
 rem ---------------------------------------------------------------------------
 
 cd /d "%~dp0"
@@ -37,6 +41,7 @@ if "%RES%"=="1440" (
     set LBP3_RES=1440
     set LBP3_RES_SHADERS=1
 )
+if "%MY_UNLOCKS%"=="1" set LBP3_MY_UNLOCKS=lbp1,lbp2
 echo Starting LittleBigPlanet 3... close the game window to quit.
 if not exist analysis mkdir analysis
 rem Every session's log is also kept for good in analysis\play_logs\, named by its last write.
