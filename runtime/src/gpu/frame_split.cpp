@@ -55,6 +55,9 @@
 //                     (the counters above cover this window, not only ff_record_us)
 //   ff_bufs_at_flip   buffers handed over when the flip interrupt came; less than flip_buffers
 //                     means the flip was signalled before the frame's last buffer was recorded
+//   ff_memcpy_*       guest memory -> staging copies (CopySparseMemory) inside buffer sync and
+//                     image refresh
+//   ff_page_faults    the whole process's page faults over the window (GetProcessMemoryInfo)
 // LBP3_FIRST_FRAME=1 turns all of this on (and the GPU timestamps); LBP3_FRAME_SPLIT=1 alone
 // gives the CPU counters. A frame whose ff_record_us exceeds 50 ms also prints a one-line
 // "[first-frame] ..." breakdown to stderr.
@@ -71,6 +74,15 @@
 #include <mutex>
 
 #include "gpu/renderer.h"
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <psapi.h>
 
 namespace gpu::split {
 namespace {
@@ -136,7 +148,16 @@ constexpr FfColumn kFfColumns[] = {
     {"ff_gpu_detile_us", 18, US}, {"ff_gpu_overflow", 19, N},
     {"ff_img_free_n", 20, N},     {"ff_img_free_us", 20, US},     {"ff_vma_free_n", 21, N},
     {"ff_vma_free_kb", 21, KB},   {"ff_gpu_imgcopy_n", 22, N},    {"ff_gpu_imgcopy_us", 22, US},
+    {"ff_memcpy_n", 23, N},       {"ff_memcpy_us", 23, US},       {"ff_memcpy_kb", 23, KB},
 };
+
+// The counters plus the process's page-fault count (a snapshot for the whole-frame columns).
+PerfCounters Snap() {
+    PerfCounters c = ReadPerfCounters();
+    PROCESS_MEMORY_COUNTERS pmc{};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) c.pageFaults = pmc.PageFaultCount;
+    return c;
+}
 
 uint64_t FfValue(const PerfCounters& a, const PerfCounters& b, int kind, Field f) {
     switch (f) {
@@ -163,7 +184,7 @@ bool Open() {
                      "period_us,pipelines,pipeline_us,shaders,shader_us,flip_buffers,flip_dwords,"
                      "first_to_last_enq_us,pre_submits,pre_buffers,pre_dwords,pre_submit_us,ff_record_us");
         for (const FfColumn& c : kFfColumns) std::fprintf(g_csv, ",%s", c.name);
-        std::fprintf(g_csv, ",ff_window_us,ff_bufs_at_flip\n");
+        std::fprintf(g_csv, ",ff_window_us,ff_bufs_at_flip,ff_page_faults\n");
         std::fprintf(stderr, "[split] writing analysis\\frame_split.csv (LBP3_FRAME_SPLIT / LBP3_FIRST_FRAME)\n");
         return true;
     }();
@@ -219,7 +240,8 @@ void WriteRow(uint64_t frame, Slot& s) {
     std::fprintf(g_csv, ",%lld", static_cast<long long>(ffRecordUs));
     for (const FfColumn& c : kFfColumns)
         std::fprintf(g_csv, ",%llu", static_cast<unsigned long long>(FfValue(from, to, c.kind, c.field)));
-    std::fprintf(g_csv, ",%lld,%u\n", static_cast<long long>(windowUs), bufsAtFlip);
+    const unsigned long long pageFaults = to.pageFaults - from.pageFaults;
+    std::fprintf(g_csv, ",%lld,%u,%llu\n", static_cast<long long>(windowUs), bufsAtFlip, pageFaults);
     const bool earlyFlip = bufsAtFlip < flipBufs;
     if (ffRecordUs > kFirstFrameLogUs || (earlyFlip && windowUs > kFirstFrameLogUs)) {
         auto v = [&](int kind, Field f) { return static_cast<unsigned long long>(FfValue(from, to, kind, f)); };
@@ -231,7 +253,8 @@ void WriteRow(uint64_t frame, Slot& s) {
                      "%llu KB | detile %llu x %.1f ms | expand %llu x %.1f ms | bind %.1f ms, descriptors %.1f ms | "
                      "GPU copy %llu x %.1f ms, upload %llu x %.1f ms, detile %llu x %.1f ms (overflow %llu) | "
                      "image free %llu x %.1f ms | VMA free %llu x %llu KB | GPU image copy %llu x %.1f ms | "
-                     "window %.1f ms, flip after %u of %u buffers\n",
+                     "window %.1f ms, flip after %u of %u buffers | memcpy %llu x %.1f ms %llu KB | "
+                     "page faults %llu\n",
                      static_cast<unsigned long long>(frame), ffRecordUs / 1000.0, s.flipBufs.load(),
                      Span(s, FinishBegin, FinishEnd) / 1000.0, v(14, N), v(15, N), v(0, N), v(0, US) / 1000.0,
                      v(0, KB), v(1, US) / 1000.0, v(2, N), v(3, N), v(3, US) / 1000.0, v(3, KB), v(4, N), v(5, N),
@@ -240,7 +263,7 @@ void WriteRow(uint64_t frame, Slot& s) {
                      v(11, US) / 1000.0, v(12, US) / 1000.0, v(13, US) / 1000.0, v(16, N), v(16, US) / 1000.0,
                      v(17, N), v(17, US) / 1000.0, v(18, N), v(18, US) / 1000.0, v(19, N), v(20, N),
                      v(20, US) / 1000.0, v(21, N), v(21, KB), v(22, N), v(22, US) / 1000.0, windowUs / 1000.0,
-                     bufsAtFlip, flipBufs);
+                     bufsAtFlip, flipBufs, v(23, N), v(23, US) / 1000.0, v(23, KB), pageFaults);
     }
     static unsigned rows = 0;
     if (++rows % 60 == 0) std::fflush(g_csv);
@@ -293,7 +316,7 @@ void Mark(Point p) {
     const int64_t now = NowUs();
     if (p == Enqueued && !s->firstEnq.load()) {
         s->firstEnq = now;
-        s->atFirst = ReadPerfCounters();
+        s->atFirst = Snap();
     }
     if (p == Enqueued) s->enqCount.fetch_add(1);
     if (p == FlipIrq) s->bufsAtFlip = s->enqCount.load();
@@ -301,13 +324,13 @@ void Mark(Point p) {
     switch (p) {
     case Enqueued: s->at0 = ReadPerfCounters(); break;
     case Flipped:
-        s->at1 = ReadPerfCounters();
+        s->at1 = Snap();
         s->periodUs = g_lastFlippedUs >= 0 ? now - g_lastFlippedUs : -1;
         g_lastFlippedUs = now;
         Complete(frame, *s, 2);
         break;
     case Released:
-        s->atRel = ReadPerfCounters();
+        s->atRel = Snap();
         g_lastReleasedUs = now;
         Complete(frame, *s, 1);
         break;
