@@ -140,7 +140,12 @@ target_link_libraries(audiotest PRIVATE hle)
 add_executable(addconttest tests/addconttest.cpp)
 target_link_libraries(addconttest PRIVATE hle)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest)
+# The shared shader cache for the 1440p rescale (perf/shared_cache.md): which shaders get a
+# salted cache identity (shadPS4 common/lbp3_res.h).
+add_executable(rescachetest tests/rescachetest.cpp)
+target_link_libraries(rescachetest PRIVATE hle)
+
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()
