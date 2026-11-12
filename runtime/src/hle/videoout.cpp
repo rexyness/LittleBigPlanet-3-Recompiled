@@ -29,6 +29,9 @@
 
 namespace VideoCore {
 extern std::atomic<uint32_t> g_lbp3ImageCreates, g_lbp3ImageExpands, g_lbp3ImageReadbacks;  // texture_cache.cpp
+extern std::atomic<uint32_t> g_lbp3Refreshes, g_lbp3RefreshesCpu, g_lbp3FillClears, g_lbp3PreSyncs,
+    g_lbp3PreSyncSkips;
+extern std::atomic<uint64_t> g_lbp3RefreshBytes, g_lbp3FillClearBytes, g_lbp3PreSyncBytes;
 }
 
 namespace hle::kernel {
@@ -157,6 +160,19 @@ void PrintPerfLine() {
     last = now;
     for (int s = 0; s < 3; ++s)
         for (int k = 0; k < 2; ++k) lastRel[s][k] = rel[s][k];
+    // Image refreshes and the game's render-target fills, per frame (perf/reuploads.md).
+    constexpr double kMB = 1024.0 * 1024.0 * kFlipsPerStatus;
+    std::fprintf(stderr,
+                 "[fills] per frame: %.1f refreshes (%.1f MB, %.1f CPU-dirty), %.1f cleared (%.1f MB), "
+                 "%.1f pre-syncs (%.1f MB), %.1f skipped\n",
+                 VideoCore::g_lbp3Refreshes.exchange(0) / double(kFlipsPerStatus),
+                 VideoCore::g_lbp3RefreshBytes.exchange(0) / kMB,
+                 VideoCore::g_lbp3RefreshesCpu.exchange(0) / double(kFlipsPerStatus),
+                 VideoCore::g_lbp3FillClears.exchange(0) / double(kFlipsPerStatus),
+                 VideoCore::g_lbp3FillClearBytes.exchange(0) / kMB,
+                 VideoCore::g_lbp3PreSyncs.exchange(0) / double(kFlipsPerStatus),
+                 VideoCore::g_lbp3PreSyncBytes.exchange(0) / kMB,
+                 VideoCore::g_lbp3PreSyncSkips.exchange(0) / double(kFlipsPerStatus));
     gpu::split::Flush();
 }
 
