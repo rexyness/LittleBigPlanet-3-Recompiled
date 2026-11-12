@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -62,7 +63,32 @@ struct Submission {
     RealInfo info;
 };
 
-std::mutex g_mutex;  // the submission queue and the stats
+std::mutex g_mutex;  // the submission queue, the stats and the stills request
+std::string g_stillName;
+int g_stillLeft = 0, g_stillIndex = 0;
+
+// Writes one stills triple (fgstill): N-1, the generated frame and N, as stored.
+void WriteStill(const std::string& name, int index, const HostFrame& prev, const std::vector<uint8_t>& gen,
+                const HostFrame& cur) {
+    std::error_code ec;
+    std::filesystem::create_directories("analysis/fg_stills", ec);
+    const size_t bytes = size_t(cur.width) * cur.height * 4;
+    const std::pair<const char*, const uint8_t*> parts[3] = {{"prev", prev.pixels}, {"gen", gen.data()}, {"cur", cur.pixels}};
+    for (const auto& [kind, px] : parts) {
+        char path[260];
+        std::snprintf(path, sizeof path, "analysis\\fg_stills\\%s_%02d_%s.raw", name.c_str(), index, kind);
+        if (FILE* f = std::fopen(path, "wb")) {
+            std::fwrite(px, 1, bytes, f);
+            std::fclose(f);
+        }
+    }
+    char path[260];
+    std::snprintf(path, sizeof path, "analysis\\fg_stills\\%s.txt", name.c_str());
+    if (FILE* f = std::fopen(path, "w")) {
+        std::fprintf(f, "%u %u %d\n", cur.width, cur.height, index + 1);
+        std::fclose(f);
+    }
+}
 std::condition_variable g_cv;
 std::deque<Submission> g_queue;
 Stats g_stats;
@@ -89,12 +115,15 @@ void Worker() {
         std::lock_guard lk(g_mutex);
         g_generatorName = gen->Name();
     }
-    std::fprintf(stderr, "[framegen] on: generator %s, delay %s, cut threshold %.1f\n", gen->Name(),
-                 delayOverride >= 0 ? std::to_string(delayOverride).c_str() : "one refresh + 4 ms", cutThreshold);
+    std::fprintf(stderr, "[framegen] on: generator %s, delay %s, cut threshold %.1f, camera jump %.0f\n", gen->Name(),
+                 delayOverride >= 0 ? std::to_string(delayOverride).c_str()
+                                    : ("one refresh + " + std::to_string(gen->MarginMs()) + " ms").c_str(),
+                 cutThreshold, camJumpThreshold);
 
     std::vector<uint8_t> prev;  // the last real frame (a copy: its own buffer goes to the presenter)
     uint32_t prevW = 0, prevH = 0;
     int64_t prevSlot = 0;
+    double prevCamJump = -1;
     bool havePrev = false;
     for (;;) {
         Submission s;
@@ -106,7 +135,7 @@ void Worker() {
         }
         const double hz = RefreshHz();
         const int64_t refreshNs = hz > 0 ? static_cast<int64_t>(1e9 / hz) : 16'666'667;
-        const int64_t delayNs = DelayNs(hz, delayOverride);
+        const int64_t delayNs = DelayNs(hz, delayOverride, gen->MarginMs());
         const int64_t genDue = s.info.slotNs + delayNs;
         const int64_t realDue = genDue + s.info.periodNs / 2;
 
@@ -120,6 +149,8 @@ void Worker() {
         d.simSteps = s.info.simSteps;
         d.cutThreshold = cutThreshold;
         d.camJump = s.info.camJump;
+        d.prevCamJump = prevCamJump;
+        prevCamJump = s.info.camJump;
         d.camJumpThreshold = camJumpThreshold;
         if (d.sameSize) {
             d.cutDiff = MeanAbsDiff(old, cur);
@@ -129,6 +160,8 @@ void Worker() {
             ++g_stats.diffCount;
         }
         Drop drop = Decide(d);
+        if (drop == Drop::Cut && d.camJumpThreshold > 0 && d.camJump > d.camJumpThreshold)
+            std::fprintf(stderr, "[framegen] cut: the camera jumped %.0f (%.0f the frame before)\n", d.camJump, d.prevCamJump);
         if (drop == Drop::None) {
             TimedFrame g;
             g.pixels = TakeBuffer();
@@ -156,10 +189,25 @@ void Worker() {
                 g.slotNs = s.info.slotNs;
                 g.queuedNs = t1;
                 g.kind = 'G';
+                std::vector<uint8_t> still;
+                std::string stillName;
+                int stillIndex = 0;
+                {
+                    std::lock_guard lk(g_mutex);
+                    if (g_stillLeft > 0) {
+                        --g_stillLeft;
+                        stillName = g_stillName;
+                        stillIndex = g_stillIndex++;
+                        still = g.pixels;
+                    }
+                }
                 PresentTimed(g);
-                std::lock_guard lk(g_mutex);
-                ++g_stats.generated;
-                g_stats.genLateShown += t1 > genDue - refreshNs;  // shown, but a refresh late
+                {
+                    std::lock_guard lk(g_mutex);
+                    ++g_stats.generated;
+                    g_stats.genLateShown += t1 > genDue - refreshNs;  // shown, but a refresh late
+                }
+                if (!stillName.empty()) WriteStill(stillName, stillIndex, old, still, cur);
             }
             ReturnBuffer(std::move(g.pixels));
         }
@@ -243,14 +291,15 @@ void PrintStatus() {
                  (unsigned long long)shownGen, (unsigned long long)skipped);
     if (s.gpuN || s.gpuMissing)
         std::fprintf(stderr,
-                     "[framegen] gpu: %llu fetched, %llu without GPU work, %llu declined; gpu %.2f ms avg, %.2f max; "
-                     "wait %.2f ms avg, %.2f max\n",
-                     (unsigned long long)s.gpuN, (unsigned long long)s.gpuMissing, (unsigned long long)s.gpuDeclined,
+                     "[framegen] gpu: %llu fetched (%llu with HUD-less images, %llu with the game's vectors), %llu without "
+                     "GPU work, %llu declined; gpu %.2f ms avg, %.2f max; wait %.2f ms avg, %.2f max\n",
+                     (unsigned long long)s.gpuN, (unsigned long long)s.gpuHud, (unsigned long long)s.gpuVec,
+                     (unsigned long long)s.gpuMissing, (unsigned long long)s.gpuDeclined,
                      s.gpuN ? s.gpuMsSum / double(s.gpuN) : 0.0, s.gpuMsMax, s.gpuN ? s.gpuWaitSum / double(s.gpuN) : 0.0,
                      s.gpuWaitMax);
 }
 
-void NoteGpu(bool fetched, double gpuMs, double waitMs, bool declined) {
+void NoteGpu(bool fetched, double gpuMs, double waitMs, bool declined, bool usedHudless, bool usedVectors) {
     std::lock_guard lk(g_mutex);
     if (!fetched) {
         ++g_stats.gpuMissing;
@@ -258,6 +307,8 @@ void NoteGpu(bool fetched, double gpuMs, double waitMs, bool declined) {
     }
     ++g_stats.gpuN;
     g_stats.gpuDeclined += declined;
+    g_stats.gpuHud += usedHudless;
+    g_stats.gpuVec += usedVectors;
     if (gpuMs >= 0) {
         g_stats.gpuMsSum += gpuMs;
         g_stats.gpuMsMax = std::max(g_stats.gpuMsMax, gpuMs);
@@ -302,7 +353,8 @@ Drop Decide(const DecideIn& in) {
     if (in.sinceLastSlotNs > in.periodNs + in.periodNs / 2 || in.sinceLastSlotNs < in.periodNs / 2) return Drop::Late;
     if (in.simSteps >= 0 && in.simSteps != 1) return Drop::Steps;
     if (in.cutDiff > in.cutThreshold) return Drop::Cut;
-    if (in.camJumpThreshold > 0 && in.camJump > in.camJumpThreshold) return Drop::Cut;
+    if (in.camJumpThreshold > 0 && in.camJump > in.camJumpThreshold && !(in.prevCamJump >= 0 && in.camJump < 4 * in.prevCamJump))
+        return Drop::Cut;
     return Drop::None;
 }
 
@@ -335,10 +387,17 @@ void Blend(const uint8_t* a, const uint8_t* b, uint8_t* out, size_t bytes) {
     for (; i < bytes; ++i) out[i] = static_cast<uint8_t>((unsigned(a[i]) + unsigned(b[i]) + 1) >> 1);
 }
 
-int64_t DelayNs(double refreshHz, double overrideMs) {
+int64_t DelayNs(double refreshHz, double overrideMs, double marginMs) {
     if (overrideMs >= 0) return static_cast<int64_t>(overrideMs * 1e6);
     const double hz = refreshHz > 0 ? refreshHz : 60.0;
-    return static_cast<int64_t>(1e9 / hz) + 4'000'000;
+    return static_cast<int64_t>(1e9 / hz) + static_cast<int64_t>(marginMs * 1e6);
+}
+
+void RequestStills(const char* name, int count) {
+    std::lock_guard lk(g_mutex);
+    g_stillName = name && *name ? name : "still";
+    g_stillLeft = count > 0 ? count : 3;
+    g_stillIndex = 0;
 }
 
 Stats TakeStats() {

@@ -74,6 +74,9 @@ public:
     virtual const char* Name() const = 0;
     // Writes the in-between frame into out (resized to width * height * 4). False = drop it.
     virtual bool Generate(const GenInputs& in, std::vector<uint8_t>& out) = 0;
+    // How long after the real frame's slot (beyond one refresh) its in-between frame is shown: room
+    // for the generator. The GPU warp's frame is ready about 1 ms after the slot.
+    virtual double MarginMs() const { return 4.0; }
 };
 // "blend" (50/50 average of N-1 and N, the default) or "repeat" (N-1 again: the window then
 // shows 30 distinct frames a second at the 60 Hz cadence, for timing checks). "warp" is the
@@ -82,7 +85,11 @@ public:
 // offline tools). nullptr = unknown.
 std::unique_ptr<Generator> MakeGenerator(const char* name);
 // The GPU generator's timing, for the status line (from the generator).
-void NoteGpu(bool fetched, double gpuMs, double waitMs, bool declined);
+void NoteGpu(bool fetched, double gpuMs, double waitMs, bool declined, bool usedHudless, bool usedVectors);
+// The remote command "fgstill <name> [count]": the worker writes the next count generated frames
+// with the real frames around them (analysis/fg_stills/<name>_<i>_{prev,gen,cur}.raw, 4 bytes per
+// pixel as the game stores them, with <name>.txt giving the size).
+void RequestStills(const char* name, int count);
 
 // ---- Decisions (pure, for the worker and the offline test) -----------------------------------
 
@@ -97,7 +104,11 @@ struct DecideIn {
     double cutDiff = 0;       // MeanAbsDiff of the two frames
     double cutThreshold = 0;  // a cut when cutDiff is above it
     double camJump = -1;      // the camera's translation change (-1 = unknown)
-    double camJumpThreshold = 0;  // a cut when camJump is above it (0 = off)
+    double prevCamJump = -1;  // the same for the previous real frame
+    // A cut when camJump is above this (0 = off) and at least 4x the previous frame's move: the
+    // Prologue map's camera swoop moves 1,800-6,000 units a frame, smoothly; a cut jumps from at
+    // most ~250 to thousands (perf/fg_gpu.md).
+    double camJumpThreshold = 0;
 };
 Drop Decide(const DecideIn& in);
 // Mean absolute difference of B, G and R (0..255) over a sparse grid (every 8th pixel of every
@@ -106,8 +117,8 @@ double MeanAbsDiff(const HostFrame& a, const HostFrame& b);
 // out = rounded average of a and b, byte by byte (same size).
 void Blend(const uint8_t* a, const uint8_t* b, uint8_t* out, size_t bytes);
 // The display delay of the in-between frame after the real frame's slot: overrideMs when >= 0,
-// else one refresh at refreshHz (60 Hz when unknown) + 4 ms.
-int64_t DelayNs(double refreshHz, double overrideMs);
+// else one refresh at refreshHz (60 Hz when unknown) + marginMs.
+int64_t DelayNs(double refreshHz, double overrideMs, double marginMs = 4.0);
 
 // Counters since the last call (PrintStatus and the offline test).
 struct Stats {
@@ -115,7 +126,7 @@ struct Stats {
     uint64_t dropped[static_cast<int>(Drop::kCount)] = {};
     double genMsSum = 0, genMsMax = 0, diffSum = 0, diffMax = 0;
     uint64_t diffCount = 0;
-    uint64_t gpuN = 0, gpuMissing = 0, gpuDeclined = 0;
+    uint64_t gpuN = 0, gpuMissing = 0, gpuDeclined = 0, gpuHud = 0, gpuVec = 0;
     double gpuMsSum = 0, gpuMsMax = 0, gpuWaitSum = 0, gpuWaitMax = 0;
 };
 Stats TakeStats();

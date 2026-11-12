@@ -454,6 +454,11 @@ static void TestWarpGpu() {
     Check(fg::Decide(d) == fg::Drop::None, "a 250-unit camera move is not a cut");
     d.camJump = 5753;
     Check(fg::Decide(d) == fg::Drop::Cut, "a 5,753-unit camera jump is a cut");
+    d.prevCamJump = 240;
+    Check(fg::Decide(d) == fg::Drop::Cut, "a 5,753-unit jump after a 240-unit move is a cut");
+    d.prevCamJump = 4804;
+    d.camJump = 5453;
+    Check(fg::Decide(d) == fg::Drop::None, "a fast but smooth camera move (the map swoop) is not a cut");
     d.camJumpThreshold = 0;
     Check(fg::Decide(d) == fg::Drop::None, "the camera-jump rule can be turned off");
 }

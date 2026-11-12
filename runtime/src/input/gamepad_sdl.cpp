@@ -5,6 +5,7 @@
 #include "hle/ime_dialog.h"
 #include "input/actions.h"
 #include "input/game_state.h"
+#include "video/framegen.h"
 #include "video/presenter.h"
 #include "gpu/renderer.h"
 #ifndef WIN32_LEAN_AND_MEAN
@@ -314,6 +315,13 @@ void Parse(const std::string& line) {
         uint64_t ms = 150;
         in >> name >> ms;
         if (!actions::HoldForTest(name, ms)) std::fprintf(stderr, "[remote] unknown action '%s'\n", name.c_str());
+        return;
+    }
+    if (word == "fgstill") {  // "fgstill <name> [count]": write the next generated frames (LBP3_FRAMEGEN=1)
+        std::string name;
+        int count = 3;
+        in >> name >> count;
+        video::framegen::RequestStills(name.c_str(), count);
         return;
     }
     if (word == "fgdump") {  // "fgdump <set>": frame-generation input capture (LBP3_FG_DUMP)

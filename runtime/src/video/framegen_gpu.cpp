@@ -22,13 +22,14 @@ protected:
 class LiveGpuWarp final : public GpuWarpBase {
 public:
     const char* Name() const override { return "warp-gpu"; }
+    double MarginMs() const override { return 2.0; }
     bool Generate(const GenInputs& in, std::vector<uint8_t>& out) override {
         if (!in.gpu.id) {
-            NoteGpu(false, -1, 0, false);
+            NoteGpu(false, -1, 0, false, false, false);
             return false;
         }
         const gpu::fglive::Fetched f = gpu::fglive::Fetch(in.gpu, out);
-        NoteGpu(f.ok, f.gpuMs, f.waitMs, f.declined);
+        NoteGpu(f.ok, f.gpuMs, f.waitMs, f.declined, f.usedHudless, f.usedVectors);
         if (!f.ok) return false;
         last_ = gpu::fggpu::Result{};
         last_.gpuMs = f.gpuMs;
