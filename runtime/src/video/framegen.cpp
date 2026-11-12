@@ -13,6 +13,7 @@
 #include <string>
 #include <thread>
 
+#include "video/framegen_warp.h"
 #include "video/presenter.h"
 
 namespace video::framegen {
@@ -237,6 +238,7 @@ void PrintStatus() {
 std::unique_ptr<Generator> MakeGenerator(const char* name) {
     if (!name || std::strcmp(name, "blend") == 0) return std::make_unique<BlendGenerator>();
     if (std::strcmp(name, "repeat") == 0) return std::make_unique<RepeatGenerator>();
+    if (std::strcmp(name, "warp") == 0) return MakeWarpGenerator(WarpParamsFromEnv());
     return nullptr;
 }
 

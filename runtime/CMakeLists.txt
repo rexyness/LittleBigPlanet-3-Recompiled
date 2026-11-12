@@ -73,6 +73,7 @@ add_library(hle STATIC
     src/core/native_trace.cpp
     src/video/presenter.cpp
     src/video/framegen.cpp
+    src/video/framegen_warp.cpp
     src/ui/osk_model.cpp
     src/ui/overlay.cpp
     src/ui/osk_overlay.cpp
@@ -120,7 +121,13 @@ target_link_libraries(dlgtest PRIVATE hle)
 add_executable(framegentest tests/framegentest.cpp)
 target_link_libraries(framegentest PRIVATE hle)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest)
+# Frame generation offline evaluator (perf/fg_warp.md): runs the generators on dumped frames
+# (analysis/fg_dump), scores the skip-one midpoint against the real frame, writes stills.
+add_executable(fgeval tests/fgeval.cpp)
+target_link_libraries(fgeval PRIVATE hle)
+target_include_directories(fgeval PRIVATE ${SHADPS4_EXT}/stb)
+
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()
