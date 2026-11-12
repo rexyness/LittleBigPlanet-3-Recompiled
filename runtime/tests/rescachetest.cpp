@@ -47,6 +47,11 @@ int main() {
         salted.insert(Salt(h));
     }
     CHECK(originals.size() == kShaders.size());
+    // The list is the one the rescale uses: 44 shaders since the full scan (perf/res1440_shader_scan.md),
+    // e.g. an outline/x-ray material variant and tgpshaderblur among them.
+    CHECK(kShaders.size() == 44);
+    CHECK(IsListedOriginal(0x01bdeb8c981d9707ull));
+    CHECK(IsListedOriginal(0xfee8b1e66a624a1eull));
     CHECK(salted.size() == kShaders.size()); // no two listed shaders share a salted name
     // No salted name equals any listed original (a 1080p entry can't be picked up at 1440p).
     for (const u64 s : salted) CHECK(!originals.count(s));
