@@ -40,6 +40,7 @@ add_library(hle STATIC
     src/core/vfs.cpp
     src/hle/hle.cpp
     src/hle/app_content.cpp
+    src/hle/my_unlocks.cpp
     src/hle/audioout.cpp
     src/hle/audio_downmix.cpp
     src/hle/trophy.cpp

@@ -20,6 +20,7 @@
 
 #include "core/native_trace.h"
 #include "input/game_state.h"
+#include "hle/my_unlocks.h"
 #include "core/tls.h"
 #include "hle/abi.h"
 
@@ -690,6 +691,7 @@ void Run(Module& eboot, const std::vector<Module*>& startFirst, const std::vecto
     if (const char* v = std::getenv("LBP3_FIND_REFS")) FindStringRefs(eboot, v);
     InstallNativeCounters(eboot);
     input::game_state::InstallHooks();  // keyboard actions' hooks, before the game starts
+    hle::my_unlocks::InstallHooks();    // LBP3_MY_UNLOCKS (ticket 19)
     AddVectoredExceptionHandler(0, CrashHandler);  // last, after breakpoints
     AddVectoredExceptionHandler(0, CxxThrowReporter);
     SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
