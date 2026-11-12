@@ -71,7 +71,12 @@ namespace Common::FS {
 const std::filesystem::path& GetUserPath(PathType type) {
     // The pipeline cache lives with the other per-user data; everything else
     // shadPS4 writes (shader dumps) goes to analysis/.
-    static const std::filesystem::path cache = std::filesystem::current_path() / "user" / "shader_cache";
+    // LBP3_SHADER_CACHE_DIR points it elsewhere (tests on cache copies, perf/shared_cache.md).
+    static const std::filesystem::path cache = [] {
+        const char* dir = std::getenv("LBP3_SHADER_CACHE_DIR");
+        return dir && *dir ? std::filesystem::path{dir}
+                           : std::filesystem::current_path() / "user" / "shader_cache";
+    }();
     static const std::filesystem::path path = std::filesystem::current_path() / "analysis" / "shaders";
     return type == PathType::CacheDir ? cache : path;
 }
