@@ -57,6 +57,10 @@ void FillNop(uint32_t* cmd, uint32_t dwords) {
     }
     // Type-3 NOP: count field = body dwords - 1 = dwords - 2.
     cmd[0] = (3u << 30) | ((dwords - 2) << 16) | (kOpNop << 8);
+    // Its first body dword is what the command processor reads as a NOP payload (flip marker,
+    // debug marker). Zero it, as upstream's WriteTrailingNop does (gnmdriver.cpp:94-108), so
+    // stale command memory can't show through (perf/early_flip.md).
+    cmd[1] = 0;
 }
 
 }  // namespace
