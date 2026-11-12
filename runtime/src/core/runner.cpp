@@ -21,6 +21,7 @@
 #include "core/native_trace.h"
 #include "input/game_state.h"
 #include "hle/my_unlocks.h"
+#include "video/presenter.h"
 #include "core/tls.h"
 #include "hle/abi.h"
 
@@ -742,6 +743,7 @@ void Run(Module& eboot, const std::vector<Module*>& startFirst, const std::vecto
         ExitProcess(1);
     }
     WaitForSingleObject(t, INFINITE);
+    video::RunExitHook();  // saves the driver pipeline cache
     ExitProcess(0);
 }
 

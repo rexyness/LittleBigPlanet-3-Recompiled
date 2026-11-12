@@ -71,6 +71,7 @@ std::atomic<bool> g_vblankSourceOk{false};
 std::atomic<double> g_refreshHz{0.0};
 std::atomic<HWND> g_hwnd{nullptr};
 std::atomic<void (*)(int)> g_hotkeyHandler{nullptr};
+std::atomic<void (*)()> g_exitHook{nullptr};
 std::atomic<uint64_t> g_presents{0};
 
 void CountVBlank() {
@@ -250,6 +251,7 @@ void PresenterThread() {
                 readRefresh(false);
             if (e.type == SDL_EVENT_QUIT) {
                 std::fprintf(stderr, "[video] window closed\n");
+                RunExitHook();
                 std::fflush(stderr);
                 ExitProcess(0);
             }
@@ -440,6 +442,10 @@ void SetDisplayBuffer(int index, const DisplayBuffer& buffer) {
 }
 
 void SetHotkeyHandler(void (*handler)(int key)) { g_hotkeyHandler = handler; }
+void SetExitHook(void (*hook)()) { g_exitHook = hook; }
+void RunExitHook() {
+    if (auto hook = g_exitHook.exchange(nullptr)) hook();
+}
 
 void TriggerHotkey(int key) {
     if (auto handler = g_hotkeyHandler.load()) handler(key);
