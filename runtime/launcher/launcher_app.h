@@ -192,6 +192,7 @@ struct App {
     bool wizard = false;
     int wizard_step = 0;
     char wizard_name[32] = {}, wizard_pass[80] = {};
+    std::string wizard_dir;  // the game-files step's typed path
     int wizard_online_choice = 0;  // 0 create, 1 have one, 2 not now
     bool tour = false;
     int tour_step = 0;
@@ -219,6 +220,7 @@ struct App {
     std::mutex stats_m;
     std::vector<Change> news;
     std::vector<std::pair<std::string, std::string>> manifest;
+    std::vector<std::string> highlights;  // a package's RELEASE-NOTES.md "What's in it" (no git history there)
     bool news_loaded = false;
     std::atomic<bool> news_ready{false};
     std::mutex news_m;

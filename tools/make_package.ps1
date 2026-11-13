@@ -5,7 +5,11 @@
 # account files: the last step scans the staged folder and refuses to zip if anything like that slipped in.
 # Layout: one folder, everything relative to it (portable.txt marks it for the launcher):
 #   LBP3Launcher.exe, lbp3.exe, SDL3.dll, the VC++ runtime DLLs (app-local), tools\nid_names.txt,
-#   portable.txt, README-FRIENDS.md, CREDITS.md, SOURCE.md, licenses\
+#   portable.txt, README-FRIENDS.md, CREDITS.md, RELEASE-NOTES.md (also the GitHub release's text; the
+#   launcher's "What's new" shows it), SOURCE.md, licenses\
+# Make release packages in a dedicated worktree checked out at the exact (pushed) commit, e.g.
+#   git worktree add --detach D:\Recomps\lbp3-wt\release <commit>   (shadPS4 at its submodule commit)
+# so the build is that commit's and nobody else's build folder is touched.
 #   (user\ for settings, saves and the shader cache, and analysis\ for logs, are made on first run)
 param(
     [string]$Version = "v0.1.0-lbp3port",
@@ -25,9 +29,21 @@ $branch = (git rev-parse --abbrev-ref HEAD).Trim()
 $subCommit = (git -C third_party/shadPS4 rev-parse HEAD).Trim()
 $remote = "https://github.com/rexyness/LittleBigPlanet-3-Recompiled"
 $subRemote = "https://github.com/rexyness/shadPS4"
+# The commit must be public (on a branch of the fork remote), and SOURCE.md names that branch. A release
+# worktree is checked out detached at the exact commit, so its own branch name ("HEAD") isn't used.
+try { git fetch -q fork 2>$null } catch { }
+$onFork = @(git branch -r --contains $commit --format "%(refname:short)" | Where-Object { $_ -like 'fork/*' } |
+    ForEach-Object { $_.Substring(5) })
+if (-not $onFork) {
+    if (-not $AllowDirty) { throw "commit $commit isn't on any branch of the fork remote; push it first (the source must be public)" }
+    Write-Host "warning: commit $commit isn't on the fork (test package)"
+} elseif ($onFork -notcontains $branch) {
+    $branch = if ($onFork -contains 'bestofboth') { 'bestofboth' } else { $onFork[0] }
+}
 
 if (-not $SkipBuild) {
-    cmd /d /c build.bat
+    # By full path: with NoDefaultCurrentDirectoryInExePath set, cmd doesn't look in the current folder.
+    & "$repo\build.bat"
     if ($LASTEXITCODE -ne 0) { throw "build.bat failed" }
 }
 foreach ($f in "build\lbp3.exe", "build\LBP3Launcher.exe", "build\SDL3.dll", "tools\nid_names.txt") {
@@ -60,7 +76,7 @@ move LBP3Launcher.exe into a development checkout.
 "@
 
 # Docs: the friend's README, credits, licence note (tools\package\), and SOURCE.md with the exact commits.
-Copy-Item tools\package\README-FRIENDS.md, tools\package\CREDITS.md $stage
+Copy-Item tools\package\README-FRIENDS.md, tools\package\CREDITS.md, tools\package\RELEASE-NOTES.md $stage
 Copy-Item tools\package\LICENSES.md, tools\package\GPL-3.0.txt "$stage\licenses\"
 Copy-Item LICENSE "$stage\licenses\LICENSE-LBP3-Recompiled.txt"
 Set-Content -Encoding utf8 "$stage\SOURCE.md" @"
@@ -114,7 +130,26 @@ if ($forbidden) {
 }
 
 if (Test-Path $zip) { Remove-Item -Force $zip }
-Compress-Archive -Path "$stage\*" -DestinationPath $zip -CompressionLevel Optimal
+# Not Compress-Archive: Windows PowerShell 5.1's writes entry names with backslashes (licenses\...), which
+# the zip format doesn't allow (Info-ZIP warns, other unzippers make files named "licenses\x"). The
+# entries are written here with forward slashes, files only, in a fixed order.
+Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+$stageFull = (Resolve-Path $stage).Path.TrimEnd('\')
+$archive = [System.IO.Compression.ZipFile]::Open($zip, [System.IO.Compression.ZipArchiveMode]::Create)
+try {
+    Get-ChildItem $stageFull -Recurse -File | Sort-Object FullName | ForEach-Object {
+        $entry = $_.FullName.Substring($stageFull.Length + 1).Replace('\', '/')
+        [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $_.FullName, $entry,
+            [System.IO.Compression.CompressionLevel]::Optimal)
+    }
+} finally { $archive.Dispose() }
+$check = [System.IO.Compression.ZipFile]::OpenRead($zip)
+try {
+    $bad = @($check.Entries | Where-Object { $_.FullName.Contains('\') })
+    $count = $check.Entries.Count
+} finally { $check.Dispose() }
+if ($bad) { throw "zip entries with backslashes: $($bad[0].FullName)" }
+if ($count -ne (Get-ChildItem $stageFull -Recurse -File).Count) { throw "the zip has $count entries, the staged folder a different number of files" }
 # (.NET's SHA256, not Get-FileHash: that cmdlet's module isn't found when started from Git Bash)
 $sha = [System.Security.Cryptography.SHA256]::Create()
 $fs = [System.IO.File]::OpenRead($zip)

@@ -36,6 +36,9 @@ bool Portable(const fs::path& launcher_dir);
 // Points the game at a dump: <root>\game_dir.txt = folder (the folder that holds CUSA00473), the
 // previous file kept as game_dir.txt.bak. False (nothing written) if folder has no CUSA00473.
 bool WriteGameDir(const fs::path& root, const fs::path& folder, std::string* error);
+// A typed or pasted folder path: spaces and one pair of surrounding quotes (Explorer's "Copy as
+// path") removed, and a trailing \ or / unless it is a drive's root ("D:\").
+std::string TrimPathText(const std::string& text);
 // The game folder: the setting if given; else the launcher's parent folder if it has
 // game_dir.txt or user\savedata; else, when the launcher is built in a git worktree, the main
 // checkout that worktree belongs to (its .git file names it).

@@ -370,6 +370,16 @@ void PageControllers(App& a) {
 void PageNews(App& a) {
     LoadNews(a);
     std::lock_guard lock(a.news_m);
+    if (a.portable) {  // a package: its release notes (RELEASE-NOTES.md beside the launcher)
+        Heading(a.version.empty() ? "This release" : ("This release (" + a.version + ")").c_str());
+        if (a.highlights.empty()) Dim("(RELEASE-NOTES.md isn't next to the launcher)");
+        for (const auto& h : a.highlights) {
+            ImGui::Bullet();
+            ImGui::TextWrapped("%s", h.c_str());
+        }
+        Dim("Full notes, known issues and credits: RELEASE-NOTES.md, README-FRIENDS.md and CREDITS.md in this folder.");
+        return;
+    }
     Heading("What this build has");
     if (a.manifest.empty()) Dim("(the feature list, best/README.md, isn't next to the game folder)");
     for (const auto& [feature, sw] : a.manifest) {
@@ -504,12 +514,25 @@ void PageHome(App& a) {
     EndCard();
     ImGui::SameLine();
     if (BeginCard("whatsnew", ImVec2(half, S(236)))) {
-        Heading("What's new");
+        Heading(a.portable && !a.version.empty() ? ("What's new in " + a.version).c_str() : "What's new");
         std::lock_guard lock(a.news_m);
-        if (a.news.empty()) Dim("(this build's history appears here)");
+        if (a.portable) {  // a package: the release notes' highlights, one line each
+            const float room = ImGui::GetContentRegionAvail().x - S(24);
+            if (a.highlights.empty()) Dim("(RELEASE-NOTES.md isn't next to the launcher)");
+            for (size_t i = 0; i < a.highlights.size() && i < 5; ++i) {
+                std::string line = a.highlights[i];
+                if (const size_t cut = line.find(" ("); cut != std::string::npos && cut > 20) line.resize(cut);
+                while (line.size() > 4 && ImGui::CalcTextSize(line.c_str()).x > room) line.resize(line.size() - 4), line += "...";
+                ImGui::Bullet();
+                ImGui::TextUnformatted(line.c_str());
+            }
+            if (!a.highlights.empty() && ImGui::SmallButton("More...")) a.page = News;
+        } else if (a.news.empty()) {
+            Dim("(this build's history appears here)");
+        }
         // one line each: the subject up to its first ':' or ';' clause, shortened to fit
         const float room = ImGui::GetContentRegionAvail().x - S(100);
-        for (size_t i = 0; i < a.news.size() && i < 5; ++i) {
+        for (size_t i = 0; !a.portable && i < a.news.size() && i < 5; ++i) {
             ImGui::TextColored(kCardboard, "%s", a.news[i].when.c_str());
             ImGui::SameLine(S(108));
             std::string line = a.news[i].subject;
@@ -517,7 +540,7 @@ void PageHome(App& a) {
             while (line.size() > 4 && ImGui::CalcTextSize(line.c_str()).x > room) line.resize(line.size() - 4), line += "...";
             ImGui::TextUnformatted(line.c_str());
         }
-        if (!a.news.empty() && ImGui::SmallButton("More...")) a.page = News;
+        if (!a.portable && !a.news.empty() && ImGui::SmallButton("More...")) a.page = News;
     }
     EndCard();
 
@@ -1278,26 +1301,37 @@ void Wizard(App& a) {
             if (!v.title.empty()) Dim("%s", v.title.c_str());
         }
         ImGui::TextColored(v.ok ? kGood : kWarn, "%s", v.line.c_str());
-        ImGui::BeginDisabled(a.shot_mode || a.p.root.empty());
+        // the folder dialog, or a typed (or pasted) path for when the dialog misbehaves
+        auto use = [&a](fs::path f) {
+            const DumpVerdict pv = CheckDumpFolder(f);  // CUSA00473 itself becomes its parent
+            std::string error;
+            if (!pv.ok) ToastMsg(a, pv.line, kWarn);
+            if (WriteGameDir(a.p.root, f, &error)) {  // written when there is a CUSA00473, even one to fix
+                AppendLauncherLog(a.p, "game_dir.txt set to " + f.string());
+                Refresh(a, true);
+                a.art_from.clear();
+                a.dlc_dirty = true;
+            } else {
+                ToastMsg(a, error, kBad);
+            }
+        };
+        const bool can_write = !a.shot_mode && !a.p.root.empty();
+        ImGui::BeginDisabled(!can_write);
         if (BigButton("Choose the folder...", ImVec2(S(240), 0), kCardboard)) {
             const std::string picked = PickFolder(L"Choose the folder that holds CUSA00473");
-            if (!picked.empty()) {
-                fs::path f = fs::u8path(picked);
-                const DumpVerdict pv = CheckDumpFolder(f);  // CUSA00473 itself becomes its parent
-                std::string error;
-                if (!pv.ok) ToastMsg(a, pv.line, kWarn);
-                if (WriteGameDir(a.p.root, f, &error)) {  // written when there is a CUSA00473, even one to fix
-                    AppendLauncherLog(a.p, "game_dir.txt set to " + f.string());
-                    Refresh(a, true);
-                    a.art_from.clear();
-                    a.dlc_dirty = true;
-                } else {
-                    ToastMsg(a, error, kBad);
-                }
-            }
+            if (!picked.empty()) use(fs::u8path(picked));
         }
         ImGui::EndDisabled();
         Help("Writes the folder to game_dir.txt in the game folder, which is where the game looks (the previous one is kept as game_dir.txt.bak).");
+        Dim("Or type or paste its path:");
+        ImGui::BeginDisabled(!can_write);
+        const bool entered = InputString("##dumpdir", a.wizard_dir, "for example D:\\Games\\PS4", 420, ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::SameLine();
+        const std::string typed = TrimPathText(a.wizard_dir);
+        ImGui::BeginDisabled(typed.empty());
+        if ((ImGui::Button("Use this folder") || entered) && !typed.empty()) use(fs::u8path(typed));
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
         ImGui::Spacing();
         ImGui::BeginDisabled(!v.ok || a.file_check.running || a.shot_mode);
         if (ImGui::Button("Check the files")) StartFileCheck(a);

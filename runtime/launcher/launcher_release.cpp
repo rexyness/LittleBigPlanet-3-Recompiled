@@ -377,4 +377,47 @@ void RemoveOldFiles(const fs::path& install) {
     }
 }
 
+std::vector<std::string> ReleaseHighlights(const std::string& markdown) {
+    auto clean = [](const std::string& s) {
+        std::string r;
+        for (size_t i = 0; i < s.size(); ++i) {
+            if (s[i] == '`') continue;
+            if (s[i] == '*' && i + 1 < s.size() && s[i + 1] == '*') {
+                ++i;
+                continue;
+            }
+            r += s[i];
+        }
+        while (!r.empty() && std::isspace(static_cast<unsigned char>(r.back()))) r.pop_back();
+        return r;
+    };
+    std::vector<std::string> out;
+    std::istringstream in(markdown);
+    std::string line;
+    bool inside = false;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.rfind("#", 0) == 0) {
+            if (inside) break;  // the next heading ends the section
+            std::string lower = line;
+            for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            inside = lower.find("what's in it") != std::string::npos;
+            continue;
+        }
+        if (!inside) continue;
+        const size_t text = line.find_first_not_of(' ');
+        if (line.rfind("- ", 0) == 0) out.push_back(clean(line.substr(2)));
+        else if (!out.empty() && text != std::string::npos && text > 0) out.back() += " " + clean(line.substr(text));
+    }
+    return out;
+}
+
+std::vector<std::string> ReadReleaseHighlights(const fs::path& launcher_dir) {
+    std::ifstream f(launcher_dir / "RELEASE-NOTES.md", std::ios::binary);
+    if (!f) return {};
+    std::stringstream s;
+    s << f.rdbuf();
+    return ReleaseHighlights(s.str());
+}
+
 }  // namespace launcher

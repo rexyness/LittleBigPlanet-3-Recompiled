@@ -875,6 +875,7 @@ int main() {
     TestRefreshParse();
     TestFriendsModel();
     TestReleaseLogic();
+    TestReleaseHighlights();
     TestInputConfig();
     TestQuitMenuReal();
     TestNetFake();

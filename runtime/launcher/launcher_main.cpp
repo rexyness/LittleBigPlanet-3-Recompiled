@@ -385,12 +385,16 @@ static std::vector<std::pair<std::string, std::string>> ReadManifest(const fs::p
 void LoadNews(App& a) {
     if (a.news_loaded) return;
     a.news_loaded = true;
-    std::thread([&a, wt = a.p.worktree, root = a.p.root] {
-        auto changes = RecentChanges(wt, 40);
-        auto manifest = ReadManifest(root);
+    // A package has no git history (and the folder above it may be some other checkout): it shows
+    // its RELEASE-NOTES.md instead.
+    std::thread([&a, wt = a.p.worktree, root = a.p.root, portable = a.portable] {
+        auto changes = portable ? std::vector<Change>{} : RecentChanges(wt, 40);
+        auto manifest = portable ? std::vector<std::pair<std::string, std::string>>{} : ReadManifest(root);
+        auto highlights = ReadReleaseHighlights(LauncherDir());
         std::lock_guard lock(a.news_m);
         a.news = std::move(changes);
         a.manifest = std::move(manifest);
+        a.highlights = std::move(highlights);
         a.news_ready = true;
     }).detach();
 }

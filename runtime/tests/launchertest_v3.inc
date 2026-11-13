@@ -17,6 +17,30 @@ static void TestGameDir() {
     CHECK(Slurp3(tmp / "root" / "game_dir.txt") == dump.string() + "\n");
     CHECK(WriteGameDir(tmp / "root", dump, &error) && fs::exists(tmp / "root" / "game_dir.txt.bak"));
     CHECK(!WriteGameDir(tmp / "root", tmp / "empty", &error) && Slurp3(tmp / "root" / "game_dir.txt") == dump.string() + "\n");
+    // the wizard's typed path
+    CHECK(TrimPathText("  \"D:\\Games\\PS4\"  ") == "D:\\Games\\PS4");
+    CHECK(TrimPathText("D:\\Games\\PS4\\") == "D:\\Games\\PS4" && TrimPathText("D:\\") == "D:\\");
+    CHECK(TrimPathText("   ").empty() && TrimPathText("\"\"").empty());
+    CHECK(WriteGameDir(tmp / "root", fs::u8path(TrimPathText("\"" + dump.string() + "\\\"")), &error));
+    std::error_code ec;
+    fs::remove_all(tmp, ec);
+}
+
+// A package's RELEASE-NOTES.md: the "What's in it" bullets for "What's new".
+static void TestReleaseHighlights() {
+    const std::string md =
+        "**A first test release.** Intro.\r\n\r\n### What you need\r\n- Windows 10\r\n\r\n### What's in it\r\n"
+        "- 1440p rendering, **frame generation**.\r\n- Online on `play.lbppc.com`:\r\n  create an account.\r\n\r\n"
+        "### Known issues\r\n- Brightness.\r\n";
+    const auto h = ReleaseHighlights(md);
+    CHECK(h.size() == 2);
+    CHECK(h.size() == 2 && h[0] == "1440p rendering, frame generation." && h[1] == "Online on play.lbppc.com: create an account.");
+    CHECK(ReleaseHighlights("# Nothing here\n- a\n").empty());
+    const fs::path tmp = fs::temp_directory_path() / ("launchertest_notes_" + NowStamp());
+    fs::create_directories(tmp);
+    CHECK(ReadReleaseHighlights(tmp).empty());
+    std::ofstream(tmp / "RELEASE-NOTES.md", std::ios::binary) << md;
+    CHECK(ReadReleaseHighlights(tmp).size() == 2);
     std::error_code ec;
     fs::remove_all(tmp, ec);
 }

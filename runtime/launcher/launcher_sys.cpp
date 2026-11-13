@@ -11,6 +11,7 @@
 #include <tlhelp32.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -167,6 +168,20 @@ fs::path MainCheckoutFromGitFile(const std::string& text) {
     const size_t at = Lower(dir).rfind("/.git/worktrees/");
     if (at == std::string::npos) return {};
     return fs::path(dir.substr(0, at)).make_preferred();
+}
+
+std::string TrimPathText(const std::string& text) {
+    std::string s = text;
+    auto trim = [&s] {
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+        size_t i = 0;
+        while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i;
+        s.erase(0, i);
+    };
+    trim();
+    if (s.size() >= 2 && s.front() == '"' && s.back() == '"') s = s.substr(1, s.size() - 2), trim();
+    while (s.size() > 3 && (s.back() == '\\' || s.back() == '/')) s.pop_back();
+    return s;
 }
 
 bool WriteGameDir(const fs::path& root, const fs::path& folder, std::string* error) {

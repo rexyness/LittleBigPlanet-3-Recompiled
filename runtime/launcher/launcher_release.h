@@ -59,4 +59,11 @@ void RemoveOldFiles(const std::filesystem::path& install);
 // A path the update must never write (user\..., analysis\..., logs\...), relative to the install.
 bool ProtectedPath(const std::filesystem::path& relative);
 
+// A packaged install's RELEASE-NOTES.md (tools/package/, the same text as the GitHub release): the
+// bullets of its "What's in it" section, one string each (continuation lines joined, ** and `
+// marks dropped). Empty when there is no such file or section. "What's new" shows them where a
+// dev checkout shows its git history.
+std::vector<std::string> ReleaseHighlights(const std::string& markdown);
+std::vector<std::string> ReadReleaseHighlights(const std::filesystem::path& launcher_dir);
+
 }  // namespace launcher
