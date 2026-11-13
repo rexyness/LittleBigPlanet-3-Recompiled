@@ -316,21 +316,39 @@ CreateResult CreateOnlineAccounts(const std::string& config_dir, const std::stri
     a.password = password;
     a.server = refresh_server;
     a.email = AccountEmail(a);
-    const std::filesystem::path file = NewAccountFile(config_dir, name);
+    // Saved first (so the password isn't lost if a step fails), as a pending file the launcher and
+    // the game don't take for an account; it becomes one only once shadNet has made it.
+    const std::filesystem::path pending = std::filesystem::path(config_dir) / ("online_account_" + name + ".pending");
     std::string error;
-    // Saved first, so the password isn't lost if a step fails.
-    if (!WriteAccountFile(file, a, &error)) {
+    std::error_code ec;
+    std::filesystem::remove(pending, ec);  // our own leftover from an earlier try
+    if (!WriteAccountFile(pending, a, &error)) {
         r.message = error;
         return r;
     }
-    r.file = file.string();
-    say("Saved the account in " + file.filename().string());
-    if (CreateShadnetAccount(shadnet, name, password, a.email, &error) != 0) {
+    say("Saved the new password on this PC");
+    const int code = CreateShadnetAccount(shadnet, name, password, a.email, &error);
+    if (code > 0) {  // refused (taken, not allowed...): no account was made, so no account file either
+        std::filesystem::remove(pending, ec);
         r.message = "shadNet account: not created (" + error + "). Nothing was sent to the website.";
         say(r.message);
         return r;
     }
-    say("shadNet account: created");
+    if (code < 0) {  // couldn't tell: kept as .pending, in case the server made it after all
+        r.message = "shadNet account: not created (" + error + "). Nothing was sent to the website.";
+        say(r.message);
+        return r;
+    }
+    const std::filesystem::path file = NewAccountFile(config_dir, name);
+    std::filesystem::rename(pending, file, ec);
+    if (ec) {
+        r.message = "The shadNet account exists, but its file couldn't be saved as " + file.filename().string() + " (" + ec.message() +
+                    "); the password is in " + pending.filename().string();
+        say(r.message);
+        return r;
+    }
+    r.file = file.string();
+    say("shadNet account: created (saved as " + file.filename().string() + ")");
     const AccountResult web = CreateRefreshAccountWith(refresh_server, name, password, a.email);
     if (!web.ok) {
         r.message = "Website account: not created (" + web.message + "). The shadNet account exists with the saved password.";

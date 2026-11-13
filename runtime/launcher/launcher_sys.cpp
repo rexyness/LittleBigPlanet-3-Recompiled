@@ -169,6 +169,31 @@ fs::path MainCheckoutFromGitFile(const std::string& text) {
     return fs::path(dir.substr(0, at)).make_preferred();
 }
 
+bool WriteGameDir(const fs::path& root, const fs::path& folder, std::string* error) {
+    std::error_code ec;
+    if (!fs::exists(folder / "CUSA00473", ec)) {
+        if (error) *error = folder.string() + " has no CUSA00473 folder";
+        return false;
+    }
+    std::string text;
+    try {
+        text = folder.string();  // as game_dir.txt's readers take it (the game's and this launcher's)
+    } catch (const std::exception&) {
+        if (error) *error = "that folder's name has characters Windows can't put in game_dir.txt; move the dump to a plain folder name";
+        return false;
+    }
+    const fs::path file = root / "game_dir.txt";
+    fs::create_directories(root, ec);
+    if (fs::exists(file, ec)) fs::copy_file(file, root / "game_dir.txt.bak", fs::copy_options::overwrite_existing, ec);
+    std::ofstream f(file, std::ios::binary | std::ios::trunc);
+    f << text << "\n";
+    if (!f) {
+        if (error) *error = "couldn't write " + file.string();
+        return false;
+    }
+    return true;
+}
+
 bool Portable(const fs::path& launcher_dir) {
     std::error_code ec;
     return fs::exists(launcher_dir / "portable.txt", ec);

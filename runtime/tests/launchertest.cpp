@@ -869,6 +869,7 @@ int main() {
     TestShell();
     TestOnlineSwitch();
     TestRealDump();
+    TestGameDir();
     TestV3Settings();
     TestAccountsV3();
     TestRefreshParse();

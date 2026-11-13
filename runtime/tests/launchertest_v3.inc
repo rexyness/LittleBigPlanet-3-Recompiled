@@ -8,6 +8,19 @@ static std::string Slurp3(const fs::path& p) {
     return ss.str();
 }
 
+static void TestGameDir() {
+    const fs::path tmp = fs::temp_directory_path() / ("launchertest_gamedir_" + NowStamp());
+    const fs::path dump = tmp / "My Dumps";
+    fs::create_directories(dump / "CUSA00473");
+    std::string error;
+    CHECK(WriteGameDir(tmp / "root", dump, &error));
+    CHECK(Slurp3(tmp / "root" / "game_dir.txt") == dump.string() + "\n");
+    CHECK(WriteGameDir(tmp / "root", dump, &error) && fs::exists(tmp / "root" / "game_dir.txt.bak"));
+    CHECK(!WriteGameDir(tmp / "root", tmp / "empty", &error) && Slurp3(tmp / "root" / "game_dir.txt") == dump.string() + "\n");
+    std::error_code ec;
+    fs::remove_all(tmp, ec);
+}
+
 static void TestV3Settings() {
     Settings a;
     a.display = "165hz";
@@ -248,7 +261,10 @@ static void TestReleaseLogic() {
     CHECK(Slurp3(inst / "user" / "config" / "launcher.ini") == "mine" && Slurp3(inst / "analysis" / "x.txt") == "my log");
     CHECK(changed.size() == 4);
     RemoveOldFiles(inst);
-    CHECK(!fs::exists(inst / "SDL3.dll.old") && fs::exists(inst / "notes.old"));  // only ours
+    CHECK(!fs::exists(inst / "SDL3.dll.old") && fs::exists(inst / "notes.old"));  // only the recorded ones
+    CHECK(!fs::exists(inst / ".update_old_files.txt"));
+    CHECK(!ParseLatestRelease(R"({"tag_name":"v1.0.0 & calc","assets":[{"name":"LBP3-Recompiled-v1.0.0 & calc.zip",
+        "browser_download_url":"https://example.invalid/a.zip"}]})").ok);  // a tag that isn't a plain name
     CHECK(ProtectedPath("user/config/a.txt") && ProtectedPath("Analysis/x") && ProtectedPath("logs") && !ProtectedPath("tools/x"));
     // a release without the programs isn't installed
     fs::create_directories(tmp / "empty_release" / "docs");

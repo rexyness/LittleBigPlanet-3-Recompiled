@@ -966,7 +966,7 @@ void PageTools(App& a) {
         Toggle("Check for updates when the launcher opens", &a.s.update_on_start,
                DevCheckout(a) ? "Looks for new commits on this build's branch (git fetch)." : "Asks GitHub for the latest release.");
         if (!DevCheckout(a)) {
-            const std::string mine = InstalledVersion(LauncherDir());
+            const std::string& mine = a.version;
             ImGui::Text("Installed: %s", mine.empty() ? "a development build" : mine.c_str());
             Dim("Updates come from the releases of %s on GitHub. Your saves, settings, accounts and logs (user\\, analysis\\) are "
                 "never touched; the old program files are kept as *.old until the next start.", kReleaseRepo);
@@ -983,7 +983,7 @@ void PageTools(App& a) {
                 std::lock_guard lock(a.release_m);
                 r = a.release;
             }
-            const std::string mineV = InstalledVersion(LauncherDir());
+            const std::string& mineV = a.version;
             const bool newer = r.ok && (mineV.empty() || CompareVersions(ParseVersion(r.tag), ParseVersion(mineV)) > 0);
             if (r.ok) {
                 ImGui::TextColored(kCardboard, "%s", (r.name.empty() ? r.tag : r.name).c_str());
@@ -1174,7 +1174,7 @@ void PageHelp(App& a) {
     EndCard();
     if (BeginCard("about", ImVec2(0, 0), false)) {
         Heading("About");
-        const std::string v = InstalledVersion(LauncherDir());
+        const std::string& v = a.version;
         Dim("LittleBigPlanet 3 Launcher 3.0%s%s, for the native port (GPL-2.0-or-later).", v.empty() ? "" : " - ", v.c_str());
         Dim("Settings: %s", SettingsFile(FindRoot(LauncherDir(), "")).string().c_str());
         Dim("Ideas from LBPPC (github.com/emurphy04/LBPPC); this launcher is our own code, apart from the Quit Game edit (a port of "
@@ -1283,14 +1283,17 @@ void Wizard(App& a) {
             const std::string picked = PickFolder(L"Choose the folder that holds CUSA00473");
             if (!picked.empty()) {
                 fs::path f = fs::u8path(picked);
-                const DumpVerdict pv = CheckDumpFolder(f);
+                const DumpVerdict pv = CheckDumpFolder(f);  // CUSA00473 itself becomes its parent
+                std::string error;
                 if (!pv.ok) ToastMsg(a, pv.line, kWarn);
-                const fs::path file = a.p.root / "game_dir.txt";
-                if (fs::exists(file, ec)) fs::copy_file(file, a.p.root / "game_dir.txt.bak", fs::copy_options::overwrite_existing, ec);
-                std::ofstream(file, std::ios::binary) << f.u8string().c_str() << "\n";
-                AppendLauncherLog(a.p, "game_dir.txt set to " + f.string());
-                Refresh(a, true);
-                a.art_from.clear();
+                if (WriteGameDir(a.p.root, f, &error)) {  // written when there is a CUSA00473, even one to fix
+                    AppendLauncherLog(a.p, "game_dir.txt set to " + f.string());
+                    Refresh(a, true);
+                    a.art_from.clear();
+                    a.dlc_dirty = true;
+                } else {
+                    ToastMsg(a, error, kBad);
+                }
             }
         }
         ImGui::EndDisabled();
@@ -1310,7 +1313,8 @@ void Wizard(App& a) {
         ImGui::PushFont(g_heading, 24.f);
         ImGui::TextUnformatted("DLC");
         ImGui::PopFont();
-        const auto packs = ListDlc(a.p.dlc_dir);
+        if (a.dlc_dirty) a.dlc = ListDlc(a.p.dlc_dir), a.dlc_dirty = false;  // not every frame
+        const auto& packs = a.dlc;
         ImGui::TextWrapped("DLC you own goes in a folder of its own, one folder per pack. The game reads it every time it starts.");
         ImGui::TextColored(kCardboard, "%s", a.p.dlc_dir.string().c_str());
         ImGui::TextColored(packs.empty() ? kDim : kGood, "%d packs installed", static_cast<int>(packs.size()));
@@ -1387,10 +1391,7 @@ void Wizard(App& a) {
         } else {
             Dim("A strong password is made for you and saved in user\\config\\online_account.txt before anything is sent.");
             ImGui::BeginDisabled(!name_ok || a.online.create.running || a.shot_mode);
-            if (BigButton("Create the account", ImVec2(S(220), 0), kPlay)) {
-                std::snprintf(a.online.create_name, sizeof a.online.create_name, "%s", a.wizard_name);
-                a.online.create_open = true;
-            }
+            if (BigButton("Create the account", ImVec2(S(220), 0), kPlay)) StartCreateAccount(a, a.wizard_name);
             ImGui::EndDisabled();
             std::lock_guard lock(a.online.create.m);
             if (a.online.create.running) ImGui::SameLine(), Spinner(S(8), kCardboard);

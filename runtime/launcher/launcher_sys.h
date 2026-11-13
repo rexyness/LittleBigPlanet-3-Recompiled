@@ -33,6 +33,9 @@ fs::path LauncherDir();
 // A packaged install (tools/make_package.ps1): portable.txt beside the launcher. Everything (user\,
 // analysis\, game_dir.txt) then lives in the launcher's own folder.
 bool Portable(const fs::path& launcher_dir);
+// Points the game at a dump: <root>\game_dir.txt = folder (the folder that holds CUSA00473), the
+// previous file kept as game_dir.txt.bak. False (nothing written) if folder has no CUSA00473.
+bool WriteGameDir(const fs::path& root, const fs::path& folder, std::string* error);
 // The game folder: the setting if given; else the launcher's parent folder if it has
 // game_dir.txt or user\savedata; else, when the launcher is built in a git worktree, the main
 // checkout that worktree belongs to (its .git file names it).

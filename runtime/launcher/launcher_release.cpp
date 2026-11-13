@@ -95,6 +95,12 @@ ReleaseInfo ParseLatestRelease(const std::string& body) {
         r.error = str(j, "message").empty() ? "no release found" : "GitHub: " + str(j, "message");
         return r;
     }
+    // the tag goes into file names and a command line: letters, digits, . _ - only
+    for (char c : r.tag)
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '.' && c != '_' && c != '-') {
+            r.error = "the release's tag isn't a plain version name";
+            return r;
+        }
     const std::string want = "LBP3-Recompiled-" + r.tag + ".zip";
     if (auto assets = j.find("assets"); assets != j.end() && assets->is_array()) {
         for (const json& a : *assets) {
@@ -334,6 +340,7 @@ bool ApplyUpdate(const fs::path& unpacked, const fs::path& install, std::vector<
             fs::remove(old, ec2);
             fs::rename(dst, old, ec2);
             if (ec2) return fail("couldn't replace " + rel.string() + " (" + ec.message() + ")");
+            std::ofstream(install / ".update_old_files.txt", std::ios::app) << rel.generic_string() << ".old\n";  // for RemoveOldFiles
             fs::copy_file(it->path(), dst, fs::copy_options::overwrite_existing, ec2);
             if (ec2) {
                 fs::rename(old, dst, ec2);  // put it back
@@ -346,20 +353,27 @@ bool ApplyUpdate(const fs::path& unpacked, const fs::path& install, std::vector<
 }
 
 void RemoveOldFiles(const fs::path& install) {
+    // Only the files an update recorded renaming aside (.update_old_files.txt), nothing else.
+    const fs::path list = install / ".update_old_files.txt";
+    std::ifstream in(list);
+    if (!in) return;
+    std::string line;
+    bool left = false;
+    std::vector<std::string> keep;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const fs::path rel = fs::u8path(line);
+        if (line.empty() || rel.extension() != ".old" || ProtectedPath(rel)) continue;
+        std::error_code ec;
+        fs::remove(install / rel, ec);
+        if (ec && fs::exists(install / rel)) left = true, keep.push_back(line);  // still in use: next time
+    }
+    in.close();
     std::error_code ec;
-    for (auto it = fs::recursive_directory_iterator(install, ec); it != fs::recursive_directory_iterator(); it.increment(ec)) {
-        if (ec) break;
-        const fs::path rel = fs::relative(it->path(), install, ec);
-        if (ProtectedPath(rel)) {
-            if (it->is_directory(ec)) it.disable_recursion_pending();
-            continue;
-        }
-        if (it.depth() > 3) it.disable_recursion_pending();
-        // only ours: an <name>.old beside the <name> an update replaced
-        if (it->path().extension() == ".old" && it->is_regular_file(ec) && fs::exists(fs::path(it->path()).replace_extension(), ec)) {
-            std::error_code ec2;
-            fs::remove(it->path(), ec2);
-        }
+    if (!left) fs::remove(list, ec);
+    else {
+        std::ofstream out(list, std::ios::trunc);
+        for (const auto& k : keep) out << k << "\n";
     }
 }
 

@@ -118,6 +118,9 @@ void ApplyStyle(float scale) {
     c[ImGuiCol_TableBorderLight] = ImVec4(kStitch.x, kStitch.y, kStitch.z, 0.10f);
     c[ImGuiCol_NavCursor] = kOrange;
     c[ImGuiCol_PlotHistogram] = kCardboard;
+    c[ImGuiCol_TitleBg] = ImVec4(0.212f, 0.165f, 0.125f, 1.f);
+    c[ImGuiCol_TitleBgActive] = ImVec4(0.420f, 0.318f, 0.212f, 1.f);
+    c[ImGuiCol_TitleBgCollapsed] = ImVec4(0.212f, 0.165f, 0.125f, 1.f);
     c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0.1f);
     c[ImGuiCol_ScrollbarGrab] = ImVec4(kStitch.x, kStitch.y, kStitch.z, 0.22f);
     c[ImGuiCol_TextSelectedBg] = ImVec4(kOrange.x, kOrange.y, kOrange.z, 0.35f);

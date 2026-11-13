@@ -54,7 +54,7 @@ bool ExtractZip(const std::filesystem::path& zip, const std::filesystem::path& d
 // (in use) is renamed to <name>.old first. changed gets the relative paths written.
 bool ApplyUpdate(const std::filesystem::path& unpacked, const std::filesystem::path& install, std::vector<std::string>* changed,
                  std::string* error);
-// Removes the *.old files a previous update left (the launcher calls it at start).
+// Removes the *.old files a previous update recorded (.update_old_files.txt); called at start.
 void RemoveOldFiles(const std::filesystem::path& install);
 // A path the update must never write (user\..., analysis\..., logs\...), relative to the install.
 bool ProtectedPath(const std::filesystem::path& relative);

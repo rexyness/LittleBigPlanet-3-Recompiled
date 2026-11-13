@@ -206,12 +206,15 @@ static void TestNetFake() {
     const CreateResult r = CreateOnlineAccounts((tmp / "config").string(), "http://127.0.0.1:1", at, "Second_2", "pass-word-22",
                                                 [&](const std::string& l) { log.push_back(l); });
     CHECK(!r.ok && r.message.find("Website account: not created") != std::string::npos);
-    CHECK(fs::exists(tmp / "config" / "online_account.txt"));
+    CHECK(fs::exists(tmp / "config" / "online_account.txt"));  // shadNet made it: it is an account (the website can follow)
+    CHECK(!fs::exists(tmp / "config" / "online_account_Second_2.pending"));
     bool password_logged = false;
     for (const auto& l : log) password_logged |= l.find("pass-word-22") != std::string::npos;
     CHECK(!password_logged);
     const CreateResult again = CreateOnlineAccounts((tmp / "config").string(), "http://127.0.0.1:1", at, "Second_2", "pass-word-22", nullptr);
-    CHECK(!again.ok && fs::exists(tmp / "config" / "online_account_second_2.txt"));  // a new file, the first untouched
+    CHECK(!again.ok && again.message.find("taken") != std::string::npos);
+    CHECK(ListAccounts(tmp / "config").size() == 1);  // a refused name leaves no account file behind
+    CHECK(!fs::exists(tmp / "config" / "online_account_Second_2.pending"));
     server.Close();
     {
         std::lock_guard lock(server.m);

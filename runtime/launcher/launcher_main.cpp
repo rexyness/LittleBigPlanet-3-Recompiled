@@ -19,6 +19,7 @@
 
 #include <SDL3/SDL_main.h>
 #include <imgui_impl_sdl3.h>
+#include <imgui_internal.h>
 #include <imgui_impl_sdlrenderer3.h>
 
 #include <algorithm>
@@ -496,7 +497,7 @@ void Header(App& a) {
     ImGui::PopFont();
     ImGui::SetCursorScreenPos(ImVec2(x + S(2), p0.y + S(80)));
     const char* build = a.portable ? "packaged" : a.s.build == Build::Best ? "best of both worlds" : a.s.build == Build::Port ? "port" : a.s.build == Build::Custom ? "custom build" : "this launcher's build";
-    const std::string version = InstalledVersion(LauncherDir());
+    const std::string& version = a.version;
     ImGui::PushFont(g_bold, 16.f);
     ImGui::TextColored(kCardboard, "native port");
     ImGui::SameLine();
@@ -519,7 +520,8 @@ void Header(App& a) {
     // the status line (warnings only; everything else is the pill and toasts)
     const bool running_other = state != GameState::Running && state != GameState::Starting && a.game_running;
     const bool ok = EssentialsOk(a);
-    const bool updating = a.update_build.running || a.release_install.running;
+    // (a sign-in test holds the account for a moment: Play waits for it)
+    const bool updating = a.update_build.running || a.release_install.running || a.online.test.running;
     const bool can_play = ok && !a.marker && !running_other && !updating && (state == GameState::Idle || state == GameState::Ended) && !a.shot_mode;
     ImGui::SetCursorScreenPos(ImVec2(x, p0.y + S(148)));
     if (a.marker) ImGui::TextColored(kWarn, "A test run has your saves set aside; Play waits until it finishes.");
@@ -733,6 +735,7 @@ int main(int argc, char** argv) {
     SetTaskbarIdentity();
     App a;
     a.portable = Portable(LauncherDir());
+    a.version = InstalledVersion(LauncherDir());
     if (a.portable && !shot) RemoveOldFiles(LauncherDir());  // what the last update renamed aside
     const bool pads_at_start = !shot && !GameRunning();
     if (!SDL_Init(SDL_INIT_VIDEO | (pads_at_start ? SDL_INIT_GAMEPAD : 0))) {
@@ -816,6 +819,8 @@ int main(int argc, char** argv) {
         std::string name;
         std::function<void()> setup;
         int frames;
+        std::function<void()> act;  // input for the shot, a few frames in (once its windows exist)
+        int act_frame = 0;
     };
     std::vector<Shot> shots;
     if (shot) {
@@ -833,6 +838,26 @@ int main(int argc, char** argv) {
                          },
                          40});
         shots.push_back({"motion_page_change", [&a] { a.page = Saves; }, 5});
+        // a click on the first level card (its popup), and keyboard navigation (the focus ring)
+        shots.push_back({"motion_community_click", [&a] { a.page = Community; }, 50,
+                         [&a] {
+                             if (!a.marks.count("level_0")) return;
+                             const auto& [mn, mx] = a.marks["level_0"];
+                             ImGuiIO& io = ImGui::GetIO();
+                             io.AddMousePosEvent((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f);
+                             io.AddMouseButtonEvent(0, true);
+                             io.AddMouseButtonEvent(0, false);
+                         },
+                         20});
+        shots.push_back({"motion_keyboard_nav", [&a] {
+                             a.community.selected = -1;
+                             if (ImGui::GetCurrentContext()->OpenPopupStack.Size) ImGui::ClosePopupToLevel(0, true);  // the level's popup
+                             a.page = Graphics;
+                             ImGuiIO& io = ImGui::GetIO();
+                             io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+                             for (int i = 0; i < 4; ++i) io.AddKeyEvent(ImGuiKey_DownArrow, true), io.AddKeyEvent(ImGuiKey_DownArrow, false);
+                         },
+                         40});
         shots.push_back({"motion_toasts", [&a] {
                              a.page = Home;
                              ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX);
@@ -864,8 +889,14 @@ int main(int argc, char** argv) {
             }
             ImGui_ImplSDL3_ProcessEvent(&e);
             if (e.type == SDL_EVENT_QUIT || (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && e.window.windowID == SDL_GetWindowID(a.window))) {
-                if (GameBusy(a) && a.s.confirm_quit && !shot) a.confirm_close = true;
-                else running = false;
+                if (GameBusy(a) && a.s.confirm_quit && !shot) {
+                    a.confirm_close = true;  // asked in the window, so it comes back first (minimised while playing)
+                    SDL_ShowWindow(a.window);
+                    SDL_RestoreWindow(a.window);
+                    SDL_RaiseWindow(a.window);
+                } else {
+                    running = false;
+                }
             }
             if (e.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED) {
                 const float ns = SDL_GetWindowDisplayScale(a.window);
@@ -980,6 +1011,7 @@ int main(int argc, char** argv) {
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), a.renderer);
         const bool shot_ready = a.news_ready && !a.stats_job.running && !a.community.job.running && !a.online.ping.running &&
                                 !a.community.icon_worker;
+        if (shot && shot_index < shots.size() && shots[shot_index].act && shot_frames == shots[shot_index].act_frame) shots[shot_index].act();
         if (shot && shot_index < shots.size() && (shot_ready || shot_frames > 600) && ++shot_frames >= shots[shot_index].frames) {
             SaveShot(a.renderer, shot_dir + "\\launcher_" + shots[shot_index].name + ".bmp");
             shot_frames = 0;

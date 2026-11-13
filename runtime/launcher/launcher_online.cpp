@@ -159,7 +159,7 @@ void PageOnline(App& a) {
         ImGui::BeginDisabled(o.ping.running || server.empty());
         if (ImGui::SmallButton("Check again")) StartPing(a);
         ImGui::EndDisabled();
-        Help("Opening this page asks the server once whether it is there (one small request, nothing about you is sent).");
+        Help("Opening this page asks the server whether it is there and for its news (two small requests; nothing about you is sent).");
         if (!a.acct.file.ok()) {
             InputString("Server", s.online_server, "play.lbppc.com", 300);
             Help("Used only without an account file; an account carries its own server.");
@@ -186,7 +186,7 @@ void PageOnline(App& a) {
             ImGui::SameLine(S(520));
             ImGui::BeginDisabled(a.shot_mode);
             if (!e.active) {
-                ImGui::BeginDisabled(GameBusy(a) || a.friends.session.Active());
+                ImGui::BeginDisabled(GameBusy(a) || a.friends.session.Active() || o.test.running);
                 if (ImGui::SmallButton("Use this one")) {
                     std::string error;
                     if (SetActiveAccount(ConfigDir(a), e.file, &error)) ToastMsg(a, "Now playing as " + e.data.name, kGood);
@@ -285,6 +285,21 @@ void PageOnline(App& a) {
     EndCard();
 }
 
+void StartCreateAccount(App& a, const std::string& name) {
+    OnlineState& o = a.online;
+    if (o.create.running || !ValidOnlineName(name)) return;
+    o.create.Start();
+    o.create_toasted = false;
+    const std::string dir = ConfigDir(a).string();
+    const Paths p = a.p;
+    std::thread([&a, name, dir, p] {
+        const CreateResult r = CreateOnlineAccounts(dir, "https://play.lbppc.com", ParseShadnetServer("play.lbppc.com"), name, RandomPassword(20),
+                                                    [&](const std::string& l) { a.online.create.Line(l); });
+        AppendLauncherLog(p, "create account \"" + name + "\": " + r.message);  // never the password
+        a.online.create.Finish(r.ok, r.message);
+    }).detach();
+}
+
 void OnlineModals(App& a) {
     OnlineState& o = a.online;
     // change the saved password
@@ -337,28 +352,26 @@ void OnlineModals(App& a) {
             "shadNet gets it over an encrypted connection, the website only a hash of it.");
         ImGui::PopTextWrapPos();
         if (BigButton("Create", ImVec2(S(150), 0), kPlay)) {
-            o.create.Start();
-            const std::string name = o.create_name, dir = ConfigDir(a).string();
-            const Paths p = a.p;
-            std::thread([&a, name, dir, p] {
-                const CreateResult r = CreateOnlineAccounts(dir, "https://play.lbppc.com", ParseShadnetServer("play.lbppc.com"), name,
-                                                            RandomPassword(20), [&](const std::string& l) { a.online.create.Line(l); });
-                AppendLauncherLog(p, "create account \"" + name + "\": " + r.message);  // never the password
-                a.online.create.Finish(r.ok, r.message);
-            }).detach();
+            StartCreateAccount(a, o.create_name);
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
         if (BigButton("Cancel", ImVec2(S(150), 0), kCard)) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
+    bool made = false;
     {
         std::lock_guard lock(o.create.m);
-        if (o.create.done && o.create.ok && !o.create.message.empty()) {
-            ToastMsg(a, o.create.message, kGood);
-            o.create.message += " ";  // shown once
-            a.s.online = true;
+        if (o.create.done && !o.create_toasted) {
+            o.create_toasted = true;
+            made = o.create.ok;
+            ToastMsg(a, o.create.message, o.create.ok ? kGood : kBad);
         }
+    }
+    if (made) {
+        a.s.online = true;
+        Refresh(a, true);
+        ReadAccounts(a, true);
     }
 }
 
@@ -389,7 +402,8 @@ void PageFriends(App& a) {
     }
     const ShadnetEndpoint at = ParseShadnetServer(ShadnetServer(Eff(a)));
     // signed in only while this page is open (Frame signs out when it closes)
-    if (v.status == FriendsSession::Status::Off && !f.stopping && !a.shot_mode && at.ok()) f.session.Start(at, a.acct.file.name, a.acct.file.password);
+    if (v.status == FriendsSession::Status::Off && !f.stopping && !a.shot_mode && at.ok() && !a.online.test.running)
+        f.session.Start(at, a.acct.file.name, a.acct.file.password);
 
     if (BeginCard("who", ImVec2(0, 0), false)) {
         switch (v.status) {
@@ -430,7 +444,8 @@ void PageFriends(App& a) {
         ImGui::EndDisabled();
     }
     EndCard();
-    if (!v.list.received.empty() && BeginCard("requests", ImVec2(0, 0), false)) {
+    if (!v.list.received.empty()) {
+        if (BeginCard("requests", ImVec2(0, 0), false)) {
         Heading("Friend requests");
         for (const auto& n : v.list.received) {
             ImGui::PushID(n.c_str());
@@ -445,9 +460,8 @@ void PageFriends(App& a) {
             ImGui::EndDisabled();
             ImGui::PopID();
         }
+        }
         EndCard();
-    } else if (v.list.received.empty()) {
-        // (no card when there are no requests)
     }
     const float w = ImGui::GetContentRegionAvail().x;
     Heading(("Friends (" + std::to_string(v.list.friends.size()) + ")").c_str());
@@ -539,7 +553,7 @@ void IconWorker(App& a) {
     }
     c.icon_worker = true;
     const std::string server = OnlineServer(a);
-    const fs::path cache = a.p.root / "user" / "cache" / "launcher_icons";
+    const fs::path cache = a.shot_mode ? fs::path() : a.p.root / "user" / "cache" / "launcher_icons";
     std::thread([&c, server, cache] {
         for (;;) {
             std::string hash;
@@ -551,12 +565,12 @@ void IconWorker(App& a) {
             }
             std::string png;
             std::error_code ec;
-            const fs::path file = cache / (hash + ".png");
-            if (fs::exists(file, ec)) png = ReadFile(file);
+            const fs::path file = cache.empty() ? fs::path() : cache / (hash + ".png");
+            if (!file.empty() && fs::exists(file, ec)) png = ReadFile(file);
             if (png.empty()) {
                 std::string error;
                 png = FetchIcon(server, hash, &error);
-                if (!png.empty()) {
+                if (!png.empty() && !file.empty()) {
                     fs::create_directories(cache, ec);
                     std::ofstream(file, std::ios::binary) << png;
                 }
@@ -647,10 +661,17 @@ void PageCommunity(App& a) {
         const LevelCard& l = page.levels[i];
         if (i % cols) ImGui::SameLine();
         ImGui::PushID(static_cast<int>(i));
+        bool open = false;
         if (BeginCard("lvl", ImVec2(cw, S(268)))) {
             ImDrawList* dl = ImGui::GetWindowDrawList();
             const ImVec2 p = ImGui::GetCursorScreenPos();
             const float iw = cw - S(36), ih = S(150);
+            // the picture is the button (mouse, keyboard and pad)
+            open = ImGui::InvisibleButton("##open", ImVec2(iw, ih));
+            if (i == 0) a.marks["level_0"] = {ImGui::GetItemRectMin(), ImGui::GetItemRectMax()};
+            if (ImGui::IsItemFocused() && ImGui::GetIO().NavVisible)
+                dl->AddRect(ImVec2(p.x - S(4), p.y - S(4)), ImVec2(p.x + iw + S(4), p.y + ih + S(4)), Col(kOrange), S(12), S(2.5f));
+            ImGui::SetCursorScreenPos(p);
             auto it = c.icons.find(l.icon_hash);
             if (it != c.icons.end() && it->second.tex) {
                 dl->AddImageRounded(Ref(it->second), p, ImVec2(p.x + iw, p.y + ih), ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, S(10));
@@ -664,7 +685,7 @@ void PageCommunity(App& a) {
                 DrawIcon(dl, Icon::Star, ImVec2(b.x + S(13), b.y + S(12)), S(13), Col(kText));
                 dl->AddText(ImVec2(b.x + S(24), b.y + S(3)), Col(kText), "Team Pick");
             }
-            ImGui::Dummy(ImVec2(iw, ih + S(4)));
+            ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + ih + S(4)));
             ImGui::PushFont(g_bold, 17.f);
             ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + iw);
             const std::string title = l.title.size() > 60 ? l.title.substr(0, 57) + "..." : l.title;
@@ -684,7 +705,7 @@ void PageCommunity(App& a) {
             ImGui::TextColored(kDim, "%d plays", l.plays);
         }
         EndCard();
-        if (ImGui::IsItemClicked()) c.selected = static_cast<int>(i), ImGui::OpenPopup("level");
+        if (open) c.selected = static_cast<int>(i), ImGui::OpenPopup("level");
         if (c.selected == static_cast<int>(i) && ImGui::BeginPopupModal("level", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::PushFont(g_heading, 26.f);
             ImGui::TextUnformatted(l.title.c_str());
@@ -703,7 +724,7 @@ void PageCommunity(App& a) {
                     std::string token, error;
                     {
                         std::lock_guard lock(c.m);
-                        token = c.token;
+                        if (c.token_for == acct.name) token = c.token;
                     }
                     if (token.empty()) {
                         const WebLogin w = RefreshLogin(server, AccountEmail(acct), acct.password);
@@ -711,6 +732,7 @@ void PageCommunity(App& a) {
                         token = w.token;
                         std::lock_guard lock(c.m);
                         c.token = token;  // kept in memory only
+                        c.token_for = acct.name;
                     }
                     const bool ok = QueueLevel(server, token, id, &error);
                     c.queue_job.Finish(ok, ok ? "Queued: it's in your queue in the game (Pod > My Queue)." : "Couldn't queue it: " + error);

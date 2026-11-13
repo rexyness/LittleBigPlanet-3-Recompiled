@@ -116,6 +116,7 @@ struct CommunityState {
     int selected = -1;
     Job queue_job;
     std::string token;  // the website sign-in, in memory only
+    std::string token_for;  // ... and whose it is (a switch of account signs in again)
 };
 
 // The Online hub's state.
@@ -139,6 +140,7 @@ struct OnlineState {
     char create_name[32] = {};
     char create_pass[80] = {};
     bool show_password = false;
+    bool create_toasted = false;
 };
 
 // The Friends page's state.
@@ -168,6 +170,7 @@ struct App {
     std::string saved_ini;
     Paths p;
     bool portable = false;
+    std::string version;  // InstalledVersion, read once
     std::vector<Check> checks;
     std::vector<Backup> backups;
     bool game_running = false, marker = false;
@@ -254,6 +257,7 @@ std::string PickFolder(const wchar_t* title);
 Texture MakeTexture(SDL_Renderer* r, const Image& img);
 void FreeTexture(Texture& t);
 void StopFriends(App& a, bool wait);   // sign out of shadNet (Friends), now or in the background
+void StartCreateAccount(App& a, const std::string& name);  // both accounts on play.lbppc.com
 bool DevCheckout(const App& a);        // a git checkout (updates by git), not a package
 void StartUpdateCheck(App& a);         // git fetch (dev checkouts)
 void StartReleaseCheck(App& a);        // the latest GitHub release (packages)
