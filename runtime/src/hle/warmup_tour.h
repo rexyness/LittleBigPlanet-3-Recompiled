@@ -5,7 +5,8 @@
 // saves (analysis\savedata_live_is_test). Each level is launched with the game's own "go to level"
 // (FUN_002689c0 through FUN_007c6780, as GoToTutorialLevel__ does), then the tour waits for the
 // load and dwells: cutscene levels play until the game leaves them, other levels get scripted
-// movement (run right and left, jump) for LBP3_WARMUP_TOUR_DWELL seconds (default 150).
+// movement (run right and left, jump) for LBP3_WARMUP_TOUR_DWELL seconds (default 150);
+// LBP3_WARMUP_TOUR_CUTSCENE caps the wait in a cutscene level (default 300 s).
 // Progress goes to the log as [tour] lines; "[tour] done" ends it.
 // Remote commands (LBP3_REMOTE_INPUT): "tour-list", "tour-where", "tour-goto <type> <id> [mode]".
 #pragma once

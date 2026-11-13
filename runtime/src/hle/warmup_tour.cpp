@@ -72,6 +72,7 @@ std::vector<std::pair<int, int>> g_ranges;  // index ranges into the level list,
 std::vector<size_t> g_order;                 // the resulting visit order
 size_t g_pos = 0;                            // position in g_order
 int g_dwellSecs = 150;
+int g_cutsceneSecs = 300;  // a cutscene level ends on its own; this caps the wait
 std::vector<Level> g_levels;
 size_t g_next = 0;
 Phase g_phase = Phase::Off;
@@ -284,7 +285,7 @@ void RunTour() {
     case Phase::Dwell: {
         const bool cutscene = g_inputMode == 2;
         const bool left = CurrentSlot() != g_target;
-        const double limit = cutscene ? 300.0 : g_dwellSecs;
+        const double limit = cutscene ? g_cutsceneSecs : g_dwellSecs;
         if (!left && PhaseSecs() < limit) return;
         const Level l = Unpack(g_target);
         std::fprintf(stderr, "[tour] %zu leave (type %u, id 0x%x) after %.0f s: %s\n", g_next, l.type, l.id,
@@ -339,6 +340,7 @@ void InstallHooks() {
         }
     }
     if (const char* d = std::getenv("LBP3_WARMUP_TOUR_DWELL")) g_dwellSecs = std::max(10, std::atoi(d));
+    if (const char* d = std::getenv("LBP3_WARMUP_TOUR_CUTSCENE")) g_cutsceneSecs = std::max(10, std::atoi(d));
     const DWORD attr = GetFileAttributesA("analysis\\savedata_live_is_test");
     if (attr == INVALID_FILE_ATTRIBUTES) {
         std::fprintf(stderr,
