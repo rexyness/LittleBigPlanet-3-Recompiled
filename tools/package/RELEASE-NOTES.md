@@ -21,9 +21,10 @@ The first visit to each area can pause briefly while your graphics driver builds
 - The game's text entry, photos and system dialogs drawn in game; Create mode works.
 - Your DLC, from your own packs, and the old "My Unlocks" LBP1/LBP2 items.
 - **Online on the community servers at play.lbppc.com** (made by the LBPPC project; Sony's servers are gone):
-  create an account from the launcher's Online page. Community levels, Dive In, your profile and your
-  friends list work. Online co-op is **experimental**: inviting and joining a friend works, but the session
-  may drop after a few minutes.
+  create an account from the launcher's Online page. Community levels, your profile and your friends list
+  work. Dive In doesn't match you with strangers on this server; play with friends through invites or Join.
+  Online co-op is **experimental**: inviting and joining a friend works, but the session may drop after a
+  few minutes.
 - A launcher with a setup wizard, a game file check, a DLC installer, save backups, a controller test, play
   stats and updates.
 

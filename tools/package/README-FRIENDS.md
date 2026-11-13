@@ -40,7 +40,8 @@ after a reboot can also take 20-40 seconds while Windows reads that cache.
 Online play uses the community servers at **play.lbppc.com** (made by the LBPPC project; Sony's servers are
 gone). You need your own account there: on the launcher's **Online** page, type an online name and press
 **Create account**, then switch **Online** on. Your password stays in `user\config\online_account.txt` on your
-PC. Community levels, Dive In and your friends list work. Add friends by name on the launcher's **Friends** page.
+PC. Community levels, your profile and your friends list work. Dive In doesn't match you with strangers on this
+server; play with friends through invites or Join. Add friends by name on the launcher's **Friends** page.
 
 Online co-op is **experimental**: inviting and joining a friend works (from the game's own menus), but the
 session may drop after a few minutes. A fix is in progress and will arrive through the launcher's
