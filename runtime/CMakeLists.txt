@@ -41,6 +41,7 @@ add_library(hle STATIC
     src/hle/hle.cpp
     src/hle/app_content.cpp
     src/hle/my_unlocks.cpp
+    src/hle/warmup_tour.cpp
     src/hle/audioout.cpp
     src/hle/audio_downmix.cpp
     src/hle/trophy.cpp
@@ -149,7 +150,11 @@ target_link_libraries(rescachetest PRIVATE hle)
 add_executable(unlocktest tests/unlocktest.cpp)
 target_link_libraries(unlocktest PRIVATE hle)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest unlocktest)
+# LBP3_WARMUP_TOUR (perf/warmup_step.md): the movement pattern.
+add_executable(tourtest tests/tourtest.cpp)
+target_link_libraries(tourtest PRIVATE hle)
+
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest unlocktest tourtest)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()

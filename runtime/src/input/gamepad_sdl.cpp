@@ -3,6 +3,7 @@
 // a new controller takes the lowest free player slot (see gamepad.h).
 #include "input/gamepad.h"
 #include "hle/ime_dialog.h"
+#include "hle/warmup_tour.h"
 #include "input/actions.h"
 #include "input/game_state.h"
 #include "video/framegen.h"
@@ -315,6 +316,10 @@ void Parse(const std::string& line) {
         uint64_t ms = 150;
         in >> name >> ms;
         if (!actions::HoldForTest(name, ms)) std::fprintf(stderr, "[remote] unknown action '%s'\n", name.c_str());
+        return;
+    }
+    if (word.rfind("tour-", 0) == 0) {  // "tour-list", "tour-where", "tour-goto <type> <id> [mode]"
+        hle::warmup_tour::Command(word, in);
         return;
     }
     if (word == "fgstill") {  // "fgstill <name> [count]": write the next generated frames (LBP3_FRAMEGEN=1)

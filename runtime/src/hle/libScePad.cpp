@@ -4,6 +4,7 @@
 
 #include "hle/modal.h"
 #include "hle/my_unlocks.h"
+#include "hle/warmup_tour.h"
 #include "input/gamepad.h"
 
 namespace hle::pad {
@@ -59,6 +60,7 @@ int PS4_SYSV_ABI scePadReadState(int32_t handle, ps4::PadData* data) {
     if (slot < 0) return SCE_PAD_ERROR_INVALID_HANDLE;
     if (!data) return SCE_PAD_ERROR_INVALID_ARG;
     input::Read(slot, *data);  // a disconnected pad is reported via data->connected
+    if (slot == 0) warmup_tour::ApplyInput(*data);  // LBP3_WARMUP_TOUR: the tour's scripted input
     if (modal::HoldsPad(data->buttons, slot)) {
         // A system dialog has the controller: the game sees a neutral pad (hle/modal.h).
         data->buttons = 0;
@@ -70,6 +72,7 @@ int PS4_SYSV_ABI scePadReadState(int32_t handle, ps4::PadData* data) {
         // LBP3_MY_UNLOCKS: keep the back button from cancelling the import (hle/my_unlocks.h).
         data->buttons = my_unlocks::GuardImport(data->buttons);
         input::RunGameHooks(slot);
+        if (slot == 0) warmup_tour::Tick();  // LBP3_WARMUP_TOUR and the "tour-" remote commands
     }
     return SCE_OK;
 }
