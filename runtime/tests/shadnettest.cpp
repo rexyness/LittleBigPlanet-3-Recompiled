@@ -70,6 +70,8 @@ std::wstring InvitationText();
 void AnswerInvitation(bool join);
 int SYSV sceSystemServiceReceiveEvent(void* event);
 int SYSV sceSystemServiceGetStatusShadNet(void* status);
+std::vector<std::string> PrepareSend(const void* param);
+bool SendCustomData(const std::string& to);
 }  // namespace hle::npsn
 
 namespace {
@@ -367,6 +369,8 @@ struct WebMock {
             answer = "{\"profile\":{\"onlineId\":\"Tester_1\"}}";
         else if (route == "/v1/sessions" && s.method == "POST")
             answer = "{\"sessionId\":\"sess-1\"}";
+        else if (route == "/v1/gameCustomData/items" && s.method == "POST")
+            answer = "{\"itemId\":\"77\"}";
         else
             status = 404, answer = "{\"error\":{\"code\":2105868,\"message\":\"Not found\"}}";
         {
@@ -757,11 +761,53 @@ int main(int argc, char** argv) {
         CHECK(hle::npsn::sceNpWebApiUtilityParseNpId("UGFsXzFA", npId) == 0);  // "Pal_1@"
         CHECK(std::memcmp(npId, "Pal_1\0", 6) == 0 && npId[16] == 0 && npId[28] == 1);
 
+        // Sending game custom data (the dialog's mode 1), laid out as LBP3 fills it (eboot.bin+0xadeda0).
+        {
+            std::vector<uint8_t> param(0x90), modeData(0x88);
+            uint8_t named[36] = "Pal_1";
+            const char* name = "Join my game";
+            const char* description = "A level in LittleBigPlanet 3";
+            const char* message = "Come and play";
+            const uint8_t thumb[] = {0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3};
+            const uint8_t data[] = {9, 8, 7, 6, 5};
+            const auto put = [&](size_t off, const void* p) { std::memcpy(modeData.data() + off, &p, 8); };
+            const auto put32 = [&](size_t off, uint32_t v) { std::memcpy(modeData.data() + off, &v, 4); };
+            put(0x00, name);
+            put(0x08, description);
+            put(0x20, message);
+            put(0x38, thumb);
+            put32(0x40, sizeof(thumb));
+            put(0x48, data);
+            put32(0x50, sizeof(data));
+            put(0x78, named);
+            put32(0x80, 1);
+            const void* md = modeData.data();
+            std::memcpy(param.data() + 0x48, &md, 8);
+            param[0x34] = 1;
+            auto to = hle::npsn::PrepareSend(param.data());
+            CHECK(to.size() == 1 && to[0] == "Pal_1");
+            CHECK(hle::npsn::SendCustomData("Pal_1"));
+            seen = web.Seen();
+            const auto& post = seen.back();
+            CHECK(post.method == "POST" && post.path == "/v1/gameCustomData/items");
+            CHECK(post.authorization == "Bearer tok-SECRET-123");
+            CHECK(post.contentType.find("multipart/mixed; boundary=") == 0);
+            CHECK(post.body.find("\"toAccountIds\":[\"Pal_1\"]") != std::string::npos);
+            CHECK(post.body.find("\"dataName\":\"Join my game\"") != std::string::npos);
+            CHECK(post.body.find("\"message\":\"Come and play\"") != std::string::npos);
+            CHECK(post.body.find("Content-Description: game-data-binary-0\r\n\r\n\x09\x08\x07\x06\x05\r\n") != std::string::npos);
+            CHECK(post.body.find("Content-Description: game-data-thumbnail-0") != std::string::npos);
+            // No players named: the friends.
+            put32(0x80, 0);
+            to = hle::npsn::PrepareSend(param.data());
+            CHECK(to.size() == 2 && to[0] == "Pal_1" && to[1] == "Pal_2");
+        }
+
         Stop();
         // Signed out: answered locally (and nothing reaches the server).
         WebResult off = WebRequest(ctx, friendPath);
         CHECK(off.status == 200 && off.body == "{\"friendList\":[],\"start\":0,\"size\":0,\"totalResults\":0}");
-        CHECK(web.Seen().size() == 5);
+        CHECK(web.Seen().size() == 6);  // as before Stop(): 5 requests and the send
         hle::npsn::sceNpWebApiDeleteContext(ctx);
         mock.Close();
         web.Close();

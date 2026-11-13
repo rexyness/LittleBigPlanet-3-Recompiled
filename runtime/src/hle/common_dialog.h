@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "hle/abi.h"
 
@@ -241,12 +242,18 @@ constexpr size_t kGameCustomDataResultOffset = 0x0C;
 constexpr size_t kGameCustomDataModeOffset = 0x34;
 
 // shadNet (hle/np_shadnet.cpp) puts an invitation it received behind mode 2: the dialog asks whether
-// to join it, and a "Join" answers the dialog with success. Unset (the dialog finishes as cancelled,
-// as offline) unless shadNet is on. The functions run on the game's threads.
+// to join it, and a "Join" answers the dialog with success. Mode 1 sends the game's data to a friend:
+// the dialog asks to whom (or confirms the one the game named), and succeeds once the server took it.
+// Unset (the dialog finishes as cancelled, as offline) unless shadNet is on. The functions run on the
+// game's threads, except send, which runs on a thread of its own.
 struct GameCustomDataHook {
     std::wstring (*invitationText)();  // the newest invitation not yet answered, as the question; "" = none
     void (*answer)(bool join);         // the player's answer to that invitation
     void (*opened)(int32_t mode, const void* param);  // every Open (for the log)
+    // Mode 1: keeps a copy of what the game asks to send (its param doesn't outlive Open) and returns
+    // who it can go to: the players the game named, else the friends; empty = it can't be sent.
+    std::vector<std::string> (*prepareSend)(const void* param);
+    bool (*send)(const std::string& to);  // sends the kept copy; true when the server took it
 };
 void SetGameCustomDataHook(const GameCustomDataHook* hook);
 

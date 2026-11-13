@@ -27,6 +27,7 @@
 #include <mutex>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -563,12 +564,16 @@ std::mutex g_customMutex;
 std::shared_ptr<dialog_ui::Window> g_customWindow;
 int32_t g_customResult = kResultUserCanceled;
 bool g_customModal = false;
+int32_t g_customMode = 0;
+std::vector<std::string> g_customNames;  // mode 1: who it can be sent to
+std::shared_ptr<std::atomic<int>> g_customSending;  // mode 1: the send under way (-1, then 0 or 1)
 
-// Lock held: the prompt was answered (join) or closed (no answer: not joined).
-void FinishCustom(bool join) {
-    if (const GameCustomDataHook* hook = g_customHook.load()) hook->answer(join);
-    g_customResult = join ? kResultOk : kResultUserCanceled;
+// Lock held: the prompt was answered (ok: join / sent) or closed (no answer: nothing done).
+void FinishCustom(bool ok) {
+    if (const GameCustomDataHook* hook = g_customHook.load(); hook && g_customMode == 2) hook->answer(ok);
+    g_customResult = ok ? kResultOk : kResultUserCanceled;
     g_customWindow.reset();
+    g_customSending.reset();
     if (g_customModal) {
         modal::End();
         g_customModal = false;
@@ -773,22 +778,46 @@ int32_t PS4_SYSV_ABI sceGameCustomDataDialogOpen(const void* param) {
     if (status == kStatusRunning) return kErrorBusy;
     std::lock_guard lock(g_customMutex);
     g_customResult = kResultUserCanceled;
+    g_customMode = 0;
+    g_customNames.clear();
     if (const GameCustomDataHook* hook = g_customHook.load()) {
         int32_t mode = 0;
         std::memcpy(&mode, static_cast<const uint8_t*>(param) + kGameCustomDataModeOffset, sizeof(mode));
         hook->opened(mode, param);
-        const std::wstring question = mode == 2 ? hook->invitationText() : std::wstring();
-        if (!question.empty()) {
-            Spec s;
-            s.text = question;
-            s.icon = Icon::Question;
+        Spec s;
+        s.icon = Icon::Question;
+        s.defaultButton = 1;
+        s.cancelButton = 2;
+        s.autoAnswer = 2;  // scripted runs never join or send
+        s.logName = "customdata";
+        if (mode == 2) {
+            s.text = hook->invitationText();
             s.button1 = L"Join";
             s.button2 = L"Not now";
-            s.defaultButton = 1;
-            s.cancelButton = 2;
-            s.autoAnswer = 2;  // scripted runs never join
-            s.logName = "customdata";
-            std::fprintf(stderr, "[dialog] game custom data: an invitation: %s\n", Brief(question).c_str());
+            if (!s.text.empty())
+                std::fprintf(stderr, "[dialog] game custom data: an invitation: %s\n", Brief(s.text).c_str());
+        } else if (mode == 1) {
+            g_customNames = hook->prepareSend(param);
+            std::wstring who;
+            if (g_customNames.size() == 1) {
+                for (const char c : g_customNames[0]) who += static_cast<wchar_t>(static_cast<unsigned char>(c));
+                s.text = L"Send an invitation to " + who + L"?";
+            } else if (!g_customNames.empty()) {
+                s.kind = Kind::List;
+                s.text = L"Send an invitation to:";
+                for (const auto& n : g_customNames) {
+                    std::wstring w;
+                    for (const char c : n) w += static_cast<wchar_t>(static_cast<unsigned char>(c));
+                    s.items.push_back(w);
+                }
+            }
+            s.button1 = L"Send";
+            s.button2 = L"Cancel";
+            if (!s.text.empty())
+                std::fprintf(stderr, "[dialog] game custom data: send, to %zu possible player(s)\n", g_customNames.size());
+        }
+        if (!s.text.empty()) {
+            g_customMode = mode;
             g_customWindow = dialog_ui::Show(std::move(s));
             modal::Begin("customdata");
             g_customModal = true;
@@ -804,9 +833,27 @@ int32_t PS4_SYSV_ABI sceGameCustomDataDialogOpen(const void* param) {
 int32_t PS4_SYSV_ABI sceGameCustomDataDialogUpdateStatus() {
     if (g_customStatus.load() != kStatusRunning) return g_customStatus.load();
     std::lock_guard lock(g_customMutex);
+    if (g_customStatus.load() != kStatusRunning) return g_customStatus.load();
+    // Mode 1, sending: done when the server answered.
+    if (g_customSending) {
+        if (const int r = g_customSending->load(); r >= 0) {
+            std::fprintf(stderr, "[dialog] game custom data: %s\n", r ? "sent" : "not sent (the server refused it)");
+            FinishCustom(r == 1);
+        }
+        return g_customStatus.load();
+    }
     Outcome o;
-    if (g_customStatus.load() == kStatusRunning && g_customWindow && dialog_ui::Poll(*g_customWindow, o))
-        FinishCustom(o.button == 1);
+    if (!g_customWindow || !dialog_ui::Poll(*g_customWindow, o)) return g_customStatus.load();
+    const GameCustomDataHook* hook = g_customHook.load();
+    if (g_customMode == 1 && o.button == 1 && hook && !g_customNames.empty()) {
+        const size_t pick = o.item >= 0 && static_cast<size_t>(o.item) < g_customNames.size() ? static_cast<size_t>(o.item) : 0;
+        const std::string to = g_customNames[pick];
+        g_customWindow.reset();
+        g_customSending = std::make_shared<std::atomic<int>>(-1);
+        std::thread([hook, to, done = g_customSending] { done->store(hook->send(to) ? 1 : 0); }).detach();
+        return g_customStatus.load();  // still running until the send is answered
+    }
+    FinishCustom(o.button == 1);
     return g_customStatus.load();
 }
 
@@ -828,12 +875,9 @@ int32_t PS4_SYSV_ABI sceGameCustomDataDialogGetResult(void* result) {
 int32_t PS4_SYSV_ABI sceGameCustomDataDialogClose() {
     if (g_customStatus.load() != kStatusRunning) return kErrorNotRunning;
     std::lock_guard lock(g_customMutex);
-    if (g_customWindow) {
-        dialog_ui::Close(*g_customWindow);
-        FinishCustom(false);
-    } else {
-        g_customStatus.store(kStatusFinished);
-    }
+    if (g_customWindow) dialog_ui::Close(*g_customWindow);
+    // A send already under way finishes on its own thread; the game no longer waits for it.
+    FinishCustom(false);
     return kOk;
 }
 

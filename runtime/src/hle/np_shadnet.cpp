@@ -20,6 +20,7 @@
 // np_web_api.cpp and np_web_api_internal.cpp; the path rule from include/core/emulator_settings.h.
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdarg>
 #include <cstdint>
@@ -859,7 +860,152 @@ void CustomDataOpened(int32_t mode, const void* param) {
     std::fprintf(stderr, "[shadnet] game custom data dialog, mode %d (param +0x30: %s)\n", mode, bytes.c_str());
 }
 
-const common_dialog::GameCustomDataHook kCustomDataHook{&InvitationText, &AnswerInvitation, &CustomDataOpened};
+// Sending (the game custom data dialog, mode 1). LBP3 (eboot.bin+0xadeda0) fills the param's mode
+// data (param+0x48) from its own request: three text pointers at +0x00, +0x08 and +0x20, a
+// pointer/size pair at +0x38/+0x40 (a cached image: the thumbnail) and at +0x48/+0x50 (its data),
+// "PS4" as the one platform (+0x60 count, +0x68 the list), and a pointer/count pair at +0x78/+0x80
+// from its request (read here as the players it names). The PS4's system then sends it as game
+// custom data; shadNet's Web API takes it at POST /v1/gameCustomData/items (webapi_routes_game_custom_
+// data.cpp: a "message" JSON part with toAccountIds and the item, "game-data-binary-0" and
+// "game-data-thumbnail-0"). The field meanings are read from the call site, not yet seen in a run:
+// every Open logs them (the first real send will confirm or correct them).
+
+namespace {
+
+struct PendingSend {
+    std::string name, description, message;
+    std::vector<uint8_t> data, thumbnail;
+};
+std::mutex g_sendMutex;
+PendingSend g_pendingSend;
+
+const void* PtrAt(const uint8_t* p, size_t off) {
+    const void* v = nullptr;
+    std::memcpy(&v, p + off, sizeof(v));
+    return v;
+}
+uint32_t U32At(const uint8_t* p, size_t off) {
+    uint32_t v = 0;
+    std::memcpy(&v, p + off, sizeof(v));
+    return v;
+}
+std::vector<uint8_t> Bytes(const void* p, uint32_t size) {
+    if (!p || !size || size > (4u << 20) || !Readable(p, size)) return {};
+    const auto* b = static_cast<const uint8_t*>(p);
+    return std::vector<uint8_t>(b, b + size);
+}
+bool IsImage(const std::vector<uint8_t>& b) {
+    return (b.size() > 3 && b[0] == 0xFF && b[1] == 0xD8) || (b.size() > 8 && b[0] == 0x89 && b[1] == 'P' && b[2] == 'N');
+}
+std::string Hex(const void* p, size_t n) {
+    std::string out;
+    if (!Readable(p, n)) return "(unreadable)";
+    for (size_t i = 0; i < n; ++i) {
+        char b[4];
+        std::snprintf(b, sizeof(b), "%02x", static_cast<const uint8_t*>(p)[i]);
+        out += b;
+    }
+    return out;
+}
+bool PrintableId(const uint8_t* p) {
+    size_t n = 0;
+    while (n < 16 && p[n] && (std::isalnum(p[n]) || p[n] == '-' || p[n] == '_')) ++n;
+    return n >= 3 && (n == 16 || p[n] == 0);
+}
+
+}  // namespace
+
+std::vector<std::string> PrepareSend(const void* param) {
+    std::vector<std::string> to;
+    if (!Readable(param, 0x90)) return to;
+    const auto* m = static_cast<const uint8_t*>(PtrAt(static_cast<const uint8_t*>(param), 0x48));
+    if (!Readable(m, 0x88)) {
+        std::fprintf(stderr, "[shadnet] custom data send: no readable mode data\n");
+        return to;
+    }
+    PendingSend ps;
+    ps.name = CString(static_cast<const char*>(PtrAt(m, 0x00)), 256);
+    ps.description = CString(static_cast<const char*>(PtrAt(m, 0x08)), 1024);
+    ps.message = CString(static_cast<const char*>(PtrAt(m, 0x20)), 1024);
+    std::vector<uint8_t> a = Bytes(PtrAt(m, 0x38), U32At(m, 0x40)), b = Bytes(PtrAt(m, 0x48), U32At(m, 0x50));
+    if (IsImage(b) && !IsImage(a)) std::swap(a, b);  // whichever is the picture is the thumbnail
+    ps.thumbnail = std::move(a);
+    ps.data = std::move(b);
+    // The players the game named: online IDs (SceNpId, 36 bytes each) or account ids (8 bytes each).
+    const auto* list = static_cast<const uint8_t*>(PtrAt(m, 0x78));
+    const uint32_t count = U32At(m, 0x80);
+    if (list && count && count <= 16) {
+        if (Readable(list, 36) && PrintableId(list)) {
+            for (uint32_t i = 0; i < count && Readable(list + i * 36, 36); ++i)
+                to.push_back(CString(reinterpret_cast<const char*>(list + i * 36), 16));
+        } else if (Readable(list, count * 8)) {
+            for (uint32_t i = 0; i < count; ++i) {
+                uint64_t id = 0;
+                std::memcpy(&id, list + i * 8, 8);
+                if (id) to.push_back(std::to_string(id));
+            }
+        }
+    }
+    std::fprintf(stderr,
+                 "[shadnet] custom data send: name \"%s\", description \"%s\", message \"%s\", data %zu bytes, "
+                 "thumbnail %zu bytes (%s), %u named player(s) [%s] (mode data: %s)\n",
+                 ps.name.c_str(), Clip(ps.description, 80).c_str(), Clip(ps.message, 80).c_str(), ps.data.size(),
+                 ps.thumbnail.size(), IsImage(ps.thumbnail) ? "an image" : "not an image", count,
+                 list ? Hex(list, std::min<size_t>(count ? count * 8 : 0, 40)).c_str() : "", Hex(m, 0x88).c_str());
+    if (to.empty())
+        for (const auto& f : net::shadnet::Friends()) to.push_back(f.npid);
+    std::lock_guard lk(g_sendMutex);
+    g_pendingSend = std::move(ps);
+    return to;
+}
+
+// The multipart body shadNet's server takes for a game custom data item.
+std::string CustomDataBody(const PendingSend& ps, const std::string& to, const std::string& boundary) {
+    // An online ID or an account id, as a string either way (an account id as a JSON number would
+    // lose digits).
+    const std::string recipient = "\"" + JsonEscape(to) + "\"";
+    const std::string name = ps.name.empty() ? "LittleBigPlanet 3" : ps.name;
+    const std::string description = ps.description.empty() ? name : ps.description;
+    const std::string json = "{\"toAccountIds\":[" + recipient + "],\"item\":{\"message\":\"" + JsonEscape(ps.message) +
+                             "\",\"gameDataDetail\":{\"dataName\":\"" + JsonEscape(name) + "\",\"dataDescription\":\"" +
+                             JsonEscape(description) + "\",\"expireMinutes\":0,\"availablePlatforms\":[\"PS4\"]}}}";
+    std::string body;
+    const auto part = [&](const char* type, const char* description, const std::string& data) {
+        body += "--" + boundary + "\r\nContent-Type: " + type + "\r\nContent-Description: " + description + "\r\n\r\n";
+        body += data;
+        body += "\r\n";
+    };
+    part("application/json; charset=utf-8", "message", json);
+    part("application/octet-stream", "game-data-binary-0", std::string(ps.data.begin(), ps.data.end()));
+    part(IsImage(ps.thumbnail) && ps.thumbnail[0] == 0x89 ? "image/png" : "image/jpeg", "game-data-thumbnail-0",
+         std::string(ps.thumbnail.begin(), ps.thumbnail.end()));
+    body += "--" + boundary + "--\r\n";
+    return body;
+}
+
+bool SendCustomData(const std::string& to) {
+    PendingSend ps;
+    {
+        std::lock_guard lk(g_sendMutex);
+        ps = g_pendingSend;
+    }
+    const std::string base = net::shadnet::WebApiBase(), token = net::shadnet::BearerToken();
+    if (base.empty() || token.empty()) {
+        std::fprintf(stderr, "[shadnet] custom data send to %s: no Web API session\n", to.c_str());
+        return false;
+    }
+    const std::string boundary = "lbp3customdata";
+    const net::web::Response r =
+        net::web::Request("POST", base + "/v1/gameCustomData/items",
+                          {{"Authorization", "Bearer " + token}, {"Content-Type", "multipart/mixed; boundary=" + boundary}},
+                          CustomDataBody(ps, to, boundary));
+    std::fprintf(stderr, "[shadnet] custom data send to %s: %s %d %s\n", to.c_str(), r.ok ? "HTTP" : "failed:",
+                 r.status, r.ok ? Clip(r.body, 200).c_str() : r.error.c_str());
+    return r.ok && r.status >= 200 && r.status < 300;
+}
+
+const common_dialog::GameCustomDataHook kCustomDataHook{&InvitationText, &AnswerInvitation, &CustomDataOpened,
+                                                     &PrepareSend, &SendCustomData};
 
 // libSceSystemService: the events above, for the game. Registered only with shadNet on (otherwise the
 // game sees no events, as offline).
