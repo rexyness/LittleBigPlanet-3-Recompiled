@@ -7,6 +7,7 @@
 #include <bcrypt.h>
 #include <winhttp.h>
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -183,6 +184,37 @@ std::string JsonString(const std::string& json, const std::string& key) {
 bool JsonTrue(const std::string& json, const std::string& key) {
     const size_t i = AfterKey(json, key);
     return i != std::string::npos && json.compare(i, 4, "true") == 0;
+}
+
+AccountFile ParseAccountFile(const std::string& text) {
+    AccountFile a;
+    auto trim = [](std::string v) {
+        while (!v.empty() && static_cast<unsigned char>(v.back()) <= ' ') v.pop_back();
+        size_t i = 0;
+        while (i < v.size() && static_cast<unsigned char>(v[i]) <= ' ') ++i;
+        return v.substr(i);
+    };
+    size_t at = 0;
+    while (at < text.size()) {
+        size_t nl = text.find('\n', at);
+        if (nl == std::string::npos) nl = text.size();
+        const std::string line = text.substr(at, nl - at);
+        at = nl + 1;
+        size_t sep = line.find('=');
+        if (sep == std::string::npos) sep = line.find(':');
+        if (sep == std::string::npos) continue;
+        std::string key = trim(line.substr(0, sep));
+        for (char& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const std::string value = trim(line.substr(sep + 1));
+        if (value.empty() || (!key.empty() && key[0] == '#')) continue;
+        if (key == "name" || key == "online_name" || key == "online name" || key == "onlinename" || key == "username" || key == "npid")
+            a.name = value;
+        else if (key == "password" || key == "pass" || key == "shadnet_password")
+            a.password = value;
+        else if (key == "server")
+            a.server = value;
+    }
+    return a;
 }
 
 AccountResult CreateRefreshAccount(const std::string& server, const std::string& name) {

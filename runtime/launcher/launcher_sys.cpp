@@ -1,6 +1,8 @@
 // LBP3Launcher's Windows side (launcher_sys.h).
 #include "launcher_sys.h"
 
+#include "launcher_account.h"  // ParseAccountFile
+
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -351,6 +353,12 @@ bool PythonFound() {
     return Lower(U(buf)).find("\\windowsapps\\") == std::string::npos;
 }
 
+fs::path PythonPath() {
+    wchar_t buf[MAX_PATH];
+    if (!PythonFound() || !SearchPathW(nullptr, L"python.exe", nullptr, MAX_PATH, buf, nullptr)) return {};
+    return buf;
+}
+
 EnvList QuitMenuSetup(const Paths& p, std::string* note) {
     std::error_code ec;
     const fs::path script = p.worktree / "tools" / "quit_menu_setup.py";
@@ -415,8 +423,24 @@ EnvList QuitMenuSetup(const Paths& p, std::string* note) {
     return {{"LBP3_FILE_EDITS", edits.string()}, {"LBP3_QUIT_MENU", "1"}};
 }
 
+fs::path AccountFilePath(const Paths& p) { return p.root.empty() ? fs::path() : p.root / "user" / "config" / "online_account.txt"; }
+
+Settings EffectiveOnline(const Settings& s, const Paths& p) {
+    Settings e = s;
+    if (e.online_name.empty() || e.online_server.empty()) {
+        const fs::path f = AccountFilePath(p);
+        std::error_code ec;
+        if (!f.empty() && fs::exists(f, ec)) {
+            const AccountFile a = ParseAccountFile(ReadFile(f));
+            if (e.online_name.empty()) e.online_name = a.name;
+            if (e.online_server.empty()) e.online_server = a.server;
+        }
+    }
+    return e;
+}
+
 EnvList GameEnvironment(const Settings& s, const Paths& p, const EnvList& extra) {
-    EnvList env = MapSettings(s).env;
+    EnvList env = MapSettings(EffectiveOnline(s, p)).env;
     // ResolvePaths already took LBP3_GAME_DIR from the launcher's own environment if it was set.
     if (!p.game_dir.empty()) env.emplace_back("LBP3_GAME_DIR", p.game_dir.string());
     if (!p.cache_dir.empty()) env.emplace_back("LBP3_SHADER_CACHE_DIR", p.cache_dir.string());

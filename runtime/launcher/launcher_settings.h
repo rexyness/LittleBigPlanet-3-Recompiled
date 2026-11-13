@@ -50,11 +50,33 @@ struct Settings {
     bool motion_filter = true;
     bool tilt_keys = true;
     bool mouse_touch = false;
-    // online (off; no server is built in)
+    // online (off; no server is built in). One switch: the levels/profiles server (Refresh,
+    // LBP3_ONLINE*) and shadNet (sign-in, friends, multiplayer; LBP3_SHADNET*) together. An empty
+    // server or name is taken from user\config\online_account.txt (EffectiveOnline), and the
+    // password only ever from that file (the game reads it there itself).
     bool online = false;
     std::string online_server;
     std::string online_name;
+    std::string shadnet_server;      // empty = the online server's host (play.lbppc.com -> its shadNet)
+
+    // the launcher itself
+    bool setup_done = false;         // the first-run wizard was finished or skipped
+    int win_x = -1, win_y = -1;      // the window's last place (-1 = centred on the main display)
+    int win_w = 0, win_h = 0;        // and size in pixels (0 = the default)
+    bool win_max = false;
+    // Discord Rich Presence: opt-in, and only with the player's own application ID (no default:
+    // another app's ID would show its name and art).
+    bool discord = false;
+    std::string discord_app_id;
+    std::string pkg_extractor;       // empty = <game dump folder>\pkg_extractor.exe
+    std::string update_remote = "fork";  // the git remote "Check for updates" reads
 };
+
+// A Discord application ID is a snowflake: 17-20 digits.
+bool ValidDiscordAppId(const std::string& id);
+// The shadNet server the game is given: shadnet_server, else the online server's host name
+// ("https://play.lbppc.com" -> "play.lbppc.com", which the game maps to LBPPC's shadNet).
+std::string ShadnetServer(const Settings& s);
 
 // The ini text for these settings (with a comment per line) and back. Unknown keys and bad values
 // are skipped (the default stays), so an old or hand-edited file never stops the launcher.

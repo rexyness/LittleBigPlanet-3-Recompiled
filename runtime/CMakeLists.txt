@@ -182,13 +182,25 @@ add_library(launcher_core STATIC
     launcher/launcher_settings.cpp
     launcher/launcher_sys.cpp
     launcher/launcher_account.cpp
+    launcher/launcher_dump.cpp
+    launcher/launcher_proc.cpp
+    launcher/launcher_update.cpp
+    launcher/launcher_discord.cpp
+    launcher/launcher_stats.cpp
+    launcher/launcher_shell.cpp
 )
 target_include_directories(launcher_core PUBLIC launcher)
-target_link_libraries(launcher_core PUBLIC winhttp bcrypt shell32 advapi32)
-add_executable(LBP3Launcher WIN32 launcher/launcher_main.cpp)
-target_link_libraries(LBP3Launcher PRIVATE launcher_core imgui SDL3::SDL3 ole32 uuid)
+target_compile_definitions(launcher_core PUBLIC _CRT_SECURE_NO_WARNINGS)
+target_include_directories(launcher_core PRIVATE ${SHADPS4_EXT}/stb)  # the dump's PNGs (launcher_shell)
+target_link_libraries(launcher_core PUBLIC winhttp bcrypt shell32 advapi32 ole32 uuid propsys)
+# The window, with its own icon and version information (launcher.rc), and the port's motion
+# filter (input/motion, standalone) for the controller tester.
+add_executable(LBP3Launcher WIN32 launcher/launcher_main.cpp launcher/launcher.rc src/input/motion.cpp)
+target_include_directories(LBP3Launcher PRIVATE src)
+target_link_libraries(LBP3Launcher PRIVATE launcher_core imgui SDL3::SDL3)
 # Its offline test: the ini, the settings -> LBP3_* mapping, names and addresses, JSON, SHA-512,
-# the zip, and saves backup/restore on a temporary folder.
+# the zip, saves backup/restore on a temporary folder, param.sfo and archive checks, git log
+# parsing, the log readers, Discord's frames against a fake pipe, and the process runner.
 add_executable(launchertest tests/launchertest.cpp)
 target_link_libraries(launchertest PRIVATE launcher_core)
 

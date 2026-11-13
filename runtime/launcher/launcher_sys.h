@@ -76,6 +76,14 @@ fs::path LatestLog(const Paths& p);
 EnvList QuitMenuSetup(const Paths& p, std::string* note);
 // Is Python (python.exe on PATH) there?
 bool PythonFound();
+// python.exe's full path (not the Microsoft Store stub); empty if there is none.
+std::filesystem::path PythonPath();
+
+// user\config\online_account.txt of the game folder.
+std::filesystem::path AccountFilePath(const Paths& p);
+// The settings with an empty online name or server filled in from the account file (what the
+// game is started with).
+Settings EffectiveOnline(const Settings& s, const Paths& p);
 
 // Everything LBP3_* the game gets: the mapped settings, plus LBP3_GAME_DIR (from game_dir.txt, as
 // play_best.bat), LBP3_SHADER_CACHE_DIR and the given extra pairs (Quit Game's).

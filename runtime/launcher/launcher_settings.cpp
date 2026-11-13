@@ -100,7 +100,21 @@ std::string ToIni(const Settings& s) {
       << "; off unless 1, and only with a server and a name\n"
       << "online=" << b(s.online) << "\n"
       << "server=" << OneLine(s.online_server) << "\n"
-      << "name=" << OneLine(s.online_name) << "\n";
+      << "name=" << OneLine(s.online_name) << "\n"
+      << "; empty = the server's own shadNet\n"
+      << "shadnet_server=" << OneLine(s.shadnet_server) << "\n"
+      << "[window]\n"
+      << "x=" << s.win_x << "\ny=" << s.win_y << "\nw=" << s.win_w << "\nh=" << s.win_h << "\n"
+      << "maximized=" << b(s.win_max) << "\n"
+      << "setup_done=" << b(s.setup_done) << "\n"
+      << "[discord]\n"
+      << "; Rich Presence (off unless 1); app_id is your own Discord application's ID\n"
+      << "enabled=" << b(s.discord) << "\n"
+      << "app_id=" << OneLine(s.discord_app_id) << "\n"
+      << "[tools]\n"
+      << "; empty = pkg_extractor.exe in the game dump's folder\n"
+      << "pkg_extractor=" << OneLine(s.pkg_extractor) << "\n"
+      << "update_remote=" << OneLine(s.update_remote) << "\n";
     return o.str();
 }
 
@@ -160,9 +174,40 @@ Settings FromIni(const std::string& text) {
             if (key == "online") ParseBool(v, s.online);
             else if (key == "server") s.online_server = v;
             else if (key == "name") s.online_name = v;
+            else if (key == "shadnet_server") s.shadnet_server = v;
+        } else if (section == "window") {
+            if (key == "x" && ParseInt(v, -100000, 100000, n)) s.win_x = n;
+            else if (key == "y" && ParseInt(v, -100000, 100000, n)) s.win_y = n;
+            else if (key == "w" && ParseInt(v, 0, 20000, n)) s.win_w = n;
+            else if (key == "h" && ParseInt(v, 0, 20000, n)) s.win_h = n;
+            else if (key == "maximized") ParseBool(v, s.win_max);
+            else if (key == "setup_done") ParseBool(v, s.setup_done);
+        } else if (section == "discord") {
+            if (key == "enabled") ParseBool(v, s.discord);
+            else if (key == "app_id") s.discord_app_id = v;
+        } else if (section == "tools") {
+            if (key == "pkg_extractor") s.pkg_extractor = v;
+            else if (key == "update_remote" && !v.empty()) s.update_remote = v;
         }
     }
     return s;
+}
+
+std::string ShadnetServer(const Settings& s) {
+    std::string typed = s.shadnet_server;
+    while (!typed.empty() && (typed.back() == ' ' || typed.back() == '/')) typed.pop_back();
+    while (!typed.empty() && typed.front() == ' ') typed.erase(typed.begin());
+    if (!typed.empty()) return typed;
+    std::string host = NormalizeServer(s.online_server);
+    if (const size_t scheme = host.find("://"); scheme != std::string::npos) host = host.substr(scheme + 3);
+    if (const size_t slash = host.find('/'); slash != std::string::npos) host.resize(slash);
+    if (const size_t colon = host.rfind(':'); colon != std::string::npos) host.resize(colon);  // shadNet has its own port
+    return host;
+}
+
+bool ValidDiscordAppId(const std::string& id) {
+    return id.size() >= 17 && id.size() <= 20 &&
+           std::all_of(id.begin(), id.end(), [](char c) { return c >= '0' && c <= '9'; });
 }
 
 LaunchPlan MapSettings(const Settings& s) {
@@ -195,6 +240,10 @@ LaunchPlan MapSettings(const Settings& s) {
             set("LBP3_ONLINE", "1");
             set("LBP3_ONLINE_SERVER", server);
             set("LBP3_ONLINE_NAME", s.online_name);
+            // shadNet: sign-in, friends and multiplayer (LBPPC's server needs it for online play).
+            // Builds without shadNet ignore these.
+            set("LBP3_SHADNET", "1");
+            set("LBP3_SHADNET_SERVER", ShadnetServer(s));
         }
     }
     if (s.stats) set("LBP3_STATS", "1");

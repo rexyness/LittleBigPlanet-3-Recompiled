@@ -33,4 +33,13 @@ struct AccountResult {
 // server: as NormalizeServer gives it. Generates the password itself.
 AccountResult CreateRefreshAccount(const std::string& server, const std::string& name);
 
+// user\config\online_account.txt, as the game reads it: "key=value" (or "key: value") lines;
+// name (or online_name, username, npid), password (or pass, shadnet_password), server. The last
+// value of a key wins.
+struct AccountFile {
+    std::string name, password, server;
+    bool ok() const { return !name.empty() && !password.empty(); }
+};
+AccountFile ParseAccountFile(const std::string& text);
+
 }  // namespace launcher
