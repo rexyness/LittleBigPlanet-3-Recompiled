@@ -2,7 +2,8 @@
 
 - **This port and its runtime:** GNU GPL, version 2 or (at your option) any later version
   (`LICENSE-LBP3-Recompiled.txt`).
-- **shadPS4** (the graphics core): GPL-2.0-or-later (`third_party\shadPS4-LICENSE*`).
+- **shadPS4** (the graphics core): GPL-2.0-or-later (`third_party\shadPS4\`, with the texts of the other licences some of
+  its files use).
 - **Files adapted from LBPPC** (emurphy04): GPL-2.0-or-later, as marked in each file's header in the source.
 - **Libraries linked into the programs:** each library's own licence is in `third_party\<name>\`. They're
   permissive (MIT, BSD, zlib, Boost, ISC/OpenSSL for LibreSSL), and some are Apache-2.0 (abseil, the Vulkan

@@ -81,11 +81,12 @@ Clone the first with ``git clone --recursive $remote``, check out that commit, a
 $ext = "third_party\shadPS4\externals"
 $libs = "abseil-cpp", "ext-boost", "fmt", "glslang", "half", "imgui", "libressl", "magic_enum", "miniz", "protobuf",
         "robin-map", "sirit", "tracy", "vma", "vulkan-headers", "xbyak", "xxhash", "zydis"
-Copy-Item third_party\shadPS4\LICENSE* "$stage\licenses\third_party\" -ErrorAction SilentlyContinue
-Get-ChildItem "$stage\licenses\third_party" -File | ForEach-Object { Rename-Item $_.FullName ("shadPS4-" + $_.Name) }
+New-Item -ItemType Directory -Force "$stage\licenses\third_party\shadPS4" | Out-Null
+Copy-Item third_party\shadPS4\LICENSE "$stage\licenses\third_party\shadPS4\LICENSE"
+Copy-Item third_party\shadPS4\LICENSES\*.txt "$stage\licenses\third_party\shadPS4\" -ErrorAction SilentlyContinue
 foreach ($lib in $libs) {
     $files = Get-ChildItem "$ext\$lib" -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '^(LICEN[CS]E|COPYING|COPYRIGHT|NOTICE)' }
+        Where-Object { $_.Name -match '^(LICEN[CS]E|COPYING|COPYRIGHT|NOTICE)' -and $_.Extension -ne '.cfg' }
     if ($files) {
         New-Item -ItemType Directory -Force "$stage\licenses\third_party\$lib" | Out-Null
         $files | ForEach-Object { Copy-Item $_.FullName "$stage\licenses\third_party\$lib\" }

@@ -13,7 +13,8 @@ this download: you bring the game, and your DLC if you have any.
   `CUSA00473`, inside a parent folder of your choice (for example `D:\Games\PS4\CUSA00473`).
 - **Optional, your DLC:** your own DLC `.pkg` files and a PS4 pkg extractor (the launcher's DLC page runs the
   extractor you point it at). Installed DLC goes in a `CUSA00473-DLC` folder next to `CUSA00473`.
-- About 2 GB of free space for settings, saves and the shader cache (more as you play).
+- About 2 GB of free space next to the launcher: the game's own cache (`user\temp0`, about 600 MB from the first
+  start), saves and the shader cache (more as you play).
 
 ## First start
 
@@ -23,6 +24,9 @@ this download: you bring the game, and your DLC if you have any.
    - **DLC:** optional; see above.
    - **Online:** optional; see below.
 3. Press **PLAY**.
+
+A new profile starts with the game's brightness screen (press Cross), then the Pod. With online off, the game
+says *"There is a problem with your network connection"* once; press **Close**. That's expected offline.
 
 The first time you visit each part of the game it can pause for a second or two while your graphics driver
 builds shaders. That happens once; they're kept in `user\shader_cache` for next time. The very first start
@@ -42,13 +46,14 @@ sign-in failed, usually because of a wrong password in that file.
 
 A DualSense or DualShock 4 is best (touchpad and motion work); any controller SDL supports works. Up to four
 controllers for local co-op. **Insert** on the keyboard, or **L3+R3** on the pad, opens the port's own menu
-(frame rate, frame generation, volume, quit).
+(performance stats, frame generation, volume, quit game).
 
 ## Where things are
 
-- `user\` - your settings, saves (`user\savedata\`) and shader cache. Back it up to keep your progress.
-- `analysis\` - logs (`play_launcher_log.txt`) and save backups. The launcher's **Help** page can zip the
-  logs for a bug report (no saves, no passwords).
+- `user\` - your settings, saves (`user\savedata\`) and shader cache. Back up `user\savedata\` to keep your
+  progress. When updating by hand, keep `user\` (unzip the new version over this folder).
+- `analysis\` - logs (`play_launcher_log.txt`) and save backups. **Make a report zip** in the launcher
+  bundles the logs for whoever helps you.
 
 ## Known issues
 
