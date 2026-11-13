@@ -36,7 +36,7 @@ std::vector<uint8_t> g_frame;  // latest GPU-rendered frame, guarded by g_mutex
 uint32_t g_frameW = 0, g_frameH = 0;
 bool g_haveFrame = false;
 uint64_t g_frameSeq = 0;  // bumps with every new frame, so unchanged ones aren't re-uploaded
-int64_t g_frameHandoffNs = 0;  // when PresentPixels handed it over (LBP3_FRAMEGEN_LOG only)
+int64_t g_frameHandoffNs = 0;  // when PresentPixels handed it over
 
 // Frame generation's timed frames (PresentTimed), guarded by g_mutex, sorted by due time.
 std::atomic<bool> g_timedMode{false};  // set by the first timed frame; then PresentPixels' frames aren't shown
@@ -518,7 +518,7 @@ void PresentPixels(std::vector<uint8_t>& pixels, uint32_t width, uint32_t height
             minMs = 1e9, maxMs = 0, sumMs = 0, n = 0;
         }
     }
-    const int64_t handoffNs = TimingLogEnabled() ? NowNs() : 0;
+    const int64_t handoffNs = NowNs();  // the in-game menu's latency (and LBP3_FRAMEGEN_LOG)
     std::lock_guard lock(g_mutex);
     g_frame.swap(pixels);  // the caller gets an older buffer back to refill: no allocation per frame
     g_frameW = width;
