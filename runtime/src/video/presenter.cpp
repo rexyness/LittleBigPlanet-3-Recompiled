@@ -1,5 +1,6 @@
 #include "video/presenter.h"
 #include "ui/overlay.h"
+#include "video/live_stats.h"
 
 #include <SDL3/SDL.h>
 
@@ -333,6 +334,10 @@ void PresenterThread() {
         ui::overlay::Draw();
         SDL_RenderPresent(renderer);  // paced by vsync, unless a driver forces it off
         ++g_presents;
+        if (newFrame) {  // the in-game menu's stats: real frames' latency from the game's hand-over
+            const int64_t presentNs = NowNs();
+            video::live::NoteShown(shown.kind == 'G', shown.kind == 'G' ? -1.0 : (presentNs - shown.slotNs) / 1e6);
+        }
         if (newFrame && timingLog) {
             shown.presentNs = NowNs();
             shown.vblank = VBlankCount();

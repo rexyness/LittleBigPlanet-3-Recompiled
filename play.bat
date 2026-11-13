@@ -16,6 +16,18 @@ rem import once, the first time the start menu opens; wait for "successfully imp
 rem don't press Circle, then close the game and set this back to 0 (a session that ran the
 rem import crashed later when Options was pressed again). Back up your saves first.
 set MY_UNLOCKS=0
+rem In-game menu (Insert, or L3+R3 together): frame rate and latency, frame generation on/off,
+rem volume, a corner stats overlay, Quit game: 1 = on, 0 = off.
+set MENU=1
+rem The corner stats overlay from the start (the menu can turn it on and off): 1 = on.
+set STATS=0
+rem "Quit Game" in the game's own pause menu, in place of the offline-greyed Good Grief! button
+rem (press it twice). Needs Python (tools\quit_menu_setup.py edits the menu's script in memory;
+rem the game files are never changed): 1 = on, 0 = off.
+set QUIT_MENU=1
+rem Game language: empty = English. A code (de, fr, es, it, nl, pt, pt-br, ru, pl, ja, ko, zh-cn,
+rem zh-tw, en-gb, es-la, fi, sv, da, no, tr...) also unlocks the languages the US edition hides.
+set LANGUAGE=
 rem ---------------------------------------------------------------------------
 
 cd /d "%~dp0"
@@ -43,6 +55,18 @@ if "%RES%"=="1440" (
     set LBP3_RES_SHADERS=1
 )
 if "%MY_UNLOCKS%"=="1" set LBP3_MY_UNLOCKS=lbp1,lbp2
+if "%MENU%"=="0" set LBP3_MENU=off
+if "%STATS%"=="1" set LBP3_STATS=1
+if not "%LANGUAGE%"=="" (
+    set LBP3_LANGUAGE=%LANGUAGE%
+    set LBP3_LANGUAGES=all
+)
+if "%QUIT_MENU%"=="1" (
+    where python >nul 2>&1 && python tools\quit_menu_setup.py && (
+        set LBP3_FILE_EDITS=%CD%\user\file_edits.bin
+        set LBP3_QUIT_MENU=1
+    )
+)
 echo Starting LittleBigPlanet 3... close the game window to quit.
 if not exist analysis mkdir analysis
 rem Every session's log is also kept for good in analysis\play_logs\, named by its last write.

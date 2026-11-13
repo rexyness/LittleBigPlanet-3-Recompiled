@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -101,13 +102,13 @@ bool RuntimeDownmix() {
     return !(s && std::strcmp(s, "sdl") == 0);
 }
 
-float MasterVolume() {
-    static const float v = [] {
-        const char* s = std::getenv("LBP3_VOLUME");
-        return s ? std::clamp(std::atoi(s), 0, 100) / 100.0f : 1.0f;
-    }();
-    return v;
-}
+// LBP3_VOLUME=0..100 at start; the in-game menu changes it live (SetMasterVolumeLevel).
+std::atomic<float> g_master{[] {
+    const char* s = std::getenv("LBP3_VOLUME");
+    return s ? std::clamp(std::atoi(s), 0, 100) / 100.0f : 1.0f;
+}()};
+
+float MasterVolume() { return g_master.load(); }
 
 bool OpenDevice() {
     if (g_device) return true;
@@ -322,6 +323,16 @@ int PS4_SYSV_ABI sceAudioOutSetVolume(int32_t handle, uint32_t flag, const int32
     p->gain = loudest;
     SDL_SetAudioStreamGain(p->stream, loudest * MasterVolume());
     return kernel::SCE_OK;
+}
+
+float MasterVolumeLevel() { return MasterVolume(); }
+
+void SetMasterVolumeLevel(float level) {
+    level = std::clamp(level, 0.0f, 1.0f);
+    std::lock_guard lock(g_mutex);
+    g_master.store(level);
+    for (Port& p : g_ports)
+        if (p.open && p.stream) SDL_SetAudioStreamGain(p.stream, p.gain * level);
 }
 
 int PortStreamChannels(int handle) {

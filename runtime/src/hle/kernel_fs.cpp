@@ -19,6 +19,7 @@
 
 #include "core/runner.h"
 #include "core/vfs.h"
+#include "hle/file_edits.h"
 #include "hle/kernel_errors.h"
 #include "hle/register.h"
 
@@ -59,6 +60,10 @@ struct File {
     fs::path host;
     std::vector<uint8_t> dirents;  // FreeBSD-style records for getdirentries
     int64_t dirPos = 0;
+    // A game file shown edited (hle/file_edits.h: Quit Game's pause-menu script): reads, seeks
+    // and sizes go through the edited view, with our own position.
+    std::shared_ptr<const hle::file_edits::Edit> edit;
+    int64_t pos = 0;
     ~File() {
         if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
     }
@@ -202,6 +207,11 @@ int OpenImpl(const char* path, int flags) {
                                 nullptr, disposition, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (f->handle == INVALID_HANDLE_VALUE) return SceErr(FromWin32(GetLastError()));
         f->append = flags & kOAppend;
+        if (access == GENERIC_READ && r.guest.rfind("/app0/", 0) == 0) {
+            LARGE_INTEGER size{};
+            if (GetFileSizeEx(f->handle, &size)) f->edit = hle::file_edits::Find(r.guest, static_cast<uint64_t>(size.QuadPart));
+            if (f->edit) LogOnce("open (edited view)", r.guest, "");
+        }
     }
 
     LogOnce("open", r.guest, "  ->  " + Utf8(r.host));
@@ -212,10 +222,41 @@ int OpenImpl(const char* path, int flags) {
     return fd;
 }
 
+int64_t ReadEdited(File& f, void* buf, uint64_t len, const int64_t* offset) {
+    if (offset && *offset < 0) return SceErr(kEINVAL);
+    const uint64_t at = offset ? static_cast<uint64_t>(*offset) : static_cast<uint64_t>(f.pos);
+    thread_local std::vector<uint8_t> bounce(1 << 20);
+    // The real file through a bounce buffer, as ReadImpl does (guest pages may be write-protected).
+    auto readHost = [&](uint8_t* dst, uint64_t pos, uint64_t n) -> int64_t {
+        uint64_t done = 0;
+        while (done < n) {
+            const DWORD chunk = static_cast<DWORD>(std::min<uint64_t>(n - done, bounce.size()));
+            OVERLAPPED ov{};
+            const uint64_t p = pos + done;
+            ov.Offset = static_cast<DWORD>(p);
+            ov.OffsetHigh = static_cast<DWORD>(p >> 32);
+            DWORD got = 0;
+            if (!ReadFile(f.handle, bounce.data(), chunk, &got, &ov)) {
+                const DWORD e = GetLastError();
+                if (e == ERROR_HANDLE_EOF) break;
+                return done ? static_cast<int64_t>(done) : SceErr(FromWin32(e));
+            }
+            std::memcpy(dst + done, bounce.data(), got);
+            done += got;
+            if (got < chunk) break;
+        }
+        return static_cast<int64_t>(done);
+    };
+    const int64_t got = hle::file_edits::Read(*f.edit, static_cast<uint8_t*>(buf), at, len, readHost);
+    if (got > 0 && !offset) f.pos += got;
+    return got;
+}
+
 int64_t ReadImpl(int fd, void* buf, uint64_t len, const int64_t* offset) {
     auto f = Get(fd);
     if (!f) return SceErr(kEBADF);
     if (f->isDir) return SceErr(kEISDIR);
+    if (f->edit) return ReadEdited(*f, buf, len, offset);
     uint64_t total = 0;
     auto* out = static_cast<uint8_t*>(buf);
     // Read through a bounce buffer: the destination may be write-protected by
@@ -397,6 +438,12 @@ int64_t PS4_SYSV_ABI sceKernelLseek(int fd, int64_t offset, int whence) {
     }
     static const DWORD kMethods[] = {FILE_BEGIN, FILE_CURRENT, FILE_END};
     if (whence < kSeekSet || whence > kSeekEnd) return SceErr(kEINVAL);
+    if (f->edit) {
+        const int64_t base = whence == kSeekCur ? f->pos : whence == kSeekEnd ? static_cast<int64_t>(f->edit->Size()) : 0;
+        if (base + offset < 0) return SceErr(kEINVAL);
+        f->pos = base + offset;
+        return f->pos;
+    }
     LARGE_INTEGER dist, now;
     dist.QuadPart = offset;
     if (!SetFilePointerEx(f->handle, dist, &now, kMethods[whence])) return SceErr(kEINVAL);
@@ -413,6 +460,10 @@ int PS4_SYSV_ABI sceKernelFstat(int fd, Stat* st) {
     WIN32_FILE_ATTRIBUTE_DATA a{info.dwFileAttributes, info.ftCreationTime, info.ftLastAccessTime,
                                 info.ftLastWriteTime, info.nFileSizeHigh, info.nFileSizeLow};
     FillStat(a, st);
+    if (f->edit) {
+        st->size = static_cast<int64_t>(f->edit->Size());
+        st->blocks = (st->size + 511) / 512;
+    }
     return SCE_OK;
 }
 
@@ -425,7 +476,14 @@ int PS4_SYSV_ABI sceKernelStat(const char* path, Stat* st) {
         LogOnce("stat (missing)", r.guest.empty() ? path : r.guest, "");
         return SceErr(kENOENT);
     }
-    return StatHost(r.host, st);
+    const int result = StatHost(r.host, st);
+    if (result == SCE_OK && !(st->mode & kSIfDir) && r.guest.rfind("/app0/", 0) == 0) {
+        if (auto edit = hle::file_edits::Find(r.guest, static_cast<uint64_t>(st->size))) {
+            st->size = static_cast<int64_t>(edit->Size());
+            st->blocks = (st->size + 511) / 512;
+        }
+    }
+    return result;
 }
 
 int PS4_SYSV_ABI sceKernelFsync(int fd) {

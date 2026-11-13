@@ -66,6 +66,15 @@ const Patch kPatches[] = {
      "EXPERIMENT: a newly connected peer gets status 2 instead of 3, so the host's table "
      "diff (0x3a76e0) doesn't prune the host's own peer before its first update.",
      "LBP3_PATCH_STATUS2"},
+    {"eboot.bin", 0x2a0706,
+     {0x48, 0x8d, 0x0d, 0x0b, 0x80, 0x02, 0x01},        // lea rcx, [region table 0x12c8718]
+     {0xe9, 0xa0, 0x00, 0x00, 0x00, 0x90, 0x90},        // jmp 0x2a07ab; nop; nop
+     "LBP3_LANGUAGES=all: every language the game has text for. The language picker (0x2a05e0) "
+     "keeps the system language (LBP3_LANGUAGE) only if this edition was sold with it (the US one: "
+     "English and French) and otherwise falls back to English; every edition carries all 22 "
+     "languages' text, so the edition check jumps to the picker's 'accepted' path (0x2a07ab). "
+     "Addresses found by LBPPC (emurphy04, aad6a91, src/probe.c language_install).",
+     "LBP3_LANGUAGES"},
     {"eboot.bin", 0x3ea8c0,
      {0x8b, 0x47, 0x04},                                // mov eax, [rdi+4]  (sound handle is-playing test)
      {0x31, 0xc0, 0xc3},                                // xor eax, eax; ret

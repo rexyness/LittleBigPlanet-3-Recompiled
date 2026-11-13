@@ -4,6 +4,7 @@
 // it goes. Each sign-in and sign-out is an event for sceUserServiceGetEvent, in order.
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -13,6 +14,7 @@
 #include <windows.h>
 
 #include "hle/kernel_errors.h"
+#include "hle/language.h"
 #include "hle/register.h"
 #include "hle/users.h"
 #include "input/gamepad.h"
@@ -141,7 +143,60 @@ constexpr int kErrorParameter = static_cast<int>(0x80A10003);
 constexpr int32_t kLangEnglishUs = 1;
 constexpr int32_t kEnterButtonCross = 1;
 
+// The system language (SCE_SYSTEM_PARAM_LANG_*), from LBP3_LANGUAGE: a number or a code.
+struct Lang { int32_t id; const char* code; const char* name; };
+constexpr Lang kLangs[] = {
+    {0, "ja", "Japanese"},          {1, "en", "English (US)"},       {2, "fr", "French"},
+    {3, "es", "Spanish"},           {4, "de", "German"},             {5, "it", "Italian"},
+    {6, "nl", "Dutch"},             {7, "pt", "Portuguese"},         {8, "ru", "Russian"},
+    {9, "ko", "Korean"},            {10, "zh-tw", "Chinese (Traditional)"}, {11, "zh-cn", "Chinese (Simplified)"},
+    {12, "fi", "Finnish"},          {13, "sv", "Swedish"},           {14, "da", "Danish"},
+    {15, "no", "Norwegian"},        {16, "pl", "Polish"},            {17, "pt-br", "Portuguese (Brazil)"},
+    {18, "en-gb", "English (UK)"},  {19, "tr", "Turkish"},           {20, "es-la", "Spanish (Latin America)"},
+    {21, "ar", "Arabic"},           {22, "fr-ca", "French (Canada)"}, {23, "cs", "Czech"},
+    {24, "hu", "Hungarian"},        {25, "el", "Greek"},             {26, "ro", "Romanian"},
+    {27, "th", "Thai"},             {28, "vi", "Vietnamese"},        {29, "id", "Indonesian"},
+};
+
 }  // namespace
+
+int32_t ParseLanguage(const char* v) {
+    if (!v || !*v) return kLangEnglishUs;
+    std::string s(v);
+    for (char& c : s) c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c == '_' ? '-' : c);
+    if (s == "en-us") return 1;
+    if (s == "es-419") return 20;
+    bool digits = true;
+    for (char c : s) digits = digits && c >= '0' && c <= '9';
+    if (digits && s.size() <= 2) {
+        const int n = std::atoi(s.c_str());
+        for (const Lang& l : kLangs) if (l.id == n) return n;
+        return -1;
+    }
+    for (const Lang& l : kLangs) if (s == l.code) return l.id;
+    return -1;
+}
+
+const char* LanguageName(int32_t id) {
+    for (const Lang& l : kLangs) if (l.id == id) return l.name;
+    return "?";
+}
+
+int32_t SystemLanguage() {
+    static const int32_t lang = [] {
+        const char* v = std::getenv("LBP3_LANGUAGE");
+        const int32_t id = ParseLanguage(v);
+        if (id < 0) {
+            std::fprintf(stderr, "[system] LBP3_LANGUAGE=%s: unknown; using English (US)\n", v);
+            return kLangEnglishUs;
+        }
+        if (v && *v)
+            std::fprintf(stderr, "[system] system language %d (%s)%s\n", id, LanguageName(id),
+                         std::getenv("LBP3_LANGUAGES") ? "" : " - the US edition keeps only English and French unless LBP3_LANGUAGES=all");
+        return id;
+    }();
+    return lang;
+}
 
 struct SystemServiceStatus {
     int32_t eventNum;
@@ -172,7 +227,7 @@ int PS4_SYSV_ABI sceSystemServiceGetDisplaySafeAreaInfo(DisplaySafeAreaInfo* inf
 int PS4_SYSV_ABI sceSystemServiceParamGetInt(int32_t id, int32_t* value) {
     if (!value) return kErrorParameter;
     switch (id) {
-    case kParamLang: *value = kLangEnglishUs; break;
+    case kParamLang: *value = SystemLanguage(); break;
     case kParamDateFormat: *value = 0; break;  // YYYY/MM/DD
     case kParamTimeFormat: *value = 0; break;  // 12 hour
     case kParamTimeZone: {

@@ -57,4 +57,8 @@ struct Level {
 // 8-channel port), 0 for a closed port. For the offline checks.
 int PortStreamChannels(int handle);
 
+// The master volume (0..1; LBP3_VOLUME at start), applied to every port. The in-game menu sets it.
+float MasterVolumeLevel();
+void SetMasterVolumeLevel(float level);
+
 }  // namespace hle::audio

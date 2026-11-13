@@ -28,6 +28,7 @@
 #include "gpu/renderer.h"
 #include "gpu/fg_live.h"
 #include "video/framegen.h"
+#include "video/live_stats.h"
 #include "video/framegen_warp.h"
 #include "video/presenter.h"
 
@@ -128,6 +129,7 @@ void WaitFlipSlot() {
     const double waitMs = std::chrono::duration<double, std::milli>(end - start).count();
     const double workMs = std::chrono::duration<double, std::milli>(start - lastEnd).count();
     lastEnd = end;
+    video::live::NoteFlip(workMs, workMs + waitMs);  // the in-game menu's stats
     g_paceWaitMs += waitMs;
     g_paceWorkMs += workMs;
     g_paceTimerFlips += !vsynced;
