@@ -39,7 +39,10 @@ after a reboot can also take 20-40 seconds while Windows reads that cache.
 Online play uses the community servers at **play.lbppc.com** (made by the LBPPC project; Sony's servers are
 gone). You need your own account there: on the launcher's **Online** page, type an online name and press
 **Create account**, then switch **Online** on. Your password stays in `user\config\online_account.txt` on your
-PC. Community levels, Dive In and your friends list work; joining friends' games online is still being built.
+PC. Community levels, Dive In and your friends list work. Add friends on the launcher's **Online** page.
+
+Joining a friend's game and inviting friends (from the game's own menus) are **new and experimental**: they
+haven't been tested between two PCs yet, so expect problems. Only your shadNet friends can join your game.
 
 If the game says *"A problem occurred when attempting to connect to the LittleBigPlanet servers (403)"*, the
 sign-in failed, usually because of a wrong password in that file.
@@ -60,7 +63,7 @@ controllers for local co-op. **Insert** on the keyboard, or **L3+R3** on the pad
 ## Known issues
 
 - Brightness in some scenes is higher than on a PS4.
-- Online: joining or inviting friends into a game isn't done yet.
+- Online: joining and inviting friends is experimental and untested between two PCs.
 - The first-visit shader pauses described above.
 
 See CREDITS.md for who made what, and SOURCE.md for the source code.
