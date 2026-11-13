@@ -104,6 +104,12 @@ bool Connect(Conn& c, const ShadnetEndpoint& at, std::string* error) {
             if (error) *error = "the secure connection to the shadNet server failed";
             return false;
         }
+        // TlsHandshake turns AUTO_RETRY off for the runtime's client, which retries on WANT_READ itself;
+        // Conn's plain blocking reads don't. Without it, the first read after the handshake met the
+        // server's TLS 1.3 session ticket, SSL_read returned -1 (WANT_READ), and Create failed with
+        // "doesn't look like a shadNet server" against play.lbppc.com (2026-11-13). LibreSSL reads the
+        // mode on every SSL_read, so setting it after the handshake takes effect.
+        SSL_set_mode(c.ssl, SSL_MODE_AUTO_RETRY);
     }
     return true;
 }
