@@ -287,7 +287,10 @@ void ApplyOnlineKey(Module& m) {
     std::fprintf(stderr, "[online] signing key: CustomServerDigest (4 sites)\n");
 }
 
+void ApplySyncProbe(Module& m);  // sync_probe.cpp: LBP3_SYNC_PROBE=1 only
+
 void ApplyPatches(Module& m) {
+    if (m.fileName == "eboot.bin") ApplySyncProbe(m);
     if (m.fileName == "eboot.bin") ApplyRes1440(m);
     if (m.fileName == "eboot.bin") ApplyOnlineKey(m);
     for (const Patch& p : kPatches) {

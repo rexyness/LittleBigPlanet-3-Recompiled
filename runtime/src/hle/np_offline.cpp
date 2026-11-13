@@ -382,6 +382,13 @@ int PS4_SYSV_ABI sceNpCmpOnlineId(const char* a, const char* b) {
 
 }  // namespace hle::np
 
+namespace hle::npsn {
+// With shadNet on, this player's own network identity (np_shadnet.cpp); false when it's off.
+bool PlayerMac(uint8_t mac[6]);
+bool PlayerLanIp(uint32_t* ipNet);
+bool PlayerMappedAddr(uint32_t* ipNet);
+}  // namespace hle::npsn
+
 namespace hle::netctl {
 namespace {
 
@@ -416,9 +423,19 @@ int PS4_SYSV_ABI sceNetCtlGetInfo(int32_t code, void* info) {
     if (!info) return kErrorInvalidAddr;
     std::memset(info, 0, 256);  // SceNetCtlInfo is a union of at most 256 bytes
     constexpr int32_t kEtherAddr = 2, kIpAddress = 14, kLinkUp = 4;
-    static const uint8_t mac[6] = {0x02, 0x00, 0x00, 0x4c, 0x42, 0x33};
+    // Offline every console is the same one; with shadNet each player has their own (np_shadnet.cpp).
+    uint8_t mac[6] = {0x02, 0x00, 0x00, 0x4c, 0x42, 0x33};
+    npsn::PlayerMac(mac);
     if (code == kEtherAddr) std::memcpy(info, mac, sizeof(mac));
-    if (code == kIpAddress) std::strcpy(static_cast<char*>(info), kLanAddress);
+    if (code == kIpAddress) {
+        uint32_t ip = 0;
+        if (npsn::PlayerLanIp(&ip)) {
+            const auto* b = reinterpret_cast<const uint8_t*>(&ip);
+            std::snprintf(static_cast<char*>(info), 16, "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+        } else {
+            std::strcpy(static_cast<char*>(info), kLanAddress);
+        }
+    }
     if (code == kLinkUp) *static_cast<uint32_t*>(info) = 1;
     return kernel::SCE_OK;
 }
@@ -438,10 +455,14 @@ int PS4_SYSV_ABI sceNetCtlGetNatInfo(void* natInfo) {
     if (nat->size != sizeof(NatInfo)) return kErrorInvalidSize;
     nat->stunStatus = 2;  // checked, OK
     nat->natType = 2;
-    const uint8_t ip[4] = {192, 168, 1, 50};  // kLanAddress, network order
-    std::memcpy(&nat->mappedAddr, ip, sizeof(ip));
+    const uint8_t lan[4] = {192, 168, 1, 50};  // kLanAddress, network order
+    std::memcpy(&nat->mappedAddr, lan, sizeof(lan));
+    // With shadNet: the address its STUN reply gave (else this PC's LAN address).
+    const bool own = npsn::PlayerMappedAddr(&nat->mappedAddr);
     static std::atomic<bool> logged{false};
-    if (!logged.exchange(true)) std::fprintf(stderr, "[np] sceNetCtlGetNatInfo: STUN OK, NAT type 2, %s\n", kLanAddress);
+    if (!logged.exchange(true))
+        std::fprintf(stderr, "[np] sceNetCtlGetNatInfo: STUN OK, NAT type 2, %s\n",
+                     own ? "the player's own mapped address" : kLanAddress);
     return kernel::SCE_OK;
 }
 

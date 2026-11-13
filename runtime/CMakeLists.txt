@@ -36,6 +36,7 @@ add_library(hle STATIC
     src/core/module.cpp
     src/core/nid.cpp
     src/core/patches.cpp
+    src/core/sync_probe.cpp
     src/core/runner.cpp
     src/core/tls.cpp
     src/core/vfs.cpp
