@@ -133,7 +133,8 @@ struct Link::Impl {
         Endpoint preferred;  // the direct address to keep while it answers (Config::path)
         // DATA3 (gap-free delivery).
         uint8_t caps = 0;     // the peer link's capabilities (HELLO / ACK)
-        uint32_t epoch = 0;   // the peer link's epoch: a new one means it started again
+        uint32_t epoch = 0;   // the peer's epoch for this connection: a new one means it set it up again
+        uint32_t myEpoch = 0; // ours for it (new each time we set the connection up)
         struct Item {
             uint16_t srcVport, dstVport;
             std::vector<uint8_t> data;
@@ -179,7 +180,7 @@ struct Link::Impl {
     Clock::time_point lastStun{};
     bool stunAnswered = false;
     std::set<std::string> refusedLogged;
-    uint32_t epoch = 0;          // this link's (random, per Start)
+    std::mt19937 rng{std::random_device{}()};  // connection epochs
     uint64_t testCounter = 0;    // the Config::test* settings (the link's thread only)
     struct Delayed {
         Clock::time_point at;
@@ -268,8 +269,18 @@ struct Link::Impl {
         lan.port = localPort;
         PutEndpoint(b, lan);
         b.push_back(cfg.data3 ? kCapData3 : 0);
-        Put32(b, epoch);
+        const auto it = peers.find(to);
+        Put32(b, it != peers.end() ? it->second.myEpoch : 1);
         return b;
+    }
+
+    // Lock held: a new connection's state (a fresh epoch, so the other side starts counting again).
+    Peer& NewPeer(const std::string& name, Clock::time_point now) {
+        Peer& p = peers.emplace(name, Peer{}).first->second;
+        p.name = name;
+        p.started = now;
+        p.myEpoch = static_cast<uint32_t>(rng()) | 1;
+        return p;
     }
 
     bool UseData3(const Peer& p) const { return cfg.data3 && (p.caps & kCapData3); }
@@ -521,9 +532,8 @@ struct Link::Impl {
                         std::fprintf(stderr, "[p2p] refused a connection from %s (not a friend)\n", from.c_str());
                     return;
                 }
-                it = peers.emplace(from, Peer{}).first;
-                it->second.name = from;
-                it->second.started = now;
+                NewPeer(from, now);
+                it = peers.find(from);
             }
             Peer& p = it->second;
             p.gameAddr = ext.Valid() ? ext : lan.Valid() ? lan : src;
@@ -532,8 +542,9 @@ struct Link::Impl {
             if (n >= kHelloLen + 5) {
                 const uint32_t ep = Get32(d + kHelloLen + 1);
                 if (p.epoch && ep != p.epoch) {
-                    ResetData3(p);  // its link started again: both directions count from 0
-                    std::fprintf(stderr, "[p2p] %s %s: its link started again\n", core::Stamp().text, from.c_str());
+                    ResetData3(p);  // it set the connection up again: both directions count from 0
+                    std::fprintf(stderr, "[p2p] %s %s: it set the connection up again\n", core::Stamp().text,
+                                 from.c_str());
                 }
                 p.caps = d[kHelloLen];
                 p.epoch = ep;
@@ -857,7 +868,7 @@ bool Link::Start(const Config& config) {
     WSAStartup(MAKEWORD(2, 2), &wsa);
     I.cfg = config;
     I.stop = false;
-    I.epoch = std::random_device{}() | 1;
+
     I.alive = std::make_shared<std::atomic<bool>>(true);
     I.sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (I.sock == INVALID_SOCKET) return false;
@@ -911,7 +922,7 @@ void Link::Stop() {
     std::lock_guard lk(I.m);
     if (I.sock != INVALID_SOCKET) {
         for (auto& [name, p] : I.peers) {
-            if (p.state != State::Active) continue;
+            if (p.state != State::Active || I.cfg.testNoBye) continue;
             auto b = Header(kBye);
             PutId(b, I.cfg.self);
             PutId(b, name);
@@ -937,10 +948,8 @@ void Link::Activate(const std::string& peer) {
     std::lock_guard lk(I.m);
     auto it = I.peers.find(peer);
     if (it == I.peers.end()) {
-        it = I.peers.emplace(peer, Impl::Peer{}).first;
-        it->second.name = peer;
-        it->second.state = State::Pending;
-        it->second.started = Clock::now();
+        I.NewPeer(peer, Clock::now()).state = State::Pending;
+        it = I.peers.find(peer);
     }
     Impl::Peer& p = it->second;
     if (!p.local) {
@@ -963,7 +972,7 @@ void Link::Terminate(const std::string& peer) {
     std::lock_guard lk(I.m);
     auto it = I.peers.find(peer);
     if (it == I.peers.end()) return;
-    if (it->second.state == State::Active) {
+    if (it->second.state == State::Active && !I.cfg.testNoBye) {
         auto b = Header(kBye);
         PutId(b, I.cfg.self);
         PutId(b, peer);

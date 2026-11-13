@@ -541,6 +541,75 @@ int main() {
         CHECK(sb.skipped == 0 && sa.skipped == 0);
     }
 
+    // --- 16..18. leaving and joining again: DATA3 counts from 0 again on both sides ---------------
+    {
+        UdpMock mock;
+        CHECK(mock.Start());
+        Link a, b;
+        Received atA, atB;
+        Sink(a, atA);
+        Sink(b, atB);
+        Config ca = PlayerConfig("Alice_1", mock, {"Bob_2"}), cb = PlayerConfig("Bob_2", mock, {"Alice_1"});
+        cb.testNoBye = true;  // Bob's BYEs are "lost"
+        CHECK(a.Start(ca));
+        CHECK(b.Start(cb));
+        CHECK(WaitFor([&] { return a.External().Valid() && b.External().Valid(); }));
+        auto bothUp = [&] {
+            return WaitFor([&] {
+                return a.Info("Bob_2").state == State::Active && b.Info("Alice_1").state == State::Active;
+            });
+        };
+        // `count` numbered datagrams each way; true if both sides got all, in order, once.
+        auto exchange = [&](int count) {
+            for (Received* r : {&atA, &atB}) {
+                std::lock_guard lk(r->m);
+                r->data.clear();
+            }
+            const Endpoint toB = a.Info("Bob_2").gameAddr, toA = b.Info("Alice_1").gameAddr;
+            for (int i = 0; i < count; ++i) {
+                const std::string msg = "frame " + std::to_string(i);
+                a.SendData(toB, 3658, 3658, msg.data(), msg.size());
+                b.SendData(toA, 3658, 3658, msg.data(), msg.size());
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            WaitFor([&] { return atA.Count() >= static_cast<size_t>(count) && atB.Count() >= static_cast<size_t>(count); });
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            for (Received* r : {&atA, &atB}) {
+                std::lock_guard lk(r->m);
+                if (r->data.size() != static_cast<size_t>(count)) return false;
+                for (int i = 0; i < count; ++i)
+                    if (std::string(r->data[i].begin(), r->data[i].end()) != "frame " + std::to_string(i)) return false;
+            }
+            return true;
+        };
+        a.Activate("Bob_2");
+        CHECK(bothUp());
+        CHECK(exchange(40));
+        // 16. Alice leaves (her BYE arrives) and connects again.
+        a.Terminate("Bob_2");
+        CHECK(WaitFor([&] { return b.Info("Alice_1").state == State::None; }));
+        a.Activate("Bob_2");
+        CHECK(bothUp());
+        CHECK(exchange(40));
+        // 17. Bob leaves but his BYE is lost: Alice still has him, with her old counts. He connects again.
+        b.Terminate("Alice_1");
+        CHECK(a.Info("Bob_2").state == State::Active);
+        b.Activate("Alice_1");
+        CHECK(bothUp());
+        CHECK(exchange(40));
+        // 18. Bob's link starts again (no BYE either), on another port.
+        b.Stop();
+        CHECK(b.Start(cb));
+        CHECK(WaitFor([&] { return b.External().Valid(); }));
+        b.Activate("Alice_1");
+        CHECK(bothUp());
+        CHECK(WaitFor([&] { return a.Info("Bob_2").gameAddr == b.External(); }));
+        CHECK(exchange(40));
+        a.Stop();
+        b.Stop();
+        mock.Stop();
+    }
+
     // --- 8. MSG_PEEK leaves the datagram queued -----------------------------------------------
     {
         const int s = hle::net::socket(2, 6, 0);
