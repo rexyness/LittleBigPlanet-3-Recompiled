@@ -43,12 +43,16 @@ gone). You need your own account there: on the launcher's **Online** page, type 
 PC. Community levels, your profile and your friends list work. Dive In doesn't match you with strangers on this
 server; play with friends through invites or Join. Add friends by name on the launcher's **Friends** page.
 
-Online co-op is **experimental**: inviting and joining a friend works (from the game's own menus), but the
-session may drop after a few minutes. A fix is in progress and will arrive through the launcher's
-updater. Only your shadNet friends can join your game.
+Online co-op is new: invite a friend or join their game from the game's own menus. Only your shadNet friends
+can join your game. **Both of you need the latest version** (Tools > Check for updates): since v0.1.1 a lost
+game message no longer ends the session, but only when both players have it. Friends on the same network
+connect over it directly.
 
 If the game says *"A problem occurred when attempting to connect to the LittleBigPlanet servers (403)"*, the
-sign-in failed, usually because of a wrong password in that file.
+sign-in failed. Usually the password in that file is wrong; the launcher's **Online** page can test it. The
+other cause is an out-of-date version: play.lbppc.com is switching to the sign-in codes that came with v0.1.1 and
+will then refuse older versions, so update (Tools > Check for updates). After too many wrong passwords the server
+pauses sign-in for up to 15 minutes.
 
 ## Controls
 
@@ -68,8 +72,12 @@ controllers for local co-op. **Insert** on the keyboard, or **L3+R3** on the pad
 ## Known issues
 
 - Brightness in some scenes is higher than on a PS4.
-- Online co-op is experimental: inviting and joining a friend works, but the session may drop after a
-  few minutes. A fix is in progress and will arrive through the launcher's updater.
+- Online co-op is still new:
+  - it hasn't been tested yet between two PCs on different networks;
+  - leaving and rejoining, and playing through real levels together, are only lightly tested;
+  - a burst of lost game messages can cause a short hitch;
+  - the joining player's game may be slightly less smooth than the host's.
+- Dive In doesn't match you with strangers on play.lbppc.com; play with friends through invites or Join.
 - The first-visit shader pauses described above.
 
 See CREDITS.md for who made what, and SOURCE.md for the source code.
