@@ -22,7 +22,8 @@ this download: you bring the game, and your DLC if you have any.
 1. Unzip this folder anywhere you can write to (not `Program Files`), for example `D:\Games\LBP3-Recompiled`.
 2. Run **LBP3Launcher.exe**. The programs aren't code-signed, so Windows SmartScreen may say "Windows protected
    your PC": choose **More info**, then **Run anyway**. The setup opens on the first start:
-   - **Game files:** pick the folder that CONTAINS `CUSA00473` (the parent folder). The launcher checks it.
+   - **Game files:** pick the folder that CONTAINS `CUSA00473` (the parent folder), or type or paste its path.
+     The launcher checks it.
    - **DLC:** optional; see above.
    - **Online:** optional; see below.
 3. Press **PLAY**.
@@ -41,8 +42,9 @@ gone). You need your own account there: on the launcher's **Online** page, type 
 **Create account**, then switch **Online** on. Your password stays in `user\config\online_account.txt` on your
 PC. Community levels, Dive In and your friends list work. Add friends by name on the launcher's **Friends** page.
 
-Joining a friend's game and inviting friends (from the game's own menus) are **new and experimental**: they
-haven't been tested between two PCs yet, so expect problems. Only your shadNet friends can join your game.
+Playing online together is **experimental**: friends can invite each other and join (from the game's own
+menus), but the session may drop once players move. That's being fixed, and the fix will come through the
+launcher's updater. Only your shadNet friends can join your game.
 
 If the game says *"A problem occurred when attempting to connect to the LittleBigPlanet servers (403)"*, the
 sign-in failed, usually because of a wrong password in that file.
@@ -57,13 +59,16 @@ controllers for local co-op. **Insert** on the keyboard, or **L3+R3** on the pad
 
 - `user\` - your settings, saves (`user\savedata\`) and shader cache. Back up `user\savedata\` to keep your
   progress. When updating by hand, keep `user\` (unzip the new version over this folder).
+- **Updates:** the launcher's **Tools** page checks for a new version and installs it (it checks the download
+  first, and never touches `user\` or `analysis\`).
 - `analysis\` - logs (`play_launcher_log.txt`) and save backups. **Make a report zip** in the launcher
   bundles the logs for whoever helps you.
 
 ## Known issues
 
 - Brightness in some scenes is higher than on a PS4.
-- Online: joining and inviting friends is experimental and untested between two PCs.
+- Online co-op is experimental: friends can invite and join, but the session may drop once players move (being
+  fixed; the fix comes through the launcher's updater).
 - The first-visit shader pauses described above.
 
 See CREDITS.md for who made what, and SOURCE.md for the source code.
