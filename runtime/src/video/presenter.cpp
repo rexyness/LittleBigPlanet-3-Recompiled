@@ -142,6 +142,31 @@ double DisplayHz(SDL_DisplayID id) {
     return mode->refresh_rate;
 }
 
+// LBP3_WINDOW: how the game's window shows. Unset or "windowed": a window, as before;
+// "borderless": the whole display without a frame (SDL's desktop full screen); "fullscreen": the
+// display's own mode, exclusive. F11 switches between the window and full screen while playing
+// (borderless when LBP3_WINDOW is unset).
+enum class WindowMode { Windowed, Borderless, Fullscreen };
+WindowMode WantedWindowMode() {
+    const char* v = std::getenv("LBP3_WINDOW");
+    if (v && std::strcmp(v, "borderless") == 0) return WindowMode::Borderless;
+    if (v && std::strcmp(v, "fullscreen") == 0) return WindowMode::Fullscreen;
+    return WindowMode::Windowed;
+}
+void SetFullScreen(SDL_Window* window, WindowMode mode, bool on) {
+    if (!on) {
+        SDL_SetWindowFullscreen(window, false);
+        std::fprintf(stderr, "[video] window mode: windowed\n");
+        return;
+    }
+    const SDL_DisplayMode* desktop = nullptr;
+    if (mode == WindowMode::Fullscreen) desktop = SDL_GetDesktopDisplayMode(SDL_GetDisplayForWindow(window));
+    SDL_SetWindowFullscreenMode(window, desktop);  // nullptr: borderless over the desktop
+    const bool ok = SDL_SetWindowFullscreen(window, true);
+    std::fprintf(stderr, "[video] window mode: %s%s\n", mode == WindowMode::Fullscreen && desktop ? "fullscreen" : "borderless",
+                 ok ? "" : " (refused by SDL)");
+}
+
 // LBP3_DISPLAY picks the display the window opens on, centred: a number (1 = the first
 // display SDL lists) or a refresh rate such as "165hz" (the display whose current rate is
 // nearest). Numbers shift when monitors are switched on and off; rates don't. The clone's
@@ -187,6 +212,9 @@ void PresenterThread() {
     SDL_Window* window = SDL_CreateWindow("LittleBigPlanet 3 (native)", kWindowWidth, kWindowHeight,
                                           SDL_WINDOW_RESIZABLE);
     if (window) PlaceWindow(window);
+    const WindowMode windowMode = WantedWindowMode();
+    bool fullScreen = windowMode != WindowMode::Windowed;
+    if (window && fullScreen) SetFullScreen(window, windowMode, true);
     SDL_Renderer* renderer = window ? SDL_CreateRenderer(window, nullptr) : nullptr;
     if (!renderer) {
         std::fprintf(stderr, "[video] window creation failed: %s\n", SDL_GetError());
@@ -247,7 +275,12 @@ void PresenterThread() {
             bool keyboardUsed = ui::overlay::HandleEvent(e);  // typing into the keyboard, answering a dialog
             if (!keyboardUsed && input::mouse_touch::HandleEvent(e)) keyboardUsed = true;  // LBP3_MOUSE_TOUCH (F7)
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && !keyboardUsed) {
-                if (auto handler = g_hotkeyHandler.load()) handler(static_cast<int>(e.key.key));
+                if (e.key.key == SDLK_F11) {  // window <-> full screen (LBP3_WINDOW's, else borderless)
+                    fullScreen = !fullScreen;
+                    SetFullScreen(window, windowMode == WindowMode::Windowed ? WindowMode::Borderless : windowMode, fullScreen);
+                } else if (auto handler = g_hotkeyHandler.load()) {
+                    handler(static_cast<int>(e.key.key));
+                }
             }
             if (e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED || e.type == SDL_EVENT_DISPLAY_ADDED ||
                 e.type == SDL_EVENT_DISPLAY_REMOVED || e.type == SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED)
