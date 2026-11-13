@@ -230,7 +230,8 @@ target_compile_definitions(launcher_net PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _WI
 target_link_libraries(launcher_net PUBLIC launcher_core shadnet_client PRIVATE ssl crypto fmt::fmt ws2_32)
 # The window, with its own icon and version information (launcher.rc), and the port's motion
 # filter (input/motion, standalone) for the controller tester.
-add_executable(LBP3Launcher WIN32 launcher/launcher_main.cpp launcher/launcher.rc src/input/motion.cpp)
+add_executable(LBP3Launcher WIN32 launcher/launcher_main.cpp launcher/launcher_theme.cpp launcher/launcher_pages.cpp
+    launcher/launcher_online.cpp launcher/launcher.rc src/input/motion.cpp)
 target_include_directories(LBP3Launcher PRIVATE src)
 target_link_libraries(LBP3Launcher PRIVATE launcher_core launcher_net imgui SDL3::SDL3)
 # Its offline test: the ini, the settings -> LBP3_* mapping, names and addresses, JSON, SHA-512,
