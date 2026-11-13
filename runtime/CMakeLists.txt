@@ -12,6 +12,7 @@ find_package(SDL3 REQUIRED CONFIG PATHS "${CMAKE_CURRENT_SOURCE_DIR}/../third_pa
 
 include(cmake/shader_recompiler.cmake)
 include(cmake/video_core.cmake)
+include(cmake/shadnet.cmake)  # opt-in at run time (LBP3_SHADNET=1)
 
 # Dear ImGui (MIT; shadPS4's copy) for the on-screen keyboard, drawn on the presenter's SDL
 # renderer. Built with the stock imconfig.h: nothing else here compiles ImGui (video_core
@@ -67,6 +68,8 @@ add_library(hle STATIC
     src/hle/libScePad.cpp
     src/hle/net_offline.cpp
     src/hle/np_offline.cpp
+    src/hle/np_shadnet.cpp
+    src/net/shadnet_service.cpp
     src/hle/playgo.cpp
     src/hle/pm4.cpp
     src/hle/rtc.cpp
@@ -93,9 +96,9 @@ add_library(hle STATIC
 )
 target_include_directories(hle PUBLIC src)
 target_include_directories(hle PRIVATE ${SHADPS4_EXT}/stb)  # hle/jpeg.cpp
-target_link_libraries(hle PUBLIC shader_recompiler video_core)
+target_link_libraries(hle PUBLIC shader_recompiler video_core shadnet_client)
 target_compile_definitions(hle PUBLIC _WIN32_WINNT=0x0A00 NOMINMAX _CRT_SECURE_NO_WARNINGS)
-target_link_libraries(hle PUBLIC imgui SDL3::SDL3 bcrypt winmm dbghelp onecore advapi32 dxgi comctl32 winhttp ws2_32)
+target_link_libraries(hle PUBLIC imgui SDL3::SDL3 bcrypt winmm dbghelp onecore advapi32 dxgi comctl32 winhttp ws2_32 iphlpapi)
 
 add_executable(lbp3 src/main.cpp)
 target_link_libraries(lbp3 PRIVATE hle)
@@ -204,7 +207,13 @@ target_link_libraries(LBP3Launcher PRIVATE launcher_core imgui SDL3::SDL3)
 add_executable(launchertest tests/launchertest.cpp)
 target_link_libraries(launchertest PRIVATE launcher_core)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest unlocktest vkcachetest uxtest motiontest LBP3Launcher)
+# shadNet offline (net/shadnet_service, best/shadnet_design.md): the settings, off means no client
+# (no thread, no socket), and a login against an in-process mock server speaking the protocol.
+add_executable(shadnettest tests/shadnettest.cpp)
+target_link_libraries(shadnettest PRIVATE hle libprotobuf)
+target_include_directories(shadnettest PRIVATE ${SHADNET_PROTO_OUT})
+
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest unlocktest vkcachetest uxtest motiontest shadnettest LBP3Launcher)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()

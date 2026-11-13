@@ -13,11 +13,15 @@
 // PS3-style NP ticket the login carries) and the answers for what Refresh doesn't serve the PS4
 // game (/farc_hashes and /t_conf 410 -> empty signed 200; /npdata's empty reply -> the friends
 // posted; a co-op guest's /match 401 -> signed success), signed as the server signs its replies
-// (X-Digest-A: HMAC-SHA1 with "CustomServerDigest" over body + MM_AUTH cookie + path).
+// (X-Digest-A: HMAC-SHA1 with "CustomServerDigest" over body + MM_AUTH cookie + path), and the
+// check every GET .../r/<sha1> download passes before it reaches the game (CheckDownload: the
+// bytes must hash to their name and be a type the game itself shares; scripts are refused).
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -55,6 +59,7 @@ struct Request {
     int conn = 0;
     std::string method = "GET";
     std::string url;  // as the game gave it
+    std::string userAgent;  // the template's
     std::vector<Header> headers;
     uint64_t contentLength = 0;
     bool sent = false;
@@ -206,11 +211,23 @@ std::vector<uint8_t> BuildLocalLoginTicket(const std::string& name) {
     return out;
 }
 
-// The reply signed as the server signs its replies, which the game checks.
+// The reply signed as the server signs its replies, which the game checks. The cookie is the
+// MM_AUTH value the request carried: the game sends it itself (from the login reply's
+// authTicket), and a real server sets no cookie of its own, so ours may be empty.
 void AnswerSigned(Request& r, const std::string& path, const std::string& body,
                   std::string_view contentType = "text/xml") {
+    std::string jar;
+    for (const Header& h : r.headers)
+        if (IEquals(h.name, "Cookie")) jar = h.value;
+    if (jar.find("MM_AUTH=") == std::string::npos) {
+        std::lock_guard lk(g_mutex);
+        jar = g_cookie;
+    }
     std::string cookie;
-    if (const auto at = g_cookie.find("MM_AUTH="); at != std::string::npos) cookie = g_cookie.substr(at + 8);
+    if (const auto at = jar.find("MM_AUTH="); at != std::string::npos) {
+        cookie = jar.substr(at + 8);
+        cookie = cookie.substr(0, cookie.find(';'));
+    }
     const std::string hex = HmacSha1Hex("CustomServerDigest", body + cookie + path);
     r.status = 200;
     r.body.assign(body.begin(), body.end());
@@ -242,7 +259,138 @@ void FixUpReply(Request& r, const std::string& pathAndQuery, const std::vector<u
     }
 }
 
+// What the game downloads from the server (GET .../r/<sha1>: levels, objects, photos, textures)
+// reaches it only when the bytes hash to the name it asked for and are a type the game itself makes
+// and shares. On PC the game's code is not in the PS4's sandbox, so a script or another type only
+// mods produce (Refresh's AssetFlags: Dangerous or Modded) is refused here even if a server or an
+// archive mirror serves it. The game sees a missing file (404).
+std::string_view RequestedAssetHash(std::string_view path) {
+    const auto at = path.rfind("/r/");
+    if (at == std::string_view::npos || path.size() < at + 3 + 40) return {};
+    const auto hash = path.substr(at + 3, 40);
+    const auto rest = path.substr(at + 3 + 40);
+    if ((!rest.empty() && rest.front() != '?') ||
+        !std::all_of(hash.begin(), hash.end(), [](char c) { return std::isxdigit(static_cast<unsigned char>(c)); }))
+        return {};
+    return hash;
+}
+
+std::string Sha1Hex(const uint8_t* data, size_t size) {
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    unsigned char out[20] = {};
+    std::string hex;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA1_ALGORITHM, nullptr, 0) != 0) return hex;
+    if (BCryptCreateHash(alg, &hash, nullptr, 0, nullptr, 0, 0) == 0) {
+        if (size) BCryptHashData(hash, const_cast<PUCHAR>(data), static_cast<ULONG>(size), 0);
+        if (BCryptFinishHash(hash, out, sizeof(out), 0) == 0) {
+            char buf[3];
+            for (unsigned char b : out) {
+                std::snprintf(buf, sizeof(buf), "%02x", b);
+                hex += buf;
+            }
+        }
+        BCryptDestroyHash(hash);
+    }
+    BCryptCloseAlgorithmProvider(alg, 0);
+    return hex;
+}
+
+// Why a downloaded asset is refused, or null when it may reach the game.
+const char* RefusedAsset(std::string_view hash, const std::vector<uint8_t>& body) {
+    const std::string actual = Sha1Hex(body.data(), body.size());
+    if (actual.empty()) return "could not be checked";
+    if (hash.size() != actual.size() ||
+        !std::equal(hash.begin(), hash.end(), actual.begin(),
+                    [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == b; }))
+        return "its contents do not match its name";
+    const auto starts = [&](std::string_view magic) {
+        return body.size() >= magic.size() && std::memcmp(body.data(), magic.data(), magic.size()) == 0;
+    };
+    if (starts("\xff\xd8\xff") || starts("\x89PNG\r\n\x1a\n") || starts("MATT") || starts("<ghost>"))
+        return nullptr;  // photos, grief reports, challenge ghosts
+    if (body.size() < 4) return "unknown type";
+    // Types the game creates and uploads itself (Refresh: neither Dangerous nor Modded). Not GMT: a
+    // graphics material carries compiled shaders, which would reach the shader recompiler; the game's
+    // own are in its files.
+    static constexpr std::string_view shared[] = {"LVL", "PLN", "REC", "PRF", "QST", "ADS", "ADC",
+                                                  "CHK", "VOP", "PTG", "TEX", "MAT", "BEV"};
+    const std::string_view type(reinterpret_cast<const char*>(body.data()), 3);
+    const char format = static_cast<char>(body[3]);
+    if (std::find(std::begin(shared), std::end(shared), type) == std::end(shared))
+        return type == "FSH" ? "a script" : type == "GMT" ? "a graphics material (shaders)" : "a type only mods make";
+    if (format != 'b' && format != 't' && format != 'e' && format != ' ' && format != 's' && format != 'S')
+        return "unknown type";
+    return nullptr;
+}
+
+// A refused download: the game sees a missing file.
+void RefuseAsset(Request& r, std::string_view hash, const char* reason) {
+    std::string type;
+    for (size_t i = 0; i < std::min<size_t>(r.body.size(), 4); ++i)
+        type += std::isprint(r.body[i]) ? static_cast<char>(r.body[i]) : '.';
+    std::fprintf(stderr, "[online] refused a download (%.*s, '%s'): %s\n", static_cast<int>(hash.size()), hash.data(),
+                 type.c_str(), reason);
+    r.status = 404;
+    r.body.clear();
+    r.readPos = 0;
+    r.rawHeaders = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+}
+
+// For GET .../r/<sha1> answered 200 (LBPPC applies it to the decoded body, as here).
+void CheckDownload(Request& r, const std::string& pathAndQuery) {
+    if (r.method != "GET" || r.status != 200) return;
+    if (const auto hash = RequestedAssetHash(pathAndQuery); !hash.empty())
+        if (const char* reason = RefusedAsset(hash, r.body)) RefuseAsset(r, hash, reason);
+}
+
 // --- End of the adapted part ---------------------------------------------------------------
+
+// LBP3_ONLINE_LOG=1: every request and reply in full (headers, the first 512 bytes of each
+// body), with session cookies redacted. For finding out what a server and the game disagree on.
+bool VerboseLog() {
+    static const bool on = [] {
+        const char* v = std::getenv("LBP3_ONLINE_LOG");
+        return v && *v && *v != '0';
+    }();
+    return on;
+}
+
+// "MM_AUTH=<value>" -> "MM_AUTH=<redacted:N>", anywhere in the text.
+std::string Redact(std::string s) {
+    size_t at = 0;
+    while ((at = s.find("MM_AUTH=", at)) != std::string::npos) {
+        at += 8;
+        size_t end = at;
+        while (end < s.size() && s[end] != ';' && s[end] != '\r' && s[end] != '\n' && s[end] != '<' &&
+               s[end] != '"' && s[end] != ' ')
+            ++end;
+        const std::string tag = "<redacted:" + std::to_string(end - at) + ">";
+        s.replace(at, end - at, tag);
+        at += tag.size();
+    }
+    return s;
+}
+
+std::string Preview(const uint8_t* data, size_t size) {
+    const size_t n = std::min<size_t>(size, 512);
+    bool text = true;
+    for (size_t i = 0; i < n && text; ++i)
+        text = (data[i] >= 32 && data[i] < 127) || data[i] == '\r' || data[i] == '\n' || data[i] == '\t';
+    std::string out;
+    if (text) {
+        out.assign(reinterpret_cast<const char*>(data), n);
+    } else {
+        char b[4];
+        for (size_t i = 0; i < std::min<size_t>(n, 128); ++i) {
+            std::snprintf(b, sizeof(b), "%02x", data[i]);
+            out += b;
+        }
+        out = "(binary) " + out;
+    }
+    if (size > n) out += "...(" + std::to_string(size) + " bytes)";
+    return Redact(out);
+}
 
 void RememberCookies(const std::string& rawHeaders) {
     size_t at = 0;
@@ -260,6 +408,40 @@ void RememberCookies(const std::string& rawHeaders) {
             g_cookie = v;
         }
     }
+}
+
+// The body reaches the game whole and decoded: drop Content-Encoding / Transfer-Encoding and
+// give the real Content-Length, when the server used either (otherwise the headers are untouched).
+void NormalizeHeaders(Request& r) {
+    std::string out, line;
+    bool changed = false;
+    size_t at = 0;
+    while (at < r.rawHeaders.size()) {
+        size_t end = r.rawHeaders.find("\r\n", at);
+        if (end == std::string::npos) end = r.rawHeaders.size();
+        line = r.rawHeaders.substr(at, end - at);
+        at = end + 2;
+        if (line.empty()) continue;
+        const auto colon = line.find(':');
+        const std::string_view name = colon == std::string::npos ? std::string_view{} : std::string_view(line).substr(0, colon);
+        if (IEquals(name, "Content-Encoding") || IEquals(name, "Transfer-Encoding")) {
+            changed = true;
+            continue;
+        }
+        out += line + "\r\n";
+    }
+    if (!changed) return;
+    std::string kept;
+    at = 0;
+    while (at < out.size()) {  // drop the old Content-Length too, then add the real one
+        size_t end = out.find("\r\n", at);
+        line = out.substr(at, end - at);
+        at = end + 2;
+        const auto colon = line.find(':');
+        if (colon != std::string::npos && IEquals(std::string_view(line).substr(0, colon), "Content-Length")) continue;
+        kept += line + "\r\n";
+    }
+    r.rawHeaders = kept + "Content-Length: " + std::to_string(r.body.size()) + "\r\n\r\n";
 }
 
 int Send(Request& r, const std::vector<uint8_t>& postIn) {
@@ -287,16 +469,28 @@ int Send(Request& r, const std::vector<uint8_t>& postIn) {
     DWORD noCookies = WINHTTP_DISABLE_COOKIES;
     WinHttpSetOption(req, WINHTTP_OPTION_DISABLE_FEATURE, &noCookies, sizeof(noCookies));
     std::string headers;
-    bool haveCookie = false;
+    bool haveCookie = false, haveAgent = false;
     for (const Header& h : r.headers) {
         if (IEquals(h.name, "Host") || IEquals(h.name, "Content-Length")) continue;
+        // The game accepts gzip/deflate, which libSceHttp inflates for it before it reads the
+        // body. Bodies are asked for uncompressed instead: a compressed /searches reply passed
+        // through raw (or empty, through WinHTTP's decompression) kept the game from going online.
+        if (IEquals(h.name, "Accept-Encoding")) continue;
         if (IEquals(h.name, "Cookie")) haveCookie = true;
+        if (IEquals(h.name, "User-Agent")) haveAgent = true;
         headers += h.name + ": " + h.value + "\r\n";
     }
+    // Like libSceHttp: the template's user agent unless the request names its own (servers
+    // tell the game and its platform from it).
+    if (!haveAgent && !r.userAgent.empty()) headers += "User-Agent: " + r.userAgent + "\r\n";
     {
         std::lock_guard lk(g_mutex);
         if (!haveCookie && !g_cookie.empty()) headers += "Cookie: " + g_cookie + "\r\n";
     }
+    if (VerboseLog())
+        std::fprintf(stderr, "[online-log] > %s %s://%s:%u%s\n%s> body: %s\n", r.method.c_str(), srv.scheme.c_str(),
+                     srv.host.c_str(), srv.port, path.c_str(), Redact(headers).c_str(),
+                     Preview(post.data(), post.size()).c_str());
     const std::wstring wh = Wide(headers);
     const BOOL sent = WinHttpSendRequest(req, wh.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : wh.c_str(),
                                          wh.empty() ? 0 : static_cast<DWORD>(-1L),
@@ -343,6 +537,11 @@ int Send(Request& r, const std::vector<uint8_t>& postIn) {
     WinHttpCloseHandle(con);
     r.readPos = 0;
     RememberCookies(r.rawHeaders);
+    NormalizeHeaders(r);
+    if (VerboseLog())
+        std::fprintf(stderr, "[online-log] < %d for %s\n%s< body: %s\n", r.status, path.c_str(),
+                     Redact(r.rawHeaders).c_str(), Preview(r.body.data(), r.body.size()).c_str());
+    CheckDownload(r, path);
     FixUpReply(r, path, post);
     static std::atomic<int> logged{0};
     if (logged++ < 400)
@@ -402,6 +601,8 @@ static int NewRequest(int conn, int method, const std::string& url, uint64_t con
     r->contentLength = contentLength;
     const int id = NewId();
     std::lock_guard lk(g_mutex);
+    if (auto c = g_connections.find(conn); c != g_connections.end())
+        if (auto t = g_templates.find(c->second.tmpl); t != g_templates.end()) r->userAgent = t->second;
     g_requests[id] = std::move(r);
     return id;
 }
@@ -548,6 +749,16 @@ int PS4_SYSV_ABI sceHttpGetAuthEnabled(int, int* enabled) {
 // For the offline test: the ticket and the signing, without a game.
 std::vector<uint8_t> TestTicket(const std::string& name) { return BuildLocalLoginTicket(name); }
 std::string TestHmac(const std::string& key, const std::string& data) { return HmacSha1Hex(key, data); }
+// The download check on a GET answered 200: the status and body the game would get.
+int TestDownloadCheck(const std::string& path, std::vector<uint8_t>& body) {
+    Request r;
+    r.method = "GET";
+    r.status = 200;
+    r.body = body;
+    CheckDownload(r, path);
+    body = r.body;
+    return r.status;
+}
 
 }  // namespace hle::http_online
 

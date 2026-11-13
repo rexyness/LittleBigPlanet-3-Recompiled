@@ -25,6 +25,7 @@ void RegisterNetOffline(core::Linker& linker);
 void RegisterRtc(core::Linker& linker);
 void RegisterHttpOffline(core::Linker& linker);
 void RegisterHttpOnline(core::Linker& linker);  // only with LBP3_ONLINE=1 (hle/online.h)
+void RegisterShadNet(core::Linker& linker);     // only with LBP3_SHADNET=1 (net/shadnet_service.h)
 void RegisterDialogs(core::Linker& linker);
 void RegisterImeDialog(core::Linker& linker);
 void RegisterJpeg(core::Linker& linker);

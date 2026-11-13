@@ -27,6 +27,7 @@ void RegisterAll(core::Linker& linker) {
     RegisterRtc(linker);
     RegisterHttpOffline(linker);
     RegisterHttpOnline(linker);  // replaces the above only with LBP3_ONLINE=1 (hle/online.h)
+    RegisterShadNet(linker);     // logs NP friends/presence/signaling calls, only with LBP3_SHADNET=1
     RegisterDialogs(linker);
     RegisterImeDialog(linker);
     RegisterJpeg(linker);

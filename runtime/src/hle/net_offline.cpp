@@ -15,8 +15,11 @@
 #include <vector>
 #include <thread>
 
+#include <cstdarg>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <ipexport.h>
+#include <icmpapi.h>
 
 #include "hle/kernel_errors.h"
 #include "hle/net_delay.h"
@@ -78,11 +81,14 @@ void NetLog(const char* what, int id, const std::string& extra) {
 struct Datagram {
     std::vector<uint8_t> data;
     uint16_t fromPort, fromVport;
+    uint8_t fromAddr[4] = {127, 0, 0, 1};  // an echo reply's sender (online); loopback otherwise
 };
 struct Socket {
     uint16_t port = 0;   // bound local port, 0 = unbound
     uint16_t vport = 0;  // bound virtual port (P2P sockets, SceNetSockaddrIn.sin_vport)
     std::deque<Datagram> inbox;
+    int type = 0, proto = 0;  // as created (3 and 1: a raw ICMP socket)
+    uint64_t serial = 0;      // tells a reused descriptor from the socket an echo was sent on
 };
 struct EpollEntry {
     int socket;
@@ -210,7 +216,8 @@ int64_t RecvLocal(int s, void* buf, size_t len, void* from, uint32_t* fromLen) {
     if (from && fromLen && *fromLen >= 16) {
         // The sender's virtual port matters: P2P peers are identified by addr:port:vport.
         uint8_t sa[16] = {16, kAfInet, static_cast<uint8_t>(d.fromPort >> 8), static_cast<uint8_t>(d.fromPort),
-                          127, 0, 0, 1, static_cast<uint8_t>(d.fromVport >> 8), static_cast<uint8_t>(d.fromVport)};
+                          d.fromAddr[0], d.fromAddr[1], d.fromAddr[2], d.fromAddr[3],
+                          static_cast<uint8_t>(d.fromVport >> 8), static_cast<uint8_t>(d.fromVport)};
         std::memcpy(from, sa, sizeof(sa));
         *fromLen = sizeof(sa);
     }
@@ -224,6 +231,134 @@ void CloseSocket(int s) {
         std::erase_if(entries, [s](const EpollEntry& e) { return e.socket == s; });
 }
 
+std::atomic<uint64_t> g_nextSerial{1};
+
+void SetKind(int s, int type, int proto) {
+    std::lock_guard lk(g_netMutex);
+    if (auto it = g_sockets.find(s); it != g_sockets.end()) {
+        it->second.type = type;
+        it->second.proto = proto;
+        it->second.serial = g_nextSerial++;
+    }
+}
+
+// --- online: the server ping (a raw ICMP echo) ---------------------------------------
+//
+// LBP3 pings its CDN host ("https://play.lbppc.com/lbp", looked up as a name: see the resolver)
+// over a raw ICMP socket: sendto of an 8-byte echo request. Windows sends an echo without admin
+// rights only through IcmpSendEcho, so that is what sends it, on a thread of its own; the reply
+// is queued on the game's socket as a raw socket delivers it (an IPv4 header, then the ICMP echo
+// reply with the game's own id and sequence). Only online, only for raw ICMP sockets, and only
+// after the loopback path (SendLocal) has declined the packet, so the game session's loopback
+// traffic is untouched.
+
+constexpr int kSockRaw = 3, kProtoIcmp = 1;
+constexpr uint8_t kIcmpEchoRequest = 8, kIcmpEchoReply = 0;
+
+// The first 60 lines about the ping (NetLog stops after 80 lines of everything).
+void IcmpLog(const char* format, ...) {
+    static std::atomic<int> n{0};
+    if (n++ >= 60) return;
+    char buf[512];
+    va_list ap;
+    va_start(ap, format);
+    std::vsnprintf(buf, sizeof(buf), format, ap);
+    va_end(ap);
+    std::fprintf(stderr, "[net] icmp: %s\n", buf);
+}
+
+bool IsIcmpSocket(int s, uint64_t* serial) {
+    std::lock_guard lk(g_netMutex);
+    auto it = g_sockets.find(s);
+    if (it == g_sockets.end() || it->second.type != kSockRaw || it->second.proto != kProtoIcmp) return false;
+    if (serial) *serial = it->second.serial;
+    return true;
+}
+
+uint16_t InetChecksum(const uint8_t* p, size_t n) {
+    uint32_t sum = 0;
+    for (size_t i = 0; i + 1 < n; i += 2) sum += static_cast<uint32_t>((p[i] << 8) | p[i + 1]);
+    if (n & 1) sum += static_cast<uint32_t>(p[n - 1] << 8);
+    while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+    return static_cast<uint16_t>(~sum);
+}
+
+void EchoWorker(int s, uint64_t serial, std::vector<uint8_t> request, uint32_t dest) {
+    HANDLE icmp = IcmpCreateFile();
+    if (icmp == INVALID_HANDLE_VALUE) {
+        IcmpLog("IcmpCreateFile failed (%lu)", GetLastError());
+        return;
+    }
+    const std::vector<uint8_t> payload(request.begin() + 8, request.end());
+    std::vector<uint8_t> replyBuf(sizeof(ICMP_ECHO_REPLY) + payload.size() + 8 + 16 /* IO_STATUS_BLOCK */ + 64);
+    const DWORD count = IcmpSendEcho2(icmp, nullptr, nullptr, nullptr, dest,
+                                      payload.empty() ? nullptr : const_cast<uint8_t*>(payload.data()),
+                                      static_cast<WORD>(payload.size()), nullptr, replyBuf.data(),
+                                      static_cast<DWORD>(replyBuf.size()), 2000);
+    const DWORD err = count ? 0 : GetLastError();
+    IcmpCloseHandle(icmp);
+    const auto* reply = reinterpret_cast<const ICMP_ECHO_REPLY*>(replyBuf.data());
+    const auto* d = reinterpret_cast<const uint8_t*>(&dest);
+    if (!count || reply->Status != IP_SUCCESS) {
+        IcmpLog("echo to %u.%u.%u.%u: no reply (error %lu, status %lu)", d[0], d[1], d[2], d[3], err,
+                count ? reply->Status : 0);
+        return;
+    }
+    // ICMP echo reply: type 0, code 0, checksum, then the request's id, sequence and data.
+    std::vector<uint8_t> icmpReply(request);
+    icmpReply[0] = kIcmpEchoReply;
+    icmpReply[1] = 0;
+    icmpReply[2] = icmpReply[3] = 0;
+    const uint16_t ck = InetChecksum(icmpReply.data(), icmpReply.size());
+    icmpReply[2] = static_cast<uint8_t>(ck >> 8);
+    icmpReply[3] = static_cast<uint8_t>(ck);
+    // In front of it the IPv4 header, from the sender to this machine's address (sceNetCtlGetInfo's).
+    const uint16_t total = static_cast<uint16_t>(20 + icmpReply.size());
+    const auto* src = reinterpret_cast<const uint8_t*>(&reply->Address);
+    uint8_t ip[20] = {0x45, 0, static_cast<uint8_t>(total >> 8), static_cast<uint8_t>(total), 0, 0, 0, 0,
+                      reply->Options.Ttl ? reply->Options.Ttl : static_cast<uint8_t>(64), kProtoIcmp, 0, 0,
+                      src[0], src[1], src[2], src[3], 192, 168, 1, 50};
+    const uint16_t ipck = InetChecksum(ip, sizeof(ip));
+    ip[10] = static_cast<uint8_t>(ipck >> 8);
+    ip[11] = static_cast<uint8_t>(ipck);
+    Datagram dg;
+    dg.data.assign(ip, ip + sizeof(ip));
+    dg.data.insert(dg.data.end(), icmpReply.begin(), icmpReply.end());
+    dg.fromPort = dg.fromVport = 0;
+    std::memcpy(dg.fromAddr, src, 4);
+    bool queued = false;
+    {
+        std::lock_guard lk(g_netMutex);
+        auto it = g_sockets.find(s);  // not operator[]: a closed socket stays closed
+        if (it != g_sockets.end() && it->second.serial == serial && it->second.inbox.size() < kMaxQueued) {
+            it->second.inbox.push_back(std::move(dg));
+            queued = true;
+        }
+    }
+    IcmpLog("echo reply from %u.%u.%u.%u in %lu ms (ttl %u)%s", src[0], src[1], src[2], src[3],
+            reply->RoundTripTime, reply->Options.Ttl, queued ? ", queued for the game" : ", the socket is gone");
+}
+
+// True if this was an echo request on a raw ICMP socket, now on its way.
+bool SendIcmpEcho(int s, const void* data, size_t len, const void* to, void* caller) {
+    uint64_t serial = 0;
+    if (!to || !data || len < 8 || len > 1500 || !IsIcmpSocket(s, &serial)) return false;
+    const auto* sa = static_cast<const uint8_t*>(to);
+    const auto* req = static_cast<const uint8_t*>(data);
+    if (sa[1] != kAfInet || req[0] != kIcmpEchoRequest) return false;
+    uint32_t dest;
+    std::memcpy(&dest, sa + 4, 4);
+    if (!dest) {
+        IcmpLog("echo to 0.0.0.0 from %p: unreachable", caller);
+        return false;
+    }
+    IcmpLog("echo request on %d (id %u, seq %u, %zu bytes) to %u.%u.%u.%u from %p", s, (req[4] << 8) | req[5],
+            (req[6] << 8) | req[7], len, sa[4], sa[5], sa[6], sa[7], caller);
+    const auto* p = static_cast<const uint8_t*>(data);
+    std::thread(EchoWorker, s, serial, std::vector<uint8_t>(p, p + len), dest).detach();
+    return true;
+}
+
 }  // namespace
 
 // --- POSIX ------------------------------------------------------------------------
@@ -233,6 +368,7 @@ int PS4_SYSV_ABI socket(int family, int type, int proto) {
     if (id < 0) return PosixFail(24);  // EMFILE
     NetLog("posix socket", id, "family " + std::to_string(family) + " type " + std::to_string(type) + " proto " +
                                    std::to_string(proto));
+    SetKind(id, type, proto);
     return id;
 }
 int PS4_SYSV_ABI bind(int s, const void* addr, uint32_t) {
@@ -241,12 +377,15 @@ int PS4_SYSV_ABI bind(int s, const void* addr, uint32_t) {
     return 0;
 }
 int64_t PS4_SYSV_ABI recvfrom(int s, void* buf, size_t len, int, void* from, uint32_t* fromLen) {
+    // The game reads its ping's echo replies here too (polling, as for its loopback datagrams).
     const int64_t n = RecvLocal(s, buf, len, from, fromLen);
     return n >= 0 ? n : PosixFail(kEWouldBlock);
 }
 int64_t PS4_SYSV_ABI recv(int s, void* buf, size_t len, int flags) { return recvfrom(s, buf, len, flags, nullptr, nullptr); }
 int64_t PS4_SYSV_ABI sendto(int s, const void* data, size_t len, int, const void* addr, uint32_t) {
     if (SendLocal(s, data, len, addr)) return static_cast<int64_t>(len);
+    if (online::Enabled() && SendIcmpEcho(s, data, len, addr, __builtin_return_address(0)))
+        return static_cast<int64_t>(len);
     NetLog("posix sendto", s, std::to_string(len) + " bytes to " + Addr(addr) + " -> unreachable");
     return PosixFail(kENetUnreach);
 }
@@ -263,6 +402,7 @@ int PS4_SYSV_ABI sceNetSocket(const char* name, int family, int type, int proto)
     const int id = NewSocket();
     NetLog("socket", id, std::string(name ? name : "") + " family " + std::to_string(family) + " type " +
                              std::to_string(type) + " proto " + std::to_string(proto));
+    SetKind(id, type, proto);
     return id;
 }
 int PS4_SYSV_ABI sceNetSocketClose(int s) {
@@ -370,12 +510,29 @@ int PS4_SYSV_ABI sceNetResolverCreate(const char*, int, int) { return g_nextId++
 int PS4_SYSV_ABI sceNetResolverDestroy(int) { return kernel::SCE_OK; }
 int PS4_SYSV_ABI sceNetResolverStartNtoa(int, const char* host, void* addr, int, int, int) {
     std::fprintf(stderr, "[net] resolve %s\n", host ? host : "?");
-    if (online::Enabled()) {  // hle/online.h: every name is the community server
-        const uint32_t ip = online::ServerIPv4();
+    if (online::Enabled()) {  // hle/online.h
+        // As a real resolver: the game's own server name is the community server; other host
+        // names resolve through DNS. LBP3 also looks up its CDN *URL* (Refresh's network_settings.nws
+        // gives "https://play.lbppc.com/lbp" as CDNHostName and TelemetryServer) for its server
+        // ping: a URL resolves its host, as LBPPC's resolver does (net_resolver.cpp, GPL-2.0-or-later).
+        std::string name = host ? host : "";
+        if (const auto scheme = name.find("://"); scheme != std::string::npos) {
+            name = name.substr(scheme + 3);
+            name = name.substr(0, name.find_first_of("/:?#"));
+        }
+        if (!name.empty() && name.back() == '.') name.pop_back();
+        uint32_t ip = 0;
+        if (!name.empty() && name.find_first_of("/:") == std::string::npos)
+            ip = name.size() >= 9 && name.compare(name.size() - 9, 9, ".scee.com") == 0 ? online::ServerIPv4()
+                                                                                    : online::ResolveIPv4(name);
+        const auto* b = reinterpret_cast<const uint8_t*>(&ip);
+        std::fprintf(stderr, "[net] resolve %s: %s -> %u.%u.%u.%u\n", host ? host : "?", name.c_str(), b[0], b[1],
+                     b[2], b[3]);
         if (ip && addr) {
             std::memcpy(addr, &ip, sizeof(ip));
             return kernel::SCE_OK;
         }
+        return SceFail(kETimedOut);
     }
     UnreachableDelay("sceNetResolverStartNtoa");
     return SceFail(kETimedOut);

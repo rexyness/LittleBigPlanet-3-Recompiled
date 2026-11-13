@@ -20,6 +20,7 @@
 #include "hle/register.h"
 #include "hle/online.h"
 #include "hle/users.h"
+#include "net/shadnet_service.h"
 
 namespace hle::np {
 namespace {
@@ -49,6 +50,11 @@ int SignedOut(const char* fn) {
 
 }  // namespace
 
+// shadNet (LBP3_SHADNET=1, net/shadnet_service.h): signed in once its login has succeeded.
+bool ShadNetSignedIn() {
+    return net::shadnet::Settings().enabled && net::shadnet::GetStatus() == net::shadnet::Status::SignedIn;
+}
+
 int PS4_SYSV_ABI sceNpGetState(int32_t userId, int32_t* state) {
     (void)userId;
     if (!state) return kErrorInvalidArgument;
@@ -59,7 +65,7 @@ int PS4_SYSV_ABI sceNpGetState(int32_t userId, int32_t* state) {
         const char* v = std::getenv("LBP3_NP_STATE");
         return (v && std::strcmp(v, "signedin") == 0) || online::Enabled();
     }();
-    *state = signedIn ? kSignedIn : kSignedOut;
+    *state = signedIn || ShadNetSignedIn() ? kSignedIn : kSignedOut;
     return kernel::SCE_OK;
 }
 
@@ -94,6 +100,12 @@ int PS4_SYSV_ABI sceNpCheckCallback() {
         {
             std::lock_guard lk(g_mutex);
             if (g_pendingUsers.empty() || !g_stateCallback) return kernel::SCE_OK;
+            // shadNet: user 1's state waits for the login's answer (up to 20 s), so the game's
+            // connect flow sees the final state; a later sign-in queues a new notice (np_shadnet.cpp).
+            if (g_pendingUsers.front() == 1 && net::shadnet::Settings().enabled &&
+                net::shadnet::GetStatus() == net::shadnet::Status::Connecting &&
+                net::shadnet::SecondsSinceStart() < 20.0)
+                return kernel::SCE_OK;
             user = g_pendingUsers.front();
             g_pendingUsers.pop_front();
             cb = g_stateCallback;
@@ -129,6 +141,7 @@ struct NpId { OnlineId handle; uint8_t opt[8]; uint8_t reserved[8]; };
 const std::string& PlayerName() {
     static const std::string name = [] {
         if (online::Enabled()) return online::Name();  // the account on the community server
+        if (net::shadnet::Settings().enabled) return net::shadnet::Settings().name;  // shadNet account
         std::string n;
         if (const char* env = std::getenv("LBP3_PLAYER_NAME")) n = env;
         if (n.empty()) {
@@ -227,11 +240,36 @@ int PS4_SYSV_ABI sceNpGetAccountCountry(const void*, char* country) {
     if (country) std::memcpy(country, "us", 3);  // SceNpCountryCode: 2 chars + terminator
     return kernel::SCE_OK;
 }
-int PS4_SYSV_ABI sceNpGetAccountLanguage(int32_t, const void*, void*) { return SignedOut(__func__); }
-int PS4_SYSV_ABI sceNpGetAccountDateOfBirth(int32_t, const void*, void*) { return SignedOut(__func__); }
+// Logged once each when signed in (which account checks the game makes online).
+void NoteCall(const char* fn) {
+    static std::mutex m;
+    static std::set<std::string> seen;
+    std::lock_guard lk(m);
+    if (seen.insert(fn).second) std::fprintf(stderr, "[np] %s (signed in)\n", fn);
+}
+// Signed in, the account answers like an adult's in the US: SceNpLanguageCode "en", and
+// SceNpDate {u16 year; u8 month; u8 day} 1990-01-01.
+int PS4_SYSV_ABI sceNpGetAccountLanguage(int32_t, const void*, void* language) {
+    if (!SignedIn()) return SignedOut(__func__);
+    NoteCall(__func__);
+    if (language) std::memcpy(language, "en\0\0\0\0", 6);
+    return kernel::SCE_OK;
+}
+int PS4_SYSV_ABI sceNpGetAccountDateOfBirth(int32_t, const void*, void* date) {
+    if (!SignedIn()) return SignedOut(__func__);
+    NoteCall(__func__);
+    if (date) {
+        const uint8_t dob[4] = {0xc6, 0x07, 1, 1};  // 1990 (0x07c6), January 1
+        std::memcpy(date, dob, sizeof(dob));
+    }
+    return kernel::SCE_OK;
+}
 int PS4_SYSV_ABI sceNpGetParentalControlInfo(int32_t, const void*, int8_t* age, void* info) {
     if (!SignedIn()) return SignedOut(__func__);
-    if (age) *age = 0;                         // no age restriction
+    NoteCall(__func__);
+    // An adult: LBP3 treats a young age as a restriction on user-generated content, which kept
+    // Community crossed out online. (LBPPC's shadPS4 answers 18 for the same reason.)
+    if (age) *age = 18;
     if (info) std::memset(info, 0, 4);         // chat/UGC not restricted
     return kernel::SCE_OK;
 }
@@ -240,7 +278,17 @@ int PS4_SYSV_ABI sceNpCheckNpAvailability(int32_t, const void*) {
 }
 int PS4_SYSV_ABI sceNpCheckPlus(int32_t, const void*, void* result) {
     if (!SignedIn()) return SignedOut(__func__);
-    if (result) std::memset(result, 0, 8);     // authorized = false: no PS Plus needed offline
+    // SceNpCheckPlusResult { bool authorized; pad[7] }. Offline: false (nothing needs PS Plus). Online on a
+    // community server (LBP3_ONLINE or shadNet signed in) the game greys out "Play Online" unless it's
+    // authorized; PS Plus means nothing there, so say yes (LBP3_NP_PLUS=0 keeps the old answer).
+    const char* plusEnv = std::getenv("LBP3_NP_PLUS");
+    const bool plus = (online::Enabled() || ShadNetSignedIn()) && !(plusEnv && plusEnv[0] == '0');
+    if (result) {
+        std::memset(result, 0, 8);
+        static_cast<uint8_t*>(result)[0] = plus ? 1 : 0;
+    }
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) std::fprintf(stderr, "[np] sceNpCheckPlus: authorized=%d\n", plus ? 1 : 0);
     return kernel::SCE_OK;
 }
 int PS4_SYSV_ABI sceNpNotifyPlusFeature(const void*) { return kernel::SCE_OK; }
@@ -311,6 +359,8 @@ namespace {
 
 constexpr int kErrorNotConnected = static_cast<int>(0x80412108);
 constexpr int kErrorInvalidAddr = static_cast<int>(0x80412107);
+constexpr int kErrorInvalidSize = static_cast<int>(0x80412111);
+constexpr const char* kLanAddress = "192.168.1.50";  // what the console's network settings would show
 constexpr int32_t kStateDisconnected = 0;
 
 }  // namespace
@@ -321,7 +371,7 @@ constexpr int32_t kStateDisconnected = 0;
 bool LanUp() {
     static const bool up = [] {
         const char* v = std::getenv("LBP3_NET");
-        return (v && std::strcmp(v, "online") == 0) || online::Enabled();
+        return (v && std::strcmp(v, "online") == 0) || online::Enabled() || net::shadnet::Settings().enabled;
     }();
     return up;
 }
@@ -340,11 +390,32 @@ int PS4_SYSV_ABI sceNetCtlGetInfo(int32_t code, void* info) {
     constexpr int32_t kEtherAddr = 2, kIpAddress = 14, kLinkUp = 4;
     static const uint8_t mac[6] = {0x02, 0x00, 0x00, 0x4c, 0x42, 0x33};
     if (code == kEtherAddr) std::memcpy(info, mac, sizeof(mac));
-    if (code == kIpAddress) std::strcpy(static_cast<char*>(info), "192.168.1.50");
+    if (code == kIpAddress) std::strcpy(static_cast<char*>(info), kLanAddress);
     if (code == kLinkUp) *static_cast<uint32_t*>(info) = 1;
     return kernel::SCE_OK;
 }
-int PS4_SYSV_ABI sceNetCtlGetNatInfo(void*) { return kErrorNotConnected; }
+// SceNetCtlNatInfo { u32 size; s32 stun_status; s32 nat_type; u32 mapped_addr }. Online, the NAT check
+// is reported done (STUN OK, NAT type 2) with the LAN address sceNetCtlGetInfo gives, as LBPPC does when
+// signed in without a server to learn the external address from (its netctl.cpp, GPL-2.0-or-later).
+// Otherwise (offline, or the LBP3_NET=online experiment) there is no NAT information.
+int PS4_SYSV_ABI sceNetCtlGetNatInfo(void* natInfo) {
+    if (!LanUp() || !(online::Enabled() || net::shadnet::Settings().enabled)) return kErrorNotConnected;
+    if (!natInfo) return kErrorInvalidAddr;
+    struct NatInfo {
+        uint32_t size;
+        int32_t stunStatus, natType;
+        uint32_t mappedAddr;
+    };
+    auto* nat = static_cast<NatInfo*>(natInfo);
+    if (nat->size != sizeof(NatInfo)) return kErrorInvalidSize;
+    nat->stunStatus = 2;  // checked, OK
+    nat->natType = 2;
+    const uint8_t ip[4] = {192, 168, 1, 50};  // kLanAddress, network order
+    std::memcpy(&nat->mappedAddr, ip, sizeof(ip));
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) std::fprintf(stderr, "[np] sceNetCtlGetNatInfo: STUN OK, NAT type 2, %s\n", kLanAddress);
+    return kernel::SCE_OK;
+}
 
 int PS4_SYSV_ABI sceNetCtlRegisterCallback(void*, void*, int32_t* id) {
     if (id) *id = 1;
