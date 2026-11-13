@@ -1325,7 +1325,10 @@ void Wizard(App& a) {
         Help("Writes the folder to game_dir.txt in the game folder, which is where the game looks (the previous one is kept as game_dir.txt.bak).");
         Dim("Or type or paste its path:");
         ImGui::BeginDisabled(!can_write);
-        const bool entered = InputString("##dumpdir", a.wizard_dir, "for example D:\\Games\\PS4", 420, ImGuiInputTextFlags_EnterReturnsTrue);
+        // (not EnterReturnsTrue: with it, InputString only stores the text when Enter is pressed)
+        InputString("##dumpdir", a.wizard_dir, "for example D:\\Games\\PS4", 420);
+        const bool entered =
+            ImGui::IsItemDeactivated() && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter));
         ImGui::SameLine();
         const std::string typed = TrimPathText(a.wizard_dir);
         ImGui::BeginDisabled(typed.empty());
