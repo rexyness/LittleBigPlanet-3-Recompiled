@@ -1208,6 +1208,10 @@ void StartLink() {
     }
     if (const char* p = std::getenv("LBP3_P2P_TEST_LATE"); p && *p) c.testLateEvery = std::atoi(p);
     if (const char* p = std::getenv("LBP3_P2P_TEST_DUP"); p && *p) c.testDupEvery = std::atoi(p);
+    if (const char* p = std::getenv("LBP3_P2P_TEST_NO_BYE"); p && *p == '1') {
+        c.testNoBye = true;  // as if every BYE were lost (tests: a rejoin the other side didn't see coming)
+        std::fprintf(stderr, "[p2p] LBP3_P2P_TEST_NO_BYE=1: leaving without a word (a test)\n");
+    }
     if (const char* p = std::getenv("LBP3_P2P_DIAG"); p && *p == '1') {
         c.diag = true;
         std::fprintf(stderr, "[p2p] LBP3_P2P_DIAG=1: sequence numbers and send times on game datagrams "
