@@ -253,7 +253,17 @@ int PS4_SYSV_ABI sceNpCheckNpAvailability(int32_t, const void*) {
 }
 int PS4_SYSV_ABI sceNpCheckPlus(int32_t, const void*, void* result) {
     if (!SignedIn()) return SignedOut(__func__);
-    if (result) std::memset(result, 0, 8);     // authorized = false: no PS Plus needed offline
+    // SceNpCheckPlusResult { bool authorized; pad[7] }. Offline: false (nothing needs PS Plus). Online on a
+    // community server (LBP3_ONLINE or shadNet signed in) the game greys out "Play Online" unless it's
+    // authorized; PS Plus means nothing there, so say yes (LBP3_NP_PLUS=0 keeps the old answer).
+    const char* plusEnv = std::getenv("LBP3_NP_PLUS");
+    const bool plus = (online::Enabled() || ShadNetSignedIn()) && !(plusEnv && plusEnv[0] == '0');
+    if (result) {
+        std::memset(result, 0, 8);
+        static_cast<uint8_t*>(result)[0] = plus ? 1 : 0;
+    }
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) std::fprintf(stderr, "[np] sceNpCheckPlus: authorized=%d\n", plus ? 1 : 0);
     return kernel::SCE_OK;
 }
 int PS4_SYSV_ABI sceNpNotifyPlusFeature(const void*) { return kernel::SCE_OK; }
