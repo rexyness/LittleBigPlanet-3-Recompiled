@@ -108,7 +108,8 @@ std::string ExplainFriendError(int code) {
 
 std::string ExplainShadnetState(int state) {
     // ShadNetState: Ok, FailureInput, FailureResolve, FailureConnect, FailureServerInfo, FailureAuth,
-    // FailureAlreadyIn, FailureUsername, FailurePassword, FailureToken, FailureProtocol, FailureOther.
+    // FailureAlreadyIn, FailureUsername, FailurePassword, FailureToken, FailureProtocol, FailureOther,
+    // FailureTooSoon (12, lbp3).
     switch (state) {
     case 0: return "signed in";
     case 1: return "the name or password is missing";
@@ -121,6 +122,7 @@ std::string ExplainShadnetState(int state) {
     case 8: return "wrong password for shadNet (fix it under Accounts)";
     case 9: return "the sign-in token was refused";
     case 10: return "the shadNet server speaks a version this build doesn't";
+    case 12: return "too many wrong passwords: sign-in is paused for up to 15 minutes";
     default: return "the shadNet sign-in failed";
     }
 }

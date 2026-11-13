@@ -8,7 +8,7 @@
 #include "hle/online.h"
 
 namespace hle::http_online {
-std::vector<uint8_t> TestTicket(const std::string& name);
+std::vector<uint8_t> TestTicket(const std::string& name, const std::string& code = {});
 std::string TestHmac(const std::string& key, const std::string& data);
 int TestDownloadCheck(const std::string& path, std::vector<uint8_t>& body);
 }  // namespace hle::http_online
@@ -56,6 +56,25 @@ int main() {
     CHECK(s.find("Sackboy") != std::string::npos);
     CHECK(s.find("UP9000-BCUS98362_00") != std::string::npos);
     CHECK(s.find("LBPC") != std::string::npos);
+
+    // The serial: the body's first field (type 8, 0x14 bytes, NUL-padded). Without a sign-in code
+    // the old one; with one, "lbppc-code:" + the code (LBPPC 0.1.3), the length unchanged.
+    const auto serialOf = [](const std::vector<uint8_t>& v) {
+        std::string out;
+        if (v.size() < 16 + 0x14 || Be16(v, 12) != 8 || Be16(v, 14) != 0x14) return std::string("<bad field>");
+        for (size_t i = 16; i < 16 + 0x14 && v[i]; ++i) out += char(v[i]);
+        return out;
+    };
+    CHECK(serialOf(t) == "lbp3-local-ticket");
+    const auto tc = hle::http_online::TestTicket("Sackboy", "AB12CD");
+    CHECK(serialOf(tc) == "lbppc-code:AB12CD");
+    CHECK(tc.size() == t.size());                      // same layout, only the serial's bytes differ
+    CHECK(tc[16 + 17] == 0 && tc[16 + 0x13] == 0);     // NUL-padded to 0x14
+    size_t differ = 0;
+    for (size_t i = 0; i < t.size(); ++i) differ += t[i] != tc[i] && (i < 16 || i >= 16 + 0x14) ? 1 : 0;
+    // Outside the serial only the issued/expires times may differ (two calls, a millisecond apart).
+    CHECK(differ <= 16);
+    CHECK(std::string(tc.begin(), tc.end()).find("Sackboy") != std::string::npos);
 
     // Downloads (GET .../r/<sha1>): the bytes must hash to their name and be a shared type.
     const std::string r = "/LITTLEBIGPLANETPS3_XML/r/";

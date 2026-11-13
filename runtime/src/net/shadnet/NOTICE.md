@@ -27,6 +27,15 @@ LBPPC's copy was taken rather than our submodule's own `src/shadnet` because it 
 - **Client version:** this port reports itself as "LBP3-Recompiled (lbp3-port)", not as shadPS4 or
   LBPPC. `LBP3_SHADNET_CLIENT_VERSION` overrides it.
 - **`common/elf_info.h` and `common/scm_rev.h`:** no longer included.
+- **Sign-in codes (command 42, `GetAuthorizationCode`):** `RequestAuthorizationCode` and its reply
+  handler, and the two proto messages, are adapted from LBPPC 0.1.3 (`951fb8d`,
+  `gpu/bbnet/vendor/shadps4/shadnet/client.cpp:788-845` and `shadnet.proto:577-585`, GPL-2.0-or-later;
+  the messages come from shadNet's own server proto). Ours also returns the code's lifetime.
+- **Bundled roots:** Let's Encrypt's ISRG Root X1 and X2 (public certificates, from
+  letsencrypt.org/certificates, fingerprints in the code) are added to the trust store, as LBPPC 0.1.3 does,
+  for PCs whose Windows store hasn't fetched them yet.
+- **`FailureTooSoon`:** a login refused with TooSoon (LBPPC's wrong-password pause) gets its own state, after
+  the existing ones.
 
 The service that drives the client (`../shadnet_service.*`) and the NP glue (`hle/np_shadnet.cpp`,
 `hle/np_offline.cpp`) are this project's own code.

@@ -20,6 +20,7 @@
 #pragma once
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -78,6 +79,13 @@ std::string WebApiBase();
 // The session token the server gave after the login (GetToken), for the Web API's Authorization
 // header; "" until then. Never logged.
 std::string BearerToken();
+
+// A single-use sign-in code for the game server's login (shadNet command 42, client id "lbppc-refresh",
+// scope "login"; LBPPC 0.1.3). play.lbppc.com's game server redeems it with shadNet to know whose login
+// it is; without one it falls back to an address check, which LBPPC will switch off. A fresh code for
+// every login (single use, 300 s). Waits up to 5 s; must not be called from the client's own threads.
+// Empty when off, not signed in, refused or timed out. expiresIn (seconds) is filled in when given.
+std::optional<std::string> LoginCode(uint32_t* expiresIn = nullptr);
 
 // A Web API push event from the server (notification 17): friend, presence, invitation and game
 // custom data changes, for the game's push event callbacks (hle/np_shadnet.cpp).

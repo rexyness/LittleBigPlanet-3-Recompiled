@@ -16,6 +16,8 @@
 // (X-Digest-A: HMAC-SHA1 with "CustomServerDigest" over body + MM_AUTH cookie + path), and the
 // check every GET .../r/<sha1> download passes before it reaches the game (CheckDownload: the
 // bytes must hash to their name and be a type the game itself shares; scripts are refused).
+// The login's sign-in code (LBPPC 0.1.3, 951fb8d http.cpp:466-467 and :2086-2100, GPL-2.0-or-later): a
+// fresh single-use code from the shadNet session, as "lbppc-code:XXXXXX" in the ticket's serial.
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -26,6 +28,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -36,6 +39,7 @@
 #include <winhttp.h>
 
 #include "hle/kernel_errors.h"
+#include "net/shadnet_service.h"
 #include "hle/online.h"
 #include "hle/register.h"
 
@@ -151,7 +155,10 @@ std::string HmacSha1Hex(std::string_view key, std::string_view data) {
 // A PS3 NP ticket (version 2.1: big-endian typed fields in a body section and a footer
 // section) for the locally signed-in player, as LittleBigPlanet 3 (BCUS98362) on PS3. It isn't
 // signed: a custom server accepts it with ticket verification off (a private server).
-std::vector<uint8_t> BuildLocalLoginTicket(const std::string& name) {
+// code: a sign-in code from the shadNet session (LoginCode), put in the serial as LBPPC 0.1.3 does;
+// play.lbppc.com's game server redeems it with shadNet. Empty: the old serial, which the server
+// accepts only while its address check is on (LBPPC will switch that off).
+std::vector<uint8_t> BuildLocalLoginTicket(const std::string& name, const std::string& code = {}) {
     std::vector<uint8_t> out;
     const auto u16be = [&](uint16_t v) {
         out.push_back(uint8_t(v >> 8));
@@ -178,7 +185,8 @@ std::vector<uint8_t> BuildLocalLoginTicket(const std::string& name) {
 
     std::vector<uint8_t> body;
     std::swap(out, body);
-    field(8, "lbp3-local-ticket", 0x14);  // serial
+    const std::string serial = code.empty() ? std::string("lbp3-local-ticket") : "lbppc-code:" + code;
+    field(8, serial, 0x14);  // serial (a 6-character code is 17 of the 20 bytes)
     u16be(1), u16be(4), u32be(0x100);     // issuer: PSN (PS3)
     u16be(7), u16be(8), u64be(now);       // issued
     u16be(7), u16be(8), u64be(now + 4ull * 3600 * 1000);  // expires
@@ -449,8 +457,24 @@ int Send(Request& r, const std::vector<uint8_t>& postIn) {
     const std::string path = PathOf(r.url);
     std::vector<uint8_t> post = postIn;
     if (r.method == "POST" && path.find("/login?") != std::string::npos) {
-        post = BuildLocalLoginTicket(online::Name());
-        std::fprintf(stderr, "[online] login: a %zu-byte ticket for '%s'\n", post.size(), online::Name().c_str());
+        // A fresh code for every login (single use, 300 s): one round trip at the online screen.
+        uint32_t expires = 0;
+        const std::optional<std::string> code = net::shadnet::LoginCode(&expires);
+        post = BuildLocalLoginTicket(online::Name(), code.value_or(std::string()));
+        if (code) {
+            std::fprintf(stderr,
+                         "[online] login: a %zu-byte ticket for '%s' with a shadNet sign-in code (%zu characters, %u s)\n",
+                         post.size(), online::Name().c_str(), code->size(), expires);
+        } else {
+            std::fprintf(stderr, "[online] login: a %zu-byte ticket for '%s' without a shadNet sign-in code (%s)\n",
+                         post.size(), online::Name().c_str(),
+                         net::shadnet::Active() ? "shadNet didn't give one" : "shadNet is off");
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true)) {
+                std::fprintf(stderr, "[online] the game server may refuse a login without a sign-in code: online "
+                                     "needs shadNet signed in (LBP3_SHADNET=1)\n");
+            }
+        }
     }
     HINTERNET ses = Session();
     if (!ses) return kErrorNetwork;
@@ -747,7 +771,9 @@ int PS4_SYSV_ABI sceHttpGetAuthEnabled(int, int* enabled) {
 }
 
 // For the offline test: the ticket and the signing, without a game.
-std::vector<uint8_t> TestTicket(const std::string& name) { return BuildLocalLoginTicket(name); }
+std::vector<uint8_t> TestTicket(const std::string& name, const std::string& code) {
+    return BuildLocalLoginTicket(name, code);
+}
 std::string TestHmac(const std::string& key, const std::string& data) { return HmacSha1Hex(key, data); }
 // The download check on a GET answered 200: the status and body the game would get.
 int TestDownloadCheck(const std::string& path, std::vector<uint8_t>& body) {

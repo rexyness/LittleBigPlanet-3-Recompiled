@@ -14,6 +14,7 @@
 
 #include <cstdlib>
 #include <openssl/err.h>
+#include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 
@@ -86,8 +87,86 @@ ShadNetClient::~ShadNetClient() {
     Stop();
 }
 
+// lbp3: Let's Encrypt's two current self-signed roots, ISRG Root X1 (valid to 2035-06-04) and ISRG Root X2
+// (to 2040-09-17), as published at https://letsencrypt.org/certificates/ (SHA-256 fingerprints
+// 96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6 and
+// 69729B8E15A86EFC177A57AFB7171DFC64ADD28C2FCA8CF1507E34453CCB1470). shadNet's TLS (shadnet.lbppc.com) is
+// signed by them. Windows adds a root to its store only when its own chain engine first needs it, which
+// OpenSSL never triggers, so a PC that never visited a Let's Encrypt site may lack them and every
+// shadNet sign-in would fail (then the game server's login, 403). LBPPC 0.1.3 bundles the same two.
+static const char kBundledRoots[] =
+    "-----BEGIN CERTIFICATE-----\n"
+    "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\n"
+    "-----END CERTIFICATE-----\n"
+    "-----BEGIN CERTIFICATE-----\n"
+    "MIICGzCCAaGgAwIBAgIQQdKd0XLq7qeAwSxs6S+HUjAKBggqhkjOPQQDAzBPMQsw\n"
+    "CQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJuZXQgU2VjdXJpdHkgUmVzZWFyY2gg\n"
+    "R3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBYMjAeFw0yMDA5MDQwMDAwMDBaFw00\n"
+    "MDA5MTcxNjAwMDBaME8xCzAJBgNVBAYTAlVTMSkwJwYDVQQKEyBJbnRlcm5ldCBT\n"
+    "ZWN1cml0eSBSZXNlYXJjaCBHcm91cDEVMBMGA1UEAxMMSVNSRyBSb290IFgyMHYw\n"
+    "EAYHKoZIzj0CAQYFK4EEACIDYgAEzZvVn4CDCuwJSvMWSj5cz3es3mcFDR0HttwW\n"
+    "+1qLFNvicWDEukWVEYmO6gbf9yoWHKS5xcUy4APgHoIYOIvXRdgKam7mAHf7AlF9\n"
+    "ItgKbppbd9/w+kHsOdx1ymgHDB/qo0IwQDAOBgNVHQ8BAf8EBAMCAQYwDwYDVR0T\n"
+    "AQH/BAUwAwEB/zAdBgNVHQ4EFgQUfEKWrt5LSDv6kviejM9ti6lyN5UwCgYIKoZI\n"
+    "zj0EAwMDaAAwZQIwe3lORlCEwkSHRhtFcP9Ymd70/aTSVaYgLXTWNLxBo1BfASdW\n"
+    "tL4ndQavEi51mI38AjEAi/V3bNTIZargCyzuFJ0nN6T5U6VR5CmD1/iQMVtCnwr1\n"
+    "/q4AaOeMSQ+2b1tbFfLn\n"
+    "-----END CERTIFICATE-----\n";
+
+static int AddBundledRoots(X509_STORE* store) {
+    int added = 0;
+    BIO* bio = BIO_new_mem_buf(kBundledRoots, -1);
+    if (!bio)
+        return 0;
+    while (X509* x509 = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr)) {
+        // Already there (from Windows' store) is fine: X509_STORE_add_cert succeeds or reports a duplicate.
+        X509_STORE_add_cert(store, x509);
+        X509_free(x509);
+        ++added;
+    }
+    ERR_clear_error(); // the end of the buffer leaves a "no start line" error behind
+    BIO_free(bio);
+    return added;
+}
+
+// For shadnettest: how many of the bundled roots parse (2).
+int TestBundledRootCount() {
+    X509_STORE* store = X509_STORE_new();
+    const int n = store ? AddBundledRoots(store) : 0;
+    X509_STORE_free(store);
+    return n;
+}
+
 // lbppc: the trusted roots: the system's (the Windows ROOT and CA stores; OpenSSL's own paths elsewhere)
-// and BB_SHADNET_CA, a certificate file a test server is signed with.
+// and BB_SHADNET_CA, a certificate file a test server is signed with. lbp3: and the bundled roots above.
 static bool LoadTrustedRoots(SSL_CTX* ctx) {
     bool loaded = false;
 #ifdef _WIN32
@@ -116,6 +195,8 @@ static bool LoadTrustedRoots(SSL_CTX* ctx) {
 #else
     loaded = SSL_CTX_set_default_verify_paths(ctx) == 1;
 #endif
+    // lbp3: the bundled Let's Encrypt roots (see kBundledRoots).
+    loaded |= AddBundledRoots(SSL_CTX_get_cert_store(ctx)) > 0;
     if (const char* extra = std::getenv("BB_SHADNET_CA"); extra && *extra)
         loaded |= SSL_CTX_load_verify_locations(ctx, extra, nullptr) == 1;
     return loaded;
@@ -752,6 +833,81 @@ u64 ShadNetClient::LookupOnlineId(const std::string& npid) {
     return SubmitRequest(CommandType::LookupOnlineId, MakeProtoPayload(req));
 }
 
+// lbppc (0.1.3, 951fb8d client.cpp:788-845, GPL-2.0-or-later; lbp3: adapted, adds expires_in): see client.h.
+std::optional<std::string> ShadNetClient::RequestAuthorizationCode(const std::string& client_id,
+                                                                   const std::string& scope,
+                                                                   std::chrono::milliseconds timeout,
+                                                                   u32* expires_in, int* error) {
+    if (error) {
+        *error = -1;
+    }
+    if (OnReaderThread() || !IsAuthenticated()) {
+        return std::nullopt;
+    }
+    shadnet::GetAuthorizationCodeRequest req;
+    req.set_client_id(client_id);
+    req.set_scope(scope);
+    // Registered before it is sent: the reply may arrive before this thread waits.
+    const u64 pkt_id = m_pkt_counter.fetch_add(1);
+    {
+        std::lock_guard lock(m_mutex_auth_codes);
+        m_auth_codes[pkt_id] = {};
+    }
+    auto pkt = BuildPacket(CommandType::GetAuthorizationCode, pkt_id, MakeProtoPayload(req));
+    {
+        std::lock_guard lock(m_mutex_send_queue);
+        m_send_queue.push_back(std::move(pkt));
+    }
+    m_cv_send_queue.notify_all();
+
+    std::unique_lock lock(m_mutex_auth_codes);
+    const bool answered =
+        m_cv_auth_codes.wait_for(lock, timeout, [&] { return m_auth_codes[pkt_id].done; });
+    std::string code = answered ? m_auth_codes[pkt_id].code : std::string{};
+    if (answered && expires_in) {
+        *expires_in = m_auth_codes[pkt_id].expires_in;
+    }
+    if (answered && error) {
+        *error = m_auth_codes[pkt_id].error;
+    }
+    m_auth_codes.erase(pkt_id);
+    if (!answered) {
+        LOG_WARNING(ShadNet, "Authorization code: no reply within {} ms", timeout.count());
+    }
+    if (code.empty()) {
+        return std::nullopt;
+    }
+    return code;
+}
+
+void ShadNetClient::HandleAuthorizationCodeReply(u64 pkt_id, const std::vector<u8>& payload) {
+    std::string code;
+    u32 expires = 0;
+    const ErrorType err = payload.empty() ? ErrorType::Malformed : static_cast<ErrorType>(payload[0]);
+    if (err == ErrorType::NoError) {
+        shadnet::GetAuthorizationCodeReply pb;
+        const std::string blob = ExtractBlob(payload, 1);
+        if (!blob.empty() && pb.ParseFromString(blob)) {
+            code = pb.code();
+            expires = pb.expires_in();
+        }
+    } else {
+        LOG_WARNING(ShadNet, "Authorization code refused by the server (error {})", static_cast<int>(err));
+    }
+    {
+        std::lock_guard lock(m_mutex_auth_codes);
+        const auto it = m_auth_codes.find(pkt_id);
+        if (it == m_auth_codes.end()) {
+            return; // the caller stopped waiting
+        }
+        it->second.error = static_cast<int>(err);
+        it->second.code = std::move(code);
+        it->second.expires_in = expires;
+        it->second.done = true;
+    }
+    m_cv_auth_codes.notify_all();
+}
+
 // lbp3: see client.h.
 u64 ShadNetClient::RequestSignalingInfos(const std::string& npid) {
     shadnet::RequestSignalingInfosRequest req;
@@ -858,6 +1014,9 @@ void ShadNetClient::DispatchPacket(PacketType type, u16 cmd_raw, u64 pkt_id,
         case CommandType::GetServerFeatures:
             HandleServerFeaturesReply(payload);
             break;
+        case CommandType::GetAuthorizationCode:
+            HandleAuthorizationCodeReply(pkt_id, payload);
+            break;
         default:
             if (onAsyncReply) {
                 // Every reply body starts with an ErrorType byte.
@@ -957,6 +1116,9 @@ void ShadNetClient::HandleLoginReply(const std::vector<u8>& payload) {
                 break;
             case ErrorType::LoginInvalidToken:
                 m_state = ShadNetState::FailureToken;
+                break;
+            case ErrorType::TooSoon: // lbp3: LBPPC's wrong-password pause
+                m_state = ShadNetState::FailureTooSoon;
                 break;
             default:
                 m_state = ShadNetState::FailureAuth;

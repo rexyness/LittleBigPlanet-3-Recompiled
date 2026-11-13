@@ -74,6 +74,10 @@ std::vector<std::string> PrepareSend(const void* param);
 bool SendCustomData(const std::string& to);
 }  // namespace hle::npsn
 
+namespace ShadNet {
+int TestBundledRootCount();  // net/shadnet/client.cpp: the bundled ISRG roots that parse
+}
+
 namespace {
 
 // The process's threads that have a name (the client names its own: "ShadNet:...").
@@ -173,6 +177,15 @@ struct Mock {
     uint8_t loginError = 0;          // 0 = accept; else the ErrorType byte to refuse with
     std::string token;               // GetToken's answer ("" = refuse it)
     bool pushInvite = false;         // after SetClientVersion: a sessionInvitation push event
+    // GetAuthorizationCode (42, LBPPC 0.1.3): 0 = answer with authCode, else the ErrorType byte to
+    // refuse with; authSilent = never answer (the client's wait must time out).
+    std::string authCode = "Q7W2ZK";
+    std::atomic<uint8_t> authError{0};
+    std::atomic<bool> authSilent{false};
+    std::atomic<int> authRequests{0};
+    // The next N requests are answered Unauthorized (23): the client version not accepted yet.
+    std::atomic<int> authUnauthorized{0};
+    std::string authClientId, authScope;
 
     static void Blob(std::vector<uint8_t>& out, const std::string& s) {
         std::vector<uint8_t> len(4);
@@ -264,6 +277,26 @@ struct Mock {
                         r.set_token(token);
                         r.set_user_id(42);
                         r.set_npid(npid);
+                        std::vector<uint8_t> reply{0};
+                        Blob(reply, r.SerializeAsString());
+                        SendAll(c, Packet(1, cmd, id, reply));
+                    }
+                } else if (cmd == 42 /*GetAuthorizationCode*/) {
+                    shadnet::GetAuthorizationCodeRequest req;
+                    if (body.size() >= 4) req.ParseFromArray(body.data() + 4, int(Get32(body.data())));
+                    authClientId = req.client_id();
+                    authScope = req.scope();
+                    ++authRequests;
+                    if (authSilent) continue;
+                    if (authUnauthorized > 0) {
+                        --authUnauthorized;
+                        SendAll(c, Packet(1, cmd, id, {23 /*Unauthorized*/}));
+                    } else if (authError != 0) {
+                        SendAll(c, Packet(1, cmd, id, {authError.load()}));
+                    } else {
+                        shadnet::GetAuthorizationCodeReply r;
+                        r.set_code(authCode);
+                        r.set_expires_in(300);
                         std::vector<uint8_t> reply{0};
                         Blob(reply, r.SerializeAsString());
                         SendAll(c, Packet(1, cmd, id, reply));
@@ -465,10 +498,62 @@ int NpState() {
 
 }  // namespace
 
+// shadnettest --live-code <account file>: one real check against play.lbppc.com (only with this
+// switch): sign in to shadNet with the account file's name and password, ask for one game-server
+// sign-in code, and print only its length and lifetime (never the code or the password).
+static int LiveCode(const char* accountFile) {
+    std::ifstream in(accountFile);
+    if (!in) {
+        std::printf("live-code: can't read the account file\n");
+        return 2;
+    }
+    std::stringstream text;
+    text << in.rdbuf();
+    const std::map<std::string, std::string> env{{"LBP3_SHADNET", "1"}, {"LBP3_SHADNET_SERVER", "play.lbppc.com"}};
+    Config c = Parse(env, text.str());
+    if (!c.enabled) {
+        std::printf("live-code: the account file isn't complete (%s)\n", c.why.c_str());
+        return 2;
+    }
+    std::printf("live-code: signing in to %s:%u as %s\n", c.host.c_str(), c.port, c.name.c_str());
+    Start(c);
+    const Status s = WaitSettled(30000);
+    std::printf("live-code: shadNet %s\n", StatusName(s));
+    int rc = 1;
+    if (s == Status::SignedIn) {
+        // Right after the sign-in the server may still be checking the client version it was told
+        // (it gives no codes until then): try at once, then a few times over 15 s.
+        const auto signedIn = std::chrono::steady_clock::now();
+        for (int wait : {0, 1, 2, 3, 4, 5}) {
+            std::this_thread::sleep_for(std::chrono::seconds(wait));
+            uint32_t expires = 0;
+            const auto t0 = std::chrono::steady_clock::now();
+            const auto code = LoginCode(&expires);
+            const auto now = std::chrono::steady_clock::now();
+            const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - t0).count();
+            const long long after = std::chrono::duration_cast<std::chrono::milliseconds>(now - signedIn).count();
+            if (code) {
+                std::printf("live-code: got a sign-in code %lld ms after signing in: %zu characters, valid %u s, %lld ms\n",
+                            after, code->size(), expires, ms);
+                rc = code->size() == 6 && expires > 0 ? 0 : 1;
+                break;
+            }
+            std::printf("live-code: no sign-in code %lld ms after signing in (refused or no reply, %lld ms)\n", after, ms);
+        }
+    }
+    Stop();
+    return rc;
+}
+
 int main(int argc, char** argv) {
     const bool slow = argc > 1 && std::strcmp(argv[1], "--slow") == 0;
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
+    if (argc > 2 && std::strcmp(argv[1], "--live-code") == 0) {
+        const int rc = LiveCode(argv[2]);
+        WSACleanup();
+        return rc;
+    }
 
     // --- 1. settings -------------------------------------------------------------------------
     {
@@ -533,6 +618,9 @@ int main(int argc, char** argv) {
         CHECK(!badPort.enabled);
     }
 
+    // The bundled Let's Encrypt roots (ISRG Root X1 and X2) for shadNet's TLS both parse.
+    CHECK(ShadNet::TestBundledRootCount() == 2);
+
     // --- 2. off: no client, no thread, no socket ---------------------------------------------------
     {
         CHECK(!Settings().enabled);  // this process has no LBP3_SHADNET
@@ -544,6 +632,7 @@ int main(int argc, char** argv) {
         CHECK(GetStatus() == Status::Off);
         CHECK(Name().empty());
         CHECK(Friends().empty());
+        CHECK(!LoginCode());    // no sign-in code without a client, and no waiting for one
         CHECK(ThreadCount() == before);
         CHECK(NpState() == 1);  // signed out, as without shadNet
     }
@@ -582,6 +671,54 @@ int main(int argc, char** argv) {
         }
         CHECK(sawToken);
         CHECK(sawVersion);
+
+        // The game server's sign-in code (command 42, LBPPC 0.1.3): one fresh code per call, asked
+        // for as "lbppc-refresh" / "login".
+        uint32_t expires = 0;
+        const auto code = LoginCode(&expires);
+        CHECK(code && *code == "Q7W2ZK");
+        CHECK(expires == 300);
+        CHECK(mock.authClientId == "lbppc-refresh");
+        CHECK(mock.authScope == "login");
+        mock.authCode = "R8X3YL";  // the mock's thread reads it only after the next request arrives
+        const auto code2 = LoginCode();
+        CHECK(code2 && *code2 == "R8X3YL");
+        CHECK(mock.authRequests.load() == 2);
+        // Not allowed yet (Unauthorized: the client version still being checked, as right after a
+        // sign-in on play.lbppc.com): asked again every half second, then the code.
+        mock.authUnauthorized = 2;
+        mock.authCode = "U5V6WX";
+        auto tu = std::chrono::steady_clock::now();
+        const auto codeU = LoginCode();
+        const auto tookU = std::chrono::steady_clock::now() - tu;
+        CHECK(codeU && *codeU == "U5V6WX");
+        CHECK(mock.authRequests.load() == 5);
+        CHECK(tookU >= std::chrono::milliseconds(900) && tookU < std::chrono::seconds(4));
+        // Unauthorized for longer than the 6 s budget: no code, and no endless asking.
+        mock.authUnauthorized = 1000;
+        tu = std::chrono::steady_clock::now();
+        CHECK(!LoginCode());
+        const auto tookLong = std::chrono::steady_clock::now() - tu;
+        CHECK(tookLong >= std::chrono::milliseconds(5000) && tookLong < std::chrono::seconds(8));
+        mock.authUnauthorized = 0;
+        // Refused (TooSoon): no code, at once.
+        mock.authError = 4;
+        auto t0 = std::chrono::steady_clock::now();
+        CHECK(!LoginCode());
+        CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2));
+        // No answer: gives up after its 5 s wait, and the client keeps working afterwards.
+        mock.authError = 0;
+        mock.authSilent = true;
+        t0 = std::chrono::steady_clock::now();
+        CHECK(!LoginCode());
+        const auto waited = std::chrono::steady_clock::now() - t0;
+        CHECK(waited >= std::chrono::milliseconds(4500) && waited < std::chrono::seconds(8));
+        mock.authSilent = false;
+        mock.authCode = "S9Y4ZM";
+        const auto code3 = LoginCode();
+        CHECK(code3 && *code3 == "S9Y4ZM");
+        CHECK(GetStatus() == Status::SignedIn);
+
         Start(Local(mock.port));  // idempotent: already running
         Stop();
         CHECK(!Active());

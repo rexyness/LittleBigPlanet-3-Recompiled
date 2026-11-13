@@ -4,8 +4,10 @@
 
 #pragma once
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <semaphore>
@@ -93,6 +95,7 @@ enum class CommandType : u16 {
     GetToken = 39,
     SetAppearOffline = 40,
     LookupOnlineId = 41,
+    GetAuthorizationCode = 42, // lbppc 0.1.3 (lbp3: see RequestAuthorizationCode)
     // Matchmaking
     ContextStart = 100,
     CreateRoom = 101,
@@ -195,6 +198,9 @@ enum class ShadNetState {
     FailureToken,
     FailureProtocol,
     FailureOther,
+    // lbp3: the login refused with TooSoon: LBPPC's shadNet pauses sign-in for up to 15 minutes after too
+    // many wrong passwords (from an address or for an account). Last, so the values above keep theirs.
+    FailureTooSoon,
 };
 
 // Callback data structures
@@ -405,6 +411,14 @@ public:
     // reply comes to onAsyncReply (cmd RequestSignalingInfos); ParseSignalingInfos reads its body.
     u64 RequestSignalingInfos(const std::string& npid);
     static bool ParseSignalingInfos(const std::vector<u8>& body, std::string& npid, std::string& ip, u16& port);
+    // lbppc (0.1.3, 951fb8d; lbp3: adapted): a single-use authorization code from the signed-in account's session.
+    // The game server (play.lbppc.com's Refresh) redeems it with shadNet to know whose login it is. Waits up to
+    // `timeout` for the reply. Empty: not signed in, refused, timed out, or called on the reader thread (which
+    // delivers the reply, so it can't wait for it). `expires_in` (seconds) is filled in when given; `error`
+    // (lbp3) gets the server's ErrorType (0 with a code), or -1 when nothing was asked or no reply came.
+    std::optional<std::string> RequestAuthorizationCode(const std::string& client_id, const std::string& scope,
+                                                        std::chrono::milliseconds timeout,
+                                                        u32* expires_in = nullptr, int* error = nullptr);
 
 private:
     void ConnectThread();
@@ -485,6 +499,19 @@ private:
     std::vector<FriendEntry> m_friends;
 
     std::atomic<u64> m_pkt_counter{1};
+
+    // lbppc: RequestAuthorizationCode's waiting callers, by packet id (the reply fills the code in, empty on an
+    // error; `done` is set either way).
+    struct AuthCodeWait {
+        bool done = false;
+        std::string code;
+        u32 expires_in = 0;
+        int error = 0; // lbp3: the reply's ErrorType
+    };
+    std::mutex m_mutex_auth_codes;
+    std::condition_variable m_cv_auth_codes;
+    std::map<u64, AuthCodeWait> m_auth_codes;
+    void HandleAuthorizationCodeReply(u64 pkt_id, const std::vector<u8>& payload);
 };
 
 } // namespace ShadNet

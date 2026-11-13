@@ -10,7 +10,8 @@
 - **shadPS4** (shadps4-emu and contributors): the PS4 graphics core and shader recompiler (GPL-2.0-or-later).
 - **LBPPC** by emurphy04 (github.com/emurphy04/LBPPC): the other LittleBigPlanet 3 PC port. Several pieces
   here come from it, with credit in the code: the parallel shader preload and saved driver cache, the
-  online request signing and server answers, the shadNet client adaptations, the pause-menu Quit Game script,
+  online request signing and server answers, the shadNet client adaptations and the game server's sign-in
+  codes (LBPPC 0.1.3), the pause-menu Quit Game script,
   the bloom and language patch addresses, and the community-download check. The LBPPC team also runs the
   play.lbppc.com servers and allowed this port to use them.
 - **Refresh** (LittleBigRefresh) and **shadNet** (shadps4-emu): the community game server and PSN stand-in

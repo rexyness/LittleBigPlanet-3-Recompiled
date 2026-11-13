@@ -295,8 +295,11 @@ int CreateShadnetAccount(const ShadnetEndpoint& at, const std::string& name, con
             const int code = body.empty() ? 1 : static_cast<unsigned char>(body[0]);
             if (code && error) {
                 switch (code) {
-                case 3: *error = "shadNet didn't accept the name, password or e-mail"; break;
-                case 4: *error = "too many attempts; try again in a minute"; break;
+                case 3:
+                    *error = "shadNet didn't accept the name or password: that name isn't allowed, or the "
+                             "password is under 8 characters";
+                    break;
+                case 4: *error = "too many new accounts from your network today; try again tomorrow"; break;
                 case 11: *error = "that online name is taken on shadNet"; break;
                 case 12: *error = "shadNet doesn't allow that e-mail provider"; break;
                 case 13: *error = "that e-mail is in use on shadNet"; break;

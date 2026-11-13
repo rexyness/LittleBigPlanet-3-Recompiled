@@ -66,7 +66,8 @@ struct State {
     std::mutex mutex;
     std::condition_variable cv;
     Config config;
-    std::unique_ptr<ShadNet::ShadNetClient> client;
+    // Shared: LoginCode() waits on the client outside the lock, and Stop() may run meanwhile.
+    std::shared_ptr<ShadNet::ShadNetClient> client;
     std::thread watcher;
     Status status = Status::Off;
     std::vector<Friend> friends;
@@ -119,6 +120,7 @@ const char* StateName(ShadNet::ShadNetState s) {
     case ShadNetState::FailurePassword: return "wrong password";
     case ShadNetState::FailureToken: return "bad token";
     case ShadNetState::FailureProtocol: return "protocol mismatch";
+    case ShadNetState::FailureTooSoon: return "too many wrong passwords: sign-in paused for up to 15 minutes";
     default: return "failed";
     }
 }
@@ -242,7 +244,7 @@ void Start(const Config& config) {
 
     ShadNet::SetTlsWanted(config.tls);
     ShadNet::SetTitle("CUSA00473", "LittleBigPlanet™ 3");
-    auto client = std::make_unique<ShadNet::ShadNetClient>();
+    auto client = std::make_shared<ShadNet::ShadNetClient>();
     client->onLoginResult = [](const ShadNet::LoginResult& r) {
         if (r.error == ShadNet::ErrorType::NoError) {
             {
@@ -350,7 +352,7 @@ void Start(const Config& config) {
 }
 
 void Stop() {
-    std::unique_ptr<ShadNet::ShadNetClient> client;
+    std::shared_ptr<ShadNet::ShadNetClient> client;
     std::thread watcher;
     std::map<uint64_t, std::function<void(bool, const std::string&, uint16_t)>> resolves;
     {
@@ -421,6 +423,46 @@ std::string WebApiBase() {
 std::string BearerToken() {
     std::lock_guard lock(S().mutex);
     return S().client ? S().client->GetBearerToken() : std::string();
+}
+
+std::optional<std::string> LoginCode(uint32_t* expiresIn) {
+    using Clock = std::chrono::steady_clock;
+    // 6 s in all: a reply's round trip is well under a second, and the login is one request at the
+    // online screen. Still signing in: wait for it within that time.
+    const Clock::time_point deadline = Clock::now() + std::chrono::seconds(6);
+    if (GetStatus() == Status::Connecting) WaitSettled(4000);
+    std::shared_ptr<ShadNet::ShadNetClient> client;
+    {
+        std::lock_guard lock(S().mutex);
+        client = S().client;
+    }
+    if (!client) return std::nullopt;
+    // Right after the sign-in the server gives no codes (Unauthorized) until it has accepted the
+    // client version this client reported (about a second on play.lbppc.com with its version
+    // rules on): then ask again every half second until the deadline. Any other refusal is final.
+    constexpr int kUnauthorized = 23;
+    for (int attempt = 1;; ++attempt) {
+        if (!client->IsAuthenticated()) return std::nullopt;
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
+        if (left <= std::chrono::milliseconds(0)) return std::nullopt;
+        // Not under S().mutex: the reply comes on the client's reader thread, whose callbacks take it.
+        int error = -1;
+        auto code = client->RequestAuthorizationCode("lbppc-refresh", "login", left, expiresIn, &error);
+        if (code) {
+            if (attempt > 1) std::fprintf(stderr, "[shadnet] sign-in code: given on attempt %d\n", attempt);
+            return code;
+        }
+        if (error != kUnauthorized) {
+            std::fprintf(stderr, "[shadnet] sign-in code: %s\n",
+                         error < 0 ? "no reply" : ("refused (error " + std::to_string(error) + ")").c_str());
+            return std::nullopt;
+        }
+        if (deadline - Clock::now() < std::chrono::milliseconds(500)) {
+            std::fprintf(stderr, "[shadnet] sign-in code: still not allowed after %d attempts\n", attempt);
+            return std::nullopt;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
 }
 
 std::vector<PushEvent> TakePushEvents() {

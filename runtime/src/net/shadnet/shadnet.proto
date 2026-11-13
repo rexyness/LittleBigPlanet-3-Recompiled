@@ -572,6 +572,18 @@ message LookupOnlineIdReply {
     string npid        = 2; // canonical online ID as registered on the server
 }
 
+// lbppc (0.1.3, from the server's shadnet.proto): a single-use authorization code for a game backend. The game's
+// login to the game server carries one, which the server redeems with shadNet to know whose login it is.
+message GetAuthorizationCodeRequest {
+    string client_id = 1;
+    string scope     = 2;
+}
+
+message GetAuthorizationCodeReply {
+    string code       = 1;
+    uint32 expires_in = 2; // seconds
+}
+
 // Notification payloads
 
 // NotificationType::RoomEvent (10) — every room event maps onto

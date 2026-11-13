@@ -1409,7 +1409,10 @@ void Wizard(App& a) {
         if (a.wizard_online_choice == 1) {
             ImGui::SetNextItemWidth(S(300));
             ImGui::InputTextWithHint("Password", "your account's password", a.wizard_pass, sizeof a.wizard_pass, ImGuiInputTextFlags_Password);
-            ImGui::BeginDisabled(!name_ok || !*a.wizard_pass || a.shot_mode);
+            // LBPPC's shadNet takes passwords of 8 characters or more (0.1.3).
+            const bool pass_ok = ValidAccountPassword(a.wizard_pass);
+            if (*a.wizard_pass && !pass_ok) ImGui::TextColored(kWarn, "8-64 characters, no spaces at either end.");
+            ImGui::BeginDisabled(!name_ok || !pass_ok || a.shot_mode);
             if (BigButton("Save it", ImVec2(S(160), 0), kPlay)) {
                 AccountFile f;
                 f.name = a.wizard_name;

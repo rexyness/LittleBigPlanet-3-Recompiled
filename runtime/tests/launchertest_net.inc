@@ -92,6 +92,12 @@ struct Server {
                 shadnet::LoginRequest any;  // fields 1 (name) and 2 (password) share LoginRequest's numbers
                 any.ParseFromString(msg);
                 std::lock_guard lock(m);
+                // As LBPPC's shadNet (0.1.3): a password under 8 characters is InvalidInput (3); the 4th new
+                // account from one address in a day is TooSoon (4) (here: the name "Fourth_1").
+                if (any.password().size() < 8 || any.npid() == "Fourth_1") {
+                    SendAll(c, Packet(1, cmd, id, std::string(1, char(any.npid() == "Fourth_1" ? 4 : 3))));
+                    return;
+                }
                 const bool taken = std::find(created.begin(), created.end(), any.npid()) != created.end();
                 if (!taken) created.push_back(any.npid());
                 SendAll(c, Packet(1, cmd, id, std::string(1, char(taken ? 11 : 0))));
@@ -100,6 +106,10 @@ struct Server {
             if (cmd == 0 /*Login*/) {
                 shadnet::LoginRequest req;
                 req.ParseFromString(msg);
+                if (req.npid() == "Locked_1") {  // too many wrong passwords: sign-in paused (TooSoon)
+                    SendAll(c, Packet(1, 0, id, std::string(1, char(4 /*TooSoon*/))));
+                    return;
+                }
                 if (req.password() != password) {
                     SendAll(c, Packet(1, 0, id, std::string(1, char(8 /*LoginInvalidPassword*/))));
                     return;
@@ -163,11 +173,21 @@ static void TestNetFake() {
     // Create, then the same name again
     CHECK(CreateShadnetAccount(at, "Fresh_1", "good-pass-1", "fresh_1@lbppc.invalid", &error) == 0);
     CHECK(CreateShadnetAccount(at, "Fresh_1", "good-pass-1", "fresh_1@lbppc.invalid", &error) == 11 && error.find("taken") != std::string::npos);
+    // LBPPC 0.1.3's refusals, in words a player can act on
+    CHECK(CreateShadnetAccount(at, "Short_1", "short", "short_1@lbppc.invalid", &error) == 3 &&
+          error.find("isn't allowed") != std::string::npos && error.find("8 characters") != std::string::npos);
+    CHECK(CreateShadnetAccount(at, "Fourth_1", "good-pass-1", "fourth_1@lbppc.invalid", &error) == 4 &&
+          error.find("tomorrow") != std::string::npos);
     // the sign-in test
     CHECK(TestShadnetSignIn(at, "Tester_1", "good-pass-1").empty());
     const std::string wrong = TestShadnetSignIn(at, "Tester_1", "bad-pass");
     std::printf("  wrong password: %s\n", wrong.c_str());
     CHECK(wrong.find("wrong password") != std::string::npos);
+    const std::string locked = TestShadnetSignIn(at, "Locked_1", "good-pass-1");
+    std::printf("  paused sign-in: %s\n", locked.c_str());
+    CHECK(locked.find("15 minutes") != std::string::npos);
+    // typed passwords: LBPPC's 8-character minimum
+    CHECK(!ValidAccountPassword("seven77") && ValidAccountPassword("eight888"));
     // the Friends session
     {
         FriendsSession s;
