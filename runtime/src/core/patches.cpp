@@ -90,7 +90,7 @@ const Patch kPatches[] = {
 // two functions that build their own colour+depth pair (DrawOffscreenComposite 0x424790 and
 // the SMAA passes 0x426dc0) and four float constants. Every site's original instruction is
 // checked first; if any enabled site differs, none is patched. Groups can be left out with
-// LBP3_RES_SKIP=<group,...> (core, targets, pairs, ui); LBP3_RES_POOL_MB=<MB> also resizes the
+// LBP3_RES_SKIP=<group,...> (core, targets, pairs, ui, bloom); LBP3_RES_POOL_MB=<MB> also resizes the
 // game's Garlic pool (0x6a200000 = 1698 MB; the bigger targets need about 150 MB more).
 // Generated from analysis\eboot.elf and Ghidra listings; the stencil-op calls in the same
 // functions that pass 0x1e00 (GL_KEEP, not a pitch) are deliberately not in the list.
@@ -191,6 +191,18 @@ const ResPatch kRes1440[] = {
     {"ui", 0xe82360, {0x00, 0x00, 0x87, 0x44}, {0x00, 0x00, 0xb4, 0x44}, "float 1080 -> 1440 (FUN_00433880 snap grid y)"},
     {"ui", 0xe9fdc8, {0x00, 0x00, 0xf0, 0x44}, {0x00, 0x00, 0x20, 0x45}, "float 1920 -> 2560 (FUN_006cd050 NDC to pixels x)"},
     {"ui", 0xe9fdcc, {0x00, 0x00, 0x87, 0x44}, {0x00, 0x00, 0xb4, 0x44}, "float 1080 -> 1440 (FUN_006cd050 NDC to pixels y)"},
+    // ---- bloom (6) ----
+    // The bloom chain's three targets in the render-target table (1280x720, 640x360, 320x180 at
+    // 1080p), scaled with the render size (w*2560/1920, h*1440/1080, rounded). The sites are the
+    // ones LBPPC (emurphy04, aad6a91, src/probe.c targets[]) scales; only the addresses are taken
+    // from there, the table entries are ours. They only grow: the game cuts a centred 256x256 square
+    // from one of them (0x4014f0), which must not get smaller than at 1080p.
+    {"bloom", 0x427d1c, {0xbe, 0x00, 0x05, 0x00, 0x00}, {0xbe, 0xab, 0x06, 0x00, 0x00}, "MOV ESI,0x500  (bloom target width 1280 -> 1707)"},
+    {"bloom", 0x427d21, {0xba, 0xd0, 0x02, 0x00, 0x00}, {0xba, 0xc0, 0x03, 0x00, 0x00}, "MOV EDX,0x2d0  (bloom target height 720 -> 960)"},
+    {"bloom", 0x427d3d, {0xbe, 0x80, 0x02, 0x00, 0x00}, {0xbe, 0x55, 0x03, 0x00, 0x00}, "MOV ESI,0x280  (bloom target width 640 -> 853)"},
+    {"bloom", 0x427d42, {0xba, 0x68, 0x01, 0x00, 0x00}, {0xba, 0xe0, 0x01, 0x00, 0x00}, "MOV EDX,0x168  (bloom target height 360 -> 480)"},
+    {"bloom", 0x427d61, {0xbe, 0x40, 0x01, 0x00, 0x00}, {0xbe, 0xab, 0x01, 0x00, 0x00}, "MOV ESI,0x140  (bloom target width 320 -> 427)"},
+    {"bloom", 0x427d66, {0xba, 0xb4, 0x00, 0x00, 0x00}, {0xba, 0xf0, 0x00, 0x00, 0x00}, "MOV EDX,0xb4  (bloom target height 180 -> 240)"},
 };
 
 bool GroupSkipped(const char* group) {
