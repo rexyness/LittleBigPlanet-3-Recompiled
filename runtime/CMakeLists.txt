@@ -149,7 +149,11 @@ target_link_libraries(rescachetest PRIVATE hle)
 add_executable(unlocktest tests/unlocktest.cpp)
 target_link_libraries(unlocktest PRIVATE hle)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest unlocktest)
+# The driver pipeline cache file (fix/pipeline-warmup): which saved caches are handed to the driver.
+add_executable(vkcachetest tests/vkcachetest.cpp)
+target_link_libraries(vkcachetest PRIVATE hle)
+
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest unlocktest vkcachetest)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()

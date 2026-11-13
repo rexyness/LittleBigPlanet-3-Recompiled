@@ -3,6 +3,7 @@
 #include "gpu/renderer.h"
 #include "gpu/frame_split.h"
 #include "gpu/fg_live.h"
+#include "video/presenter.h"
 
 #include <algorithm>
 #include <array>
@@ -27,6 +28,7 @@
 #include "sdl_window.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -122,6 +124,9 @@ bool Init() {
         g_pendingMaps.clear();
     }
     fg::Init();  // LBP3_FG_DUMP (exp/fg-capture)
+    // The driver pipeline cache (fix/pipeline-warmup) is saved every 20 s while pipelines are
+    // made, and once more when the game ends (ExitProcess runs no destructors).
+    video::SetExitHook([] { Vulkan::SaveDriverPipelineCacheNow(); });
     // LBP3's photos and icons: the texture cache writes the capture targets back for the CPU
     // while the game has a capture job queued, the byte its job runner (eboot 0x401a50) tests:
     // "lea r14, [rip + 0xf2bc38]; cmp byte ptr [r14], 0" at 0x401a5a, i.e. eboot+0x132d699.
