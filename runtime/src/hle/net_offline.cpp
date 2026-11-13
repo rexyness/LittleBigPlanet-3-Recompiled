@@ -370,12 +370,22 @@ int PS4_SYSV_ABI sceNetResolverCreate(const char*, int, int) { return g_nextId++
 int PS4_SYSV_ABI sceNetResolverDestroy(int) { return kernel::SCE_OK; }
 int PS4_SYSV_ABI sceNetResolverStartNtoa(int, const char* host, void* addr, int, int, int) {
     std::fprintf(stderr, "[net] resolve %s\n", host ? host : "?");
-    if (online::Enabled()) {  // hle/online.h: every name is the community server
-        const uint32_t ip = online::ServerIPv4();
+    if (online::Enabled()) {  // hle/online.h
+        // As a real resolver: the game's own server name is the community server; other host
+        // names resolve through DNS; anything that isn't a host name (LBP3 also looks up its CDN
+        // *URL*, "https://play.lbppc.com/lbp") fails at once, as DNS would. Answering everything
+        // with the server's address made the game probe that address with packets that can't
+        // leave this machine.
+        const std::string name = host ? host : "";
+        uint32_t ip = 0;
+        if (name.find('/') == std::string::npos && name.find(':') == std::string::npos && !name.empty())
+            ip = name.size() >= 9 && name.compare(name.size() - 9, 9, ".scee.com") == 0 ? online::ServerIPv4()
+                                                                                    : online::ResolveIPv4(name);
         if (ip && addr) {
             std::memcpy(addr, &ip, sizeof(ip));
             return kernel::SCE_OK;
         }
+        return SceFail(kETimedOut);
     }
     UnreachableDelay("sceNetResolverStartNtoa");
     return SceFail(kETimedOut);

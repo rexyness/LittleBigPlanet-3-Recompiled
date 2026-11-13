@@ -240,11 +240,36 @@ int PS4_SYSV_ABI sceNpGetAccountCountry(const void*, char* country) {
     if (country) std::memcpy(country, "us", 3);  // SceNpCountryCode: 2 chars + terminator
     return kernel::SCE_OK;
 }
-int PS4_SYSV_ABI sceNpGetAccountLanguage(int32_t, const void*, void*) { return SignedOut(__func__); }
-int PS4_SYSV_ABI sceNpGetAccountDateOfBirth(int32_t, const void*, void*) { return SignedOut(__func__); }
+// Logged once each when signed in (which account checks the game makes online).
+void NoteCall(const char* fn) {
+    static std::mutex m;
+    static std::set<std::string> seen;
+    std::lock_guard lk(m);
+    if (seen.insert(fn).second) std::fprintf(stderr, "[np] %s (signed in)\n", fn);
+}
+// Signed in, the account answers like an adult's in the US: SceNpLanguageCode "en", and
+// SceNpDate {u16 year; u8 month; u8 day} 1990-01-01.
+int PS4_SYSV_ABI sceNpGetAccountLanguage(int32_t, const void*, void* language) {
+    if (!SignedIn()) return SignedOut(__func__);
+    NoteCall(__func__);
+    if (language) std::memcpy(language, "en\0\0\0\0", 6);
+    return kernel::SCE_OK;
+}
+int PS4_SYSV_ABI sceNpGetAccountDateOfBirth(int32_t, const void*, void* date) {
+    if (!SignedIn()) return SignedOut(__func__);
+    NoteCall(__func__);
+    if (date) {
+        const uint8_t dob[4] = {0xc6, 0x07, 1, 1};  // 1990 (0x07c6), January 1
+        std::memcpy(date, dob, sizeof(dob));
+    }
+    return kernel::SCE_OK;
+}
 int PS4_SYSV_ABI sceNpGetParentalControlInfo(int32_t, const void*, int8_t* age, void* info) {
     if (!SignedIn()) return SignedOut(__func__);
-    if (age) *age = 0;                         // no age restriction
+    NoteCall(__func__);
+    // An adult: LBP3 treats a young age as a restriction on user-generated content, which kept
+    // Community crossed out online. (LBPPC's shadPS4 answers 18 for the same reason.)
+    if (age) *age = 18;
     if (info) std::memset(info, 0, 4);         // chat/UGC not restricted
     return kernel::SCE_OK;
 }

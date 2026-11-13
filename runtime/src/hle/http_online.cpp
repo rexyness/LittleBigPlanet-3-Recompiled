@@ -18,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -55,6 +56,7 @@ struct Request {
     int conn = 0;
     std::string method = "GET";
     std::string url;  // as the game gave it
+    std::string userAgent;  // the template's
     std::vector<Header> headers;
     uint64_t contentLength = 0;
     bool sent = false;
@@ -206,11 +208,23 @@ std::vector<uint8_t> BuildLocalLoginTicket(const std::string& name) {
     return out;
 }
 
-// The reply signed as the server signs its replies, which the game checks.
+// The reply signed as the server signs its replies, which the game checks. The cookie is the
+// MM_AUTH value the request carried: the game sends it itself (from the login reply's
+// authTicket), and a real server sets no cookie of its own, so ours may be empty.
 void AnswerSigned(Request& r, const std::string& path, const std::string& body,
                   std::string_view contentType = "text/xml") {
+    std::string jar;
+    for (const Header& h : r.headers)
+        if (IEquals(h.name, "Cookie")) jar = h.value;
+    if (jar.find("MM_AUTH=") == std::string::npos) {
+        std::lock_guard lk(g_mutex);
+        jar = g_cookie;
+    }
     std::string cookie;
-    if (const auto at = g_cookie.find("MM_AUTH="); at != std::string::npos) cookie = g_cookie.substr(at + 8);
+    if (const auto at = jar.find("MM_AUTH="); at != std::string::npos) {
+        cookie = jar.substr(at + 8);
+        cookie = cookie.substr(0, cookie.find(';'));
+    }
     const std::string hex = HmacSha1Hex("CustomServerDigest", body + cookie + path);
     r.status = 200;
     r.body.assign(body.begin(), body.end());
@@ -244,6 +258,52 @@ void FixUpReply(Request& r, const std::string& pathAndQuery, const std::vector<u
 
 // --- End of the adapted part ---------------------------------------------------------------
 
+// LBP3_ONLINE_LOG=1: every request and reply in full (headers, the first 512 bytes of each
+// body), with session cookies redacted. For finding out what a server and the game disagree on.
+bool VerboseLog() {
+    static const bool on = [] {
+        const char* v = std::getenv("LBP3_ONLINE_LOG");
+        return v && *v && *v != '0';
+    }();
+    return on;
+}
+
+// "MM_AUTH=<value>" -> "MM_AUTH=<redacted:N>", anywhere in the text.
+std::string Redact(std::string s) {
+    size_t at = 0;
+    while ((at = s.find("MM_AUTH=", at)) != std::string::npos) {
+        at += 8;
+        size_t end = at;
+        while (end < s.size() && s[end] != ';' && s[end] != '\r' && s[end] != '\n' && s[end] != '<' &&
+               s[end] != '"' && s[end] != ' ')
+            ++end;
+        const std::string tag = "<redacted:" + std::to_string(end - at) + ">";
+        s.replace(at, end - at, tag);
+        at += tag.size();
+    }
+    return s;
+}
+
+std::string Preview(const uint8_t* data, size_t size) {
+    const size_t n = std::min<size_t>(size, 512);
+    bool text = true;
+    for (size_t i = 0; i < n && text; ++i)
+        text = (data[i] >= 32 && data[i] < 127) || data[i] == '\r' || data[i] == '\n' || data[i] == '\t';
+    std::string out;
+    if (text) {
+        out.assign(reinterpret_cast<const char*>(data), n);
+    } else {
+        char b[4];
+        for (size_t i = 0; i < std::min<size_t>(n, 128); ++i) {
+            std::snprintf(b, sizeof(b), "%02x", data[i]);
+            out += b;
+        }
+        out = "(binary) " + out;
+    }
+    if (size > n) out += "...(" + std::to_string(size) + " bytes)";
+    return Redact(out);
+}
+
 void RememberCookies(const std::string& rawHeaders) {
     size_t at = 0;
     while ((at = rawHeaders.find("\r\n", at)) != std::string::npos) {
@@ -260,6 +320,40 @@ void RememberCookies(const std::string& rawHeaders) {
             g_cookie = v;
         }
     }
+}
+
+// The body reaches the game whole and decoded: drop Content-Encoding / Transfer-Encoding and
+// give the real Content-Length, when the server used either (otherwise the headers are untouched).
+void NormalizeHeaders(Request& r) {
+    std::string out, line;
+    bool changed = false;
+    size_t at = 0;
+    while (at < r.rawHeaders.size()) {
+        size_t end = r.rawHeaders.find("\r\n", at);
+        if (end == std::string::npos) end = r.rawHeaders.size();
+        line = r.rawHeaders.substr(at, end - at);
+        at = end + 2;
+        if (line.empty()) continue;
+        const auto colon = line.find(':');
+        const std::string_view name = colon == std::string::npos ? std::string_view{} : std::string_view(line).substr(0, colon);
+        if (IEquals(name, "Content-Encoding") || IEquals(name, "Transfer-Encoding")) {
+            changed = true;
+            continue;
+        }
+        out += line + "\r\n";
+    }
+    if (!changed) return;
+    std::string kept;
+    at = 0;
+    while (at < out.size()) {  // drop the old Content-Length too, then add the real one
+        size_t end = out.find("\r\n", at);
+        line = out.substr(at, end - at);
+        at = end + 2;
+        const auto colon = line.find(':');
+        if (colon != std::string::npos && IEquals(std::string_view(line).substr(0, colon), "Content-Length")) continue;
+        kept += line + "\r\n";
+    }
+    r.rawHeaders = kept + "Content-Length: " + std::to_string(r.body.size()) + "\r\n\r\n";
 }
 
 int Send(Request& r, const std::vector<uint8_t>& postIn) {
@@ -287,16 +381,28 @@ int Send(Request& r, const std::vector<uint8_t>& postIn) {
     DWORD noCookies = WINHTTP_DISABLE_COOKIES;
     WinHttpSetOption(req, WINHTTP_OPTION_DISABLE_FEATURE, &noCookies, sizeof(noCookies));
     std::string headers;
-    bool haveCookie = false;
+    bool haveCookie = false, haveAgent = false;
     for (const Header& h : r.headers) {
         if (IEquals(h.name, "Host") || IEquals(h.name, "Content-Length")) continue;
+        // The game accepts gzip/deflate, which libSceHttp inflates for it before it reads the
+        // body. Bodies are asked for uncompressed instead: a compressed /searches reply passed
+        // through raw (or empty, through WinHTTP's decompression) kept the game from going online.
+        if (IEquals(h.name, "Accept-Encoding")) continue;
         if (IEquals(h.name, "Cookie")) haveCookie = true;
+        if (IEquals(h.name, "User-Agent")) haveAgent = true;
         headers += h.name + ": " + h.value + "\r\n";
     }
+    // Like libSceHttp: the template's user agent unless the request names its own (servers
+    // tell the game and its platform from it).
+    if (!haveAgent && !r.userAgent.empty()) headers += "User-Agent: " + r.userAgent + "\r\n";
     {
         std::lock_guard lk(g_mutex);
         if (!haveCookie && !g_cookie.empty()) headers += "Cookie: " + g_cookie + "\r\n";
     }
+    if (VerboseLog())
+        std::fprintf(stderr, "[online-log] > %s %s://%s:%u%s\n%s> body: %s\n", r.method.c_str(), srv.scheme.c_str(),
+                     srv.host.c_str(), srv.port, path.c_str(), Redact(headers).c_str(),
+                     Preview(post.data(), post.size()).c_str());
     const std::wstring wh = Wide(headers);
     const BOOL sent = WinHttpSendRequest(req, wh.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : wh.c_str(),
                                          wh.empty() ? 0 : static_cast<DWORD>(-1L),
@@ -343,6 +449,10 @@ int Send(Request& r, const std::vector<uint8_t>& postIn) {
     WinHttpCloseHandle(con);
     r.readPos = 0;
     RememberCookies(r.rawHeaders);
+    NormalizeHeaders(r);
+    if (VerboseLog())
+        std::fprintf(stderr, "[online-log] < %d for %s\n%s< body: %s\n", r.status, path.c_str(),
+                     Redact(r.rawHeaders).c_str(), Preview(r.body.data(), r.body.size()).c_str());
     FixUpReply(r, path, post);
     static std::atomic<int> logged{0};
     if (logged++ < 400)
@@ -402,6 +512,8 @@ static int NewRequest(int conn, int method, const std::string& url, uint64_t con
     r->contentLength = contentLength;
     const int id = NewId();
     std::lock_guard lk(g_mutex);
+    if (auto c = g_connections.find(conn); c != g_connections.end())
+        if (auto t = g_templates.find(c->second.tmpl); t != g_templates.end()) r->userAgent = t->second;
     g_requests[id] = std::move(r);
     return id;
 }

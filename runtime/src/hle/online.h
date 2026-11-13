@@ -28,8 +28,10 @@ bool Enabled();
 const Server& GetServer();
 // The player's online name when online (empty when off).
 const std::string& Name();
-// The server's IPv4 address in network byte order (0 if it can't be resolved); every name the
-// game resolves while online gets it, since its HTTP requests are redirected there anyway.
+// The server's IPv4 address in network byte order (0 if it can't be resolved); the game's own
+// server name (*.scee.com) resolves to it, since its HTTP requests are redirected there anyway.
 uint32_t ServerIPv4();
+// A host name's IPv4 address through DNS, network byte order; 0 if it doesn't resolve.
+uint32_t ResolveIPv4(const std::string& host);
 
 }  // namespace hle::online

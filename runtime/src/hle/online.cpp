@@ -80,20 +80,25 @@ const Config& Get() {
 
 }  // namespace
 
-uint32_t ServerIPv4() {
-    static const uint32_t ip = [] {
-        uint32_t out = 0;
-        WSADATA wsa;
-        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return out;
-        addrinfo hints{};
-        hints.ai_family = AF_INET;
-        addrinfo* res = nullptr;
-        if (getaddrinfo(Get().server.host.c_str(), nullptr, &hints, &res) == 0 && res) {
-            out = reinterpret_cast<sockaddr_in*>(res->ai_addr)->sin_addr.s_addr;
-            freeaddrinfo(res);
-        }
-        return out;
+uint32_t ResolveIPv4(const std::string& host) {
+    static const bool wsa = [] {
+        WSADATA data;
+        return WSAStartup(MAKEWORD(2, 2), &data) == 0;
     }();
+    if (!wsa) return 0;
+    uint32_t out = 0;
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    addrinfo* res = nullptr;
+    if (getaddrinfo(host.c_str(), nullptr, &hints, &res) == 0 && res) {
+        out = reinterpret_cast<sockaddr_in*>(res->ai_addr)->sin_addr.s_addr;
+        freeaddrinfo(res);
+    }
+    return out;
+}
+
+uint32_t ServerIPv4() {
+    static const uint32_t ip = ResolveIPv4(Get().server.host);
     return ip;
 }
 
