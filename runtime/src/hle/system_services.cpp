@@ -15,9 +15,11 @@
 
 #include "hle/kernel_errors.h"
 #include "hle/language.h"
+#include "hle/online.h"
 #include "hle/register.h"
 #include "hle/users.h"
 #include "input/gamepad.h"
+#include "net/shadnet_service.h"
 
 namespace hle::user {
 
@@ -112,6 +114,12 @@ int PS4_SYSV_ABI sceUserServiceGetUserName(int32_t userId, char* name, size_t si
     std::string s;
     if (userId >= 2 && userId <= kMaxLoginUsers) {  // co-op guests
         s = "Player " + std::to_string(userId);
+    } else if (online::Enabled()) {
+        // A PSN-linked PS4 user's name is their online ID, so online player 1 is the account's
+        // name (the same one sceNpGetOnlineId gives), not the Windows user name.
+        s = online::Name();
+    } else if (::net::shadnet::Settings().enabled) {
+        s = ::net::shadnet::Settings().name;
     } else {
         // The Windows account name makes a friendly default for player 1.
         wchar_t wide[257] = {};
