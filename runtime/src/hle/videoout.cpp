@@ -118,6 +118,103 @@ bool WaitFlipSlotInner() {
 double g_paceWaitMs = 0, g_paceWorkMs = 0;
 int g_paceTimerFlips = 0;
 
+// ---- LBP3_LOW_LATENCY: a Reflex-style frame-start delay (the idea of LBPPC's low-latency
+// limiter, emurphy04 aad6a91, reimplemented; none of its code). The game's main thread starts a
+// frame when it gets the flip event, finishes it well before the next slot and then waits there
+// (the [video] "slot wait"). Holding the main thread back by part of that slack makes it read the
+// pad later, so a press reaches the screen sooner. The delay counts from the flip's slot and
+// stays inside the frame clock's dead zone (kernel_time.cpp, 8 ms): the game's clock reads at
+// frame start still return the slot's time, so the simulation's steps don't change.
+//   LBP3_LOW_LATENCY=1: on. =0: measure only (the [lowlat] line), no delay. Unset: nothing.
+// Delay = the 10th percentile over 60 frames of (slot wait + the delay that frame had) minus a
+// 2 ms margin, at most 6 ms, moving at most 0.25 ms a frame; a frame that nearly misses its
+// slot (under 0.5 ms of wait) halves it.
+int LowLatencyMode() {
+    static const int mode = [] {
+        const char* v = std::getenv("LBP3_LOW_LATENCY");
+        return v && v[0] == '1' ? 1 : v && v[0] == '0' ? 0 : -1;
+    }();
+    return mode;
+}
+std::atomic<int64_t> g_llDelayNs{0};    // delay for the main thread after the next flip
+std::atomic<int64_t> g_llAppliedNs{0};  // what it actually took after the last one
+std::atomic<int64_t> g_llStartNs{0};    // when it started its frame (steady clock)
+std::atomic<int> g_llHookSeen{0};
+
+void LowLatencyAfterSlot(double waitMs, int64_t slotNs) {
+    if (LowLatencyMode() < 0) return;
+    static double ring[60];
+    static int n = 0, nearMiss = 0, frames = 0, startCount = 0;
+    static double sumDelay = 0, sumStartToSlot = 0;
+    const int64_t applied = g_llAppliedNs.exchange(0);
+    const int64_t started = g_llStartNs.exchange(0);
+    if (started && slotNs > started && slotNs - started < 200'000'000) {
+        sumStartToSlot += (slotNs - started) / 1e6;
+        ++startCount;
+    }
+    ring[n++ % 60] = waitMs + applied / 1e6;
+    double cur = g_llDelayNs.load() / 1e6;
+    if (LowLatencyMode() == 1) {
+        const int cnt = std::min(n, 60);
+        double target = 0;
+        if (cnt >= 30) {
+            double tmp[60];
+            std::copy(ring, ring + cnt, tmp);
+            std::nth_element(tmp, tmp + cnt / 10, tmp + cnt);
+            target = std::clamp(tmp[cnt / 10] - 2.0, 0.0, 6.0);
+        }
+        if (waitMs < 0.5) {
+            cur *= 0.5;
+            ++nearMiss;
+        } else {
+            cur += std::clamp(target - cur, -0.25, 0.25);
+        }
+        g_llDelayNs.store(static_cast<int64_t>(cur * 1e6));
+    }
+    sumDelay += applied / 1e6;
+    if (++frames == 30) {
+        std::fprintf(stderr,
+                     "[lowlat] %s: delay %.2f ms avg (next %.2f), frame start to slot %.1f ms avg over %d, "
+                     "near misses %d%s\n",
+                     LowLatencyMode() == 1 ? "on" : "measure", sumDelay / frames, cur,
+                     startCount ? sumStartToSlot / startCount : 0.0, startCount, nearMiss,
+                     g_llHookSeen.load() ? "" : " (no flip-event wait on the main thread seen)");
+        frames = 0, nearMiss = 0, startCount = 0, sumDelay = 0, sumStartToSlot = 0;
+    }
+}
+
+}  // namespace hle::videoout
+namespace hle::kernel {
+int64_t LastFlipNs();
+int64_t FrameClockDeadZoneNs();
+}  // namespace hle::kernel
+namespace hle::videoout {
+
+// Called by sceKernelWaitEqueue on the main thread when it takes a flip event (kernel_sync.cpp).
+void LowLatencyFrameStart() {
+    if (LowLatencyMode() < 0) return;
+    if (!g_llHookSeen.exchange(1))
+        std::fprintf(stderr, "[lowlat] the main thread waits on the flip event: frame-start hook active\n");
+    int64_t applied = 0;
+    if (LowLatencyMode() == 1) {
+        const int64_t slot = kernel::LastFlipNs();
+        const int64_t cap = kernel::FrameClockDeadZoneNs() - 2'000'000;  // stay well inside the dead zone
+        const int64_t delay = std::min(g_llDelayNs.load(), cap);
+        if (slot && delay > 0) {
+            const auto target = Clock::time_point(std::chrono::nanoseconds(slot + delay));
+            const auto before = Clock::now();
+            if (target > before) {
+                if (target - before > std::chrono::milliseconds(1))
+                    std::this_thread::sleep_until(target - std::chrono::milliseconds(1));
+                while (Clock::now() < target) std::this_thread::yield();
+                applied = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - before).count();
+            }
+        }
+    }
+    g_llAppliedNs.store(applied);
+    g_llStartNs.store(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count());
+}
+
 void WaitFlipSlot() {
     static Clock::time_point lastEnd = Clock::now();
     const auto start = Clock::now();
@@ -131,6 +228,7 @@ void WaitFlipSlot() {
     g_paceWaitMs += waitMs;
     g_paceWorkMs += workMs;
     g_paceTimerFlips += !vsynced;
+    LowLatencyAfterSlot(waitMs, kernel::LastFlipNs());
     // LBP3_PACE_LOG=1: one line per flip in analysis\pace.csv.
     static FILE* csv = [] {
         FILE* f = std::getenv("LBP3_PACE_LOG") ? std::fopen("analysis\\pace.csv", "w") : nullptr;

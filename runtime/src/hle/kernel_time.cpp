@@ -174,6 +174,11 @@ void NoteTimeCall(const char* fn, void* caller, void* frame) {
 
 void NoteFlip(int64_t steadyNs) { g_lastFlipNs.store(steadyNs, std::memory_order_relaxed); }
 void NoteMainThread() { g_mainThread.store(GetCurrentThreadId(), std::memory_order_relaxed); }
+// For the low-latency limiter (videoout.cpp, LBP3_LOW_LATENCY): the last flip's slot (steady
+// clock, ns), whether the caller is the game's main thread, and the frame clock's dead zone.
+int64_t LastFlipNs() { return g_lastFlipNs.load(std::memory_order_relaxed); }
+bool IsMainThread() { return GetCurrentThreadId() == g_mainThread.load(std::memory_order_relaxed); }
+int64_t FrameClockDeadZoneNs() { return kDeadZoneNs; }
 
 int PS4_SYSV_ABI sceKernelClockGettime(int clock, Timespec* tp) {
     NOTE_TIME_CALL();
