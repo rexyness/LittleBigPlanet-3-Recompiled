@@ -1192,7 +1192,14 @@ void StartLink() {
     };
     auto link = std::make_unique<net::p2p::Link>();
     link->SetDataSink([](const net::p2p::Endpoint& from, uint16_t srcVport, uint16_t dstVport, const uint8_t* data,
-                         size_t len) { p2pnet::DeliverRemote(from.ip, from.port, srcVport, dstVport, data, len); });
+                         size_t len) {
+        if (!p2pnet::DeliverRemote(from.ip, from.port, srcVport, dstVport, data, len)) {
+            static std::atomic<int> logged{0};
+            if (logged++ < 10)
+                std::fprintf(stderr, "[p2p] a game datagram for vport %u: no socket of the game is bound to it\n",
+                             dstVport);
+        }
+    });
     if (!link->Start(c)) {
         std::fprintf(stderr, "[p2p] no UDP socket: online co-op is off\n");
         return;
@@ -1419,6 +1426,68 @@ int PS4_SYSV_ABI sceNpSignalingGetConnectionInfo(int32_t ctxId, int32_t connId, 
     default:
         return kSigInvalidArgument;
     }
+}
+
+// --- This player's network identity, with shadNet on (libSceNetCtl, hle/np_offline.cpp) ------------
+// Offline every console answers the same MAC and LAN address. Online, two players reporting one MAC
+// and one address are one machine to the game, so each player gets their own: a locally administered
+// MAC made from the online ID, this PC's real LAN address (the route to the internet; nothing is
+// sent), and as the NAT's mapped address the public one shadNet's STUN reply gave.
+
+namespace {
+
+uint64_t NameHash(const std::string& s) {
+    uint64_t h = 1469598103934665603ull;
+    for (const char c : s) h = (h ^ static_cast<uint8_t>(c)) * 1099511628211ull;
+    return h;
+}
+
+}  // namespace
+
+bool PlayerMac(uint8_t mac[6]) {
+    if (!net::shadnet::Settings().enabled) return false;
+    const uint64_t h = NameHash(net::shadnet::Settings().name);
+    mac[0] = 0x02;  // locally administered, unicast
+    for (int i = 1; i < 6; ++i) mac[i] = static_cast<uint8_t>(h >> (8 * i));
+    return true;
+}
+
+bool PlayerLanIp(uint32_t* ipNet) {
+    if (!net::shadnet::Settings().enabled) return false;
+    static const uint32_t ip = [] {
+        uint32_t found = 0;
+        SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (s != INVALID_SOCKET) {
+            sockaddr_in to{};
+            to.sin_family = AF_INET;
+            to.sin_port = htons(53);
+            inet_pton(AF_INET, "8.8.8.8", &to.sin_addr);  // only picks the route: a UDP connect sends nothing
+            if (connect(s, reinterpret_cast<sockaddr*>(&to), sizeof(to)) == 0) {
+                sockaddr_in me{};
+                int len = sizeof(me);
+                if (getsockname(s, reinterpret_cast<sockaddr*>(&me), &len) == 0) found = me.sin_addr.s_addr;
+            }
+            closesocket(s);
+        }
+        if (!found) {  // no route: a private address of the player's own
+            const uint64_t h = NameHash(net::shadnet::Settings().name);
+            const uint8_t b[4] = {10, static_cast<uint8_t>(h), static_cast<uint8_t>(h >> 8),
+                                  static_cast<uint8_t>(2 + (h >> 16) % 250)};
+            std::memcpy(&found, b, 4);
+        }
+        return found;
+    }();
+    *ipNet = ip;
+    return true;
+}
+
+bool PlayerMappedAddr(uint32_t* ipNet) {
+    if (!net::shadnet::Settings().enabled) return false;
+    if (net::p2p::Link* link = g_link.get(); link && link->External().Valid()) {
+        *ipNet = link->External().ip;
+        return true;
+    }
+    return PlayerLanIp(ipNet);
 }
 
 // Everything that reaches the game from its sceNpCheckCallback calls.

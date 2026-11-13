@@ -96,6 +96,9 @@ std::atomic<void (*)()> g_checkCallbackHook{nullptr};
 
 void SetCheckCallbackHook(void (*hook)()) { g_checkCallbackHook.store(hook); }
 
+// The signed-in player's NpId for the state callback (defined with sceNpGetNpId below).
+bool StateNpId(int32_t userId, uint8_t* out36);
+
 int PS4_SYSV_ABI sceNpCheckCallback() {
     if (void (*hook)() = g_checkCallbackHook.load(std::memory_order_relaxed)) hook();
     for (;;) {
@@ -118,8 +121,16 @@ int PS4_SYSV_ABI sceNpCheckCallback() {
         }
         int32_t state = kSignedOut;
         sceNpGetState(user, &state);
-        std::fprintf(stderr, "[np] reporting sign-in state %d of user %d to the game\n", state, user);
-        cb(user, state, nullptr, userdata);
+        // Signed in, the callback gets the player's NpId, as on a console (and as LBPPC's shadPS4 passes
+        // it): LBP3 takes the player's online ID from it, and without it its parental-controls check
+        // fails, so joining a friend or an invitation stops at "Content created by other players is
+        // restricted". The buffer outlives the call (the game may keep the pointer).
+        static uint8_t npIds[5][36];
+        uint8_t* npId = user >= 0 && user < 5 ? npIds[user] : nullptr;
+        const bool withId = state == kSignedIn && npId && StateNpId(user, npId);
+        std::fprintf(stderr, "[np] reporting sign-in state %d of user %d to the game%s\n", state, user,
+                     withId ? " (with its NpId)" : "");
+        cb(user, state, withId ? npId : nullptr, userdata);
     }
 }
 
@@ -224,9 +235,21 @@ int PS4_SYSV_ABI sceNpGetNpId(int32_t userId, NpId* out) {
     return FillUserOnlineId(userId, out->handle, "sceNpGetNpId (co-op guest)");
 }
 
+bool StateNpId(int32_t userId, uint8_t* out36) {
+    static_assert(sizeof(NpId) == 36);
+    return sceNpGetNpId(userId, reinterpret_cast<NpId*>(out36)) == kernel::SCE_OK;
+}
+
+// Signed in to shadNet: the account id the server knows the player by (different for every player,
+// as on PSN). Two players with the same id are one player to LBP3: the host dropped a joining
+// friend a few seconds after connecting. Offline: a fixed id.
 int PS4_SYSV_ABI sceNpGetAccountId(const void*, uint64_t* id) {
     if (!id) return kErrorInvalidArgument;
-    *id = kAccountId;
+    const uint64_t shadnet = net::shadnet::AccountId();
+    *id = shadnet ? shadnet : kAccountId;
+    static std::atomic<bool> logged{false};
+    if (shadnet && !logged.exchange(true))
+        std::fprintf(stderr, "[np] sceNpGetAccountId: %llu (the server's)\n", static_cast<unsigned long long>(shadnet));
     return kernel::SCE_OK;
 }
 
@@ -359,6 +382,13 @@ int PS4_SYSV_ABI sceNpCmpOnlineId(const char* a, const char* b) {
 
 }  // namespace hle::np
 
+namespace hle::npsn {
+// With shadNet on, this player's own network identity (np_shadnet.cpp); false when it's off.
+bool PlayerMac(uint8_t mac[6]);
+bool PlayerLanIp(uint32_t* ipNet);
+bool PlayerMappedAddr(uint32_t* ipNet);
+}  // namespace hle::npsn
+
 namespace hle::netctl {
 namespace {
 
@@ -393,9 +423,19 @@ int PS4_SYSV_ABI sceNetCtlGetInfo(int32_t code, void* info) {
     if (!info) return kErrorInvalidAddr;
     std::memset(info, 0, 256);  // SceNetCtlInfo is a union of at most 256 bytes
     constexpr int32_t kEtherAddr = 2, kIpAddress = 14, kLinkUp = 4;
-    static const uint8_t mac[6] = {0x02, 0x00, 0x00, 0x4c, 0x42, 0x33};
+    // Offline every console is the same one; with shadNet each player has their own (np_shadnet.cpp).
+    uint8_t mac[6] = {0x02, 0x00, 0x00, 0x4c, 0x42, 0x33};
+    npsn::PlayerMac(mac);
     if (code == kEtherAddr) std::memcpy(info, mac, sizeof(mac));
-    if (code == kIpAddress) std::strcpy(static_cast<char*>(info), kLanAddress);
+    if (code == kIpAddress) {
+        uint32_t ip = 0;
+        if (npsn::PlayerLanIp(&ip)) {
+            const auto* b = reinterpret_cast<const uint8_t*>(&ip);
+            std::snprintf(static_cast<char*>(info), 16, "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+        } else {
+            std::strcpy(static_cast<char*>(info), kLanAddress);
+        }
+    }
     if (code == kLinkUp) *static_cast<uint32_t*>(info) = 1;
     return kernel::SCE_OK;
 }
@@ -415,10 +455,14 @@ int PS4_SYSV_ABI sceNetCtlGetNatInfo(void* natInfo) {
     if (nat->size != sizeof(NatInfo)) return kErrorInvalidSize;
     nat->stunStatus = 2;  // checked, OK
     nat->natType = 2;
-    const uint8_t ip[4] = {192, 168, 1, 50};  // kLanAddress, network order
-    std::memcpy(&nat->mappedAddr, ip, sizeof(ip));
+    const uint8_t lan[4] = {192, 168, 1, 50};  // kLanAddress, network order
+    std::memcpy(&nat->mappedAddr, lan, sizeof(lan));
+    // With shadNet: the address its STUN reply gave (else this PC's LAN address).
+    const bool own = npsn::PlayerMappedAddr(&nat->mappedAddr);
     static std::atomic<bool> logged{false};
-    if (!logged.exchange(true)) std::fprintf(stderr, "[np] sceNetCtlGetNatInfo: STUN OK, NAT type 2, %s\n", kLanAddress);
+    if (!logged.exchange(true))
+        std::fprintf(stderr, "[np] sceNetCtlGetNatInfo: STUN OK, NAT type 2, %s\n",
+                     own ? "the player's own mapped address" : kLanAddress);
     return kernel::SCE_OK;
 }
 

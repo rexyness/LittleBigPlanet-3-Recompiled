@@ -62,6 +62,9 @@ bool Active();  // a client exists (only when enabled)
 Status GetStatus();
 // The online name the client signs in with ("" when off).
 std::string Name();
+// The account id the server gave at sign-in (its user id; 0 until signed in). Each player's is
+// different, as on PSN; the game compares them between players.
+uint64_t AccountId();
 std::vector<Friend> Friends();
 // Waits (up to ms) until the login has an answer; returns the status then.
 Status WaitSettled(int ms);
