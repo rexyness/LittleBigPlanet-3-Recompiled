@@ -359,6 +359,8 @@ namespace {
 
 constexpr int kErrorNotConnected = static_cast<int>(0x80412108);
 constexpr int kErrorInvalidAddr = static_cast<int>(0x80412107);
+constexpr int kErrorInvalidSize = static_cast<int>(0x80412111);
+constexpr const char* kLanAddress = "192.168.1.50";  // what the console's network settings would show
 constexpr int32_t kStateDisconnected = 0;
 
 }  // namespace
@@ -388,11 +390,32 @@ int PS4_SYSV_ABI sceNetCtlGetInfo(int32_t code, void* info) {
     constexpr int32_t kEtherAddr = 2, kIpAddress = 14, kLinkUp = 4;
     static const uint8_t mac[6] = {0x02, 0x00, 0x00, 0x4c, 0x42, 0x33};
     if (code == kEtherAddr) std::memcpy(info, mac, sizeof(mac));
-    if (code == kIpAddress) std::strcpy(static_cast<char*>(info), "192.168.1.50");
+    if (code == kIpAddress) std::strcpy(static_cast<char*>(info), kLanAddress);
     if (code == kLinkUp) *static_cast<uint32_t*>(info) = 1;
     return kernel::SCE_OK;
 }
-int PS4_SYSV_ABI sceNetCtlGetNatInfo(void*) { return kErrorNotConnected; }
+// SceNetCtlNatInfo { u32 size; s32 stun_status; s32 nat_type; u32 mapped_addr }. Online, the NAT check
+// is reported done (STUN OK, NAT type 2) with the LAN address sceNetCtlGetInfo gives, as LBPPC does when
+// signed in without a server to learn the external address from (its netctl.cpp, GPL-2.0-or-later).
+// Otherwise (offline, or the LBP3_NET=online experiment) there is no NAT information.
+int PS4_SYSV_ABI sceNetCtlGetNatInfo(void* natInfo) {
+    if (!LanUp() || !(online::Enabled() || net::shadnet::Settings().enabled)) return kErrorNotConnected;
+    if (!natInfo) return kErrorInvalidAddr;
+    struct NatInfo {
+        uint32_t size;
+        int32_t stunStatus, natType;
+        uint32_t mappedAddr;
+    };
+    auto* nat = static_cast<NatInfo*>(natInfo);
+    if (nat->size != sizeof(NatInfo)) return kErrorInvalidSize;
+    nat->stunStatus = 2;  // checked, OK
+    nat->natType = 2;
+    const uint8_t ip[4] = {192, 168, 1, 50};  // kLanAddress, network order
+    std::memcpy(&nat->mappedAddr, ip, sizeof(ip));
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) std::fprintf(stderr, "[np] sceNetCtlGetNatInfo: STUN OK, NAT type 2, %s\n", kLanAddress);
+    return kernel::SCE_OK;
+}
 
 int PS4_SYSV_ABI sceNetCtlRegisterCallback(void*, void*, int32_t* id) {
     if (id) *id = 1;

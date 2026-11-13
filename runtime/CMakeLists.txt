@@ -98,7 +98,7 @@ target_include_directories(hle PUBLIC src)
 target_include_directories(hle PRIVATE ${SHADPS4_EXT}/stb)  # hle/jpeg.cpp
 target_link_libraries(hle PUBLIC shader_recompiler video_core shadnet_client)
 target_compile_definitions(hle PUBLIC _WIN32_WINNT=0x0A00 NOMINMAX _CRT_SECURE_NO_WARNINGS)
-target_link_libraries(hle PUBLIC imgui SDL3::SDL3 bcrypt winmm dbghelp onecore advapi32 dxgi comctl32 winhttp ws2_32)
+target_link_libraries(hle PUBLIC imgui SDL3::SDL3 bcrypt winmm dbghelp onecore advapi32 dxgi comctl32 winhttp ws2_32 iphlpapi)
 
 add_executable(lbp3 src/main.cpp)
 target_link_libraries(lbp3 PRIVATE hle)

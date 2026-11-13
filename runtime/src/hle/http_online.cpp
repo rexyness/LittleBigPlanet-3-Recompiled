@@ -13,9 +13,12 @@
 // PS3-style NP ticket the login carries) and the answers for what Refresh doesn't serve the PS4
 // game (/farc_hashes and /t_conf 410 -> empty signed 200; /npdata's empty reply -> the friends
 // posted; a co-op guest's /match 401 -> signed success), signed as the server signs its replies
-// (X-Digest-A: HMAC-SHA1 with "CustomServerDigest" over body + MM_AUTH cookie + path).
+// (X-Digest-A: HMAC-SHA1 with "CustomServerDigest" over body + MM_AUTH cookie + path), and the
+// check every GET .../r/<sha1> download passes before it reaches the game (CheckDownload: the
+// bytes must hash to their name and be a type the game itself shares; scripts are refused).
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -256,6 +259,91 @@ void FixUpReply(Request& r, const std::string& pathAndQuery, const std::vector<u
     }
 }
 
+// What the game downloads from the server (GET .../r/<sha1>: levels, objects, photos, textures)
+// reaches it only when the bytes hash to the name it asked for and are a type the game itself makes
+// and shares. On PC the game's code is not in the PS4's sandbox, so a script or another type only
+// mods produce (Refresh's AssetFlags: Dangerous or Modded) is refused here even if a server or an
+// archive mirror serves it. The game sees a missing file (404).
+std::string_view RequestedAssetHash(std::string_view path) {
+    const auto at = path.rfind("/r/");
+    if (at == std::string_view::npos || path.size() < at + 3 + 40) return {};
+    const auto hash = path.substr(at + 3, 40);
+    const auto rest = path.substr(at + 3 + 40);
+    if ((!rest.empty() && rest.front() != '?') ||
+        !std::all_of(hash.begin(), hash.end(), [](char c) { return std::isxdigit(static_cast<unsigned char>(c)); }))
+        return {};
+    return hash;
+}
+
+std::string Sha1Hex(const uint8_t* data, size_t size) {
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    unsigned char out[20] = {};
+    std::string hex;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA1_ALGORITHM, nullptr, 0) != 0) return hex;
+    if (BCryptCreateHash(alg, &hash, nullptr, 0, nullptr, 0, 0) == 0) {
+        if (size) BCryptHashData(hash, const_cast<PUCHAR>(data), static_cast<ULONG>(size), 0);
+        if (BCryptFinishHash(hash, out, sizeof(out), 0) == 0) {
+            char buf[3];
+            for (unsigned char b : out) {
+                std::snprintf(buf, sizeof(buf), "%02x", b);
+                hex += buf;
+            }
+        }
+        BCryptDestroyHash(hash);
+    }
+    BCryptCloseAlgorithmProvider(alg, 0);
+    return hex;
+}
+
+// Why a downloaded asset is refused, or null when it may reach the game.
+const char* RefusedAsset(std::string_view hash, const std::vector<uint8_t>& body) {
+    const std::string actual = Sha1Hex(body.data(), body.size());
+    if (actual.empty()) return "could not be checked";
+    if (hash.size() != actual.size() ||
+        !std::equal(hash.begin(), hash.end(), actual.begin(),
+                    [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == b; }))
+        return "its contents do not match its name";
+    const auto starts = [&](std::string_view magic) {
+        return body.size() >= magic.size() && std::memcmp(body.data(), magic.data(), magic.size()) == 0;
+    };
+    if (starts("\xff\xd8\xff") || starts("\x89PNG\r\n\x1a\n") || starts("MATT") || starts("<ghost>"))
+        return nullptr;  // photos, grief reports, challenge ghosts
+    if (body.size() < 4) return "unknown type";
+    // Types the game creates and uploads itself (Refresh: neither Dangerous nor Modded). Not GMT: a
+    // graphics material carries compiled shaders, which would reach the shader recompiler; the game's
+    // own are in its files.
+    static constexpr std::string_view shared[] = {"LVL", "PLN", "REC", "PRF", "QST", "ADS", "ADC",
+                                                  "CHK", "VOP", "PTG", "TEX", "MAT", "BEV"};
+    const std::string_view type(reinterpret_cast<const char*>(body.data()), 3);
+    const char format = static_cast<char>(body[3]);
+    if (std::find(std::begin(shared), std::end(shared), type) == std::end(shared))
+        return type == "FSH" ? "a script" : type == "GMT" ? "a graphics material (shaders)" : "a type only mods make";
+    if (format != 'b' && format != 't' && format != 'e' && format != ' ' && format != 's' && format != 'S')
+        return "unknown type";
+    return nullptr;
+}
+
+// A refused download: the game sees a missing file.
+void RefuseAsset(Request& r, std::string_view hash, const char* reason) {
+    std::string type;
+    for (size_t i = 0; i < std::min<size_t>(r.body.size(), 4); ++i)
+        type += std::isprint(r.body[i]) ? static_cast<char>(r.body[i]) : '.';
+    std::fprintf(stderr, "[online] refused a download (%.*s, '%s'): %s\n", static_cast<int>(hash.size()), hash.data(),
+                 type.c_str(), reason);
+    r.status = 404;
+    r.body.clear();
+    r.readPos = 0;
+    r.rawHeaders = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+}
+
+// For GET .../r/<sha1> answered 200 (LBPPC applies it to the decoded body, as here).
+void CheckDownload(Request& r, const std::string& pathAndQuery) {
+    if (r.method != "GET" || r.status != 200) return;
+    if (const auto hash = RequestedAssetHash(pathAndQuery); !hash.empty())
+        if (const char* reason = RefusedAsset(hash, r.body)) RefuseAsset(r, hash, reason);
+}
+
 // --- End of the adapted part ---------------------------------------------------------------
 
 // LBP3_ONLINE_LOG=1: every request and reply in full (headers, the first 512 bytes of each
@@ -453,6 +541,7 @@ int Send(Request& r, const std::vector<uint8_t>& postIn) {
     if (VerboseLog())
         std::fprintf(stderr, "[online-log] < %d for %s\n%s< body: %s\n", r.status, path.c_str(),
                      Redact(r.rawHeaders).c_str(), Preview(r.body.data(), r.body.size()).c_str());
+    CheckDownload(r, path);
     FixUpReply(r, path, post);
     static std::atomic<int> logged{0};
     if (logged++ < 400)
@@ -660,6 +749,16 @@ int PS4_SYSV_ABI sceHttpGetAuthEnabled(int, int* enabled) {
 // For the offline test: the ticket and the signing, without a game.
 std::vector<uint8_t> TestTicket(const std::string& name) { return BuildLocalLoginTicket(name); }
 std::string TestHmac(const std::string& key, const std::string& data) { return HmacSha1Hex(key, data); }
+// The download check on a GET answered 200: the status and body the game would get.
+int TestDownloadCheck(const std::string& path, std::vector<uint8_t>& body) {
+    Request r;
+    r.method = "GET";
+    r.status = 200;
+    r.body = body;
+    CheckDownload(r, path);
+    body = r.body;
+    return r.status;
+}
 
 }  // namespace hle::http_online
 
