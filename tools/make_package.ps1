@@ -79,18 +79,26 @@ Clone the first with ``git clone --recursive $remote``, check out that commit, a
 
 # Third-party licences: the shadPS4 core and every library the build links (runtime/CMakeLists.txt, cmake/*.cmake).
 $ext = "third_party\shadPS4\externals"
-$libs = "abseil-cpp", "ext-boost", "fmt", "glslang", "half", "imgui", "libressl", "magic_enum", "miniz", "protobuf",
+$libs = "abseil-cpp", "ext-boost", "fmt", "glslang", "half", "imgui", "json", "libressl", "magic_enum", "miniz", "protobuf",
         "robin-map", "sirit", "tracy", "vma", "vulkan-headers", "xbyak", "xxhash", "zydis"
-Copy-Item third_party\shadPS4\LICENSE* "$stage\licenses\third_party\" -ErrorAction SilentlyContinue
-Get-ChildItem "$stage\licenses\third_party" -File | ForEach-Object { Rename-Item $_.FullName ("shadPS4-" + $_.Name) }
+New-Item -ItemType Directory -Force "$stage\licenses\third_party\shadPS4" | Out-Null
+Copy-Item third_party\shadPS4\LICENSE "$stage\licenses\third_party\shadPS4\LICENSE"
+Copy-Item third_party\shadPS4\LICENSES\*.txt "$stage\licenses\third_party\shadPS4\" -ErrorAction SilentlyContinue
 foreach ($lib in $libs) {
     $files = Get-ChildItem "$ext\$lib" -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '^(LICEN[CS]E|COPYING|COPYRIGHT|NOTICE)' }
+        Where-Object { $_.Name -match '^(LICEN[CS]E|COPYING|COPYRIGHT|NOTICE)' -and $_.Extension -ne '.cfg' }
     if ($files) {
         New-Item -ItemType Directory -Force "$stage\licenses\third_party\$lib" | Out-Null
         $files | ForEach-Object { Copy-Item $_.FullName "$stage\licenses\third_party\$lib\" }
     }
 }
+# stb (stb_image in the launcher and jpeg.cpp) keeps its licence at the end of the header: copy that block.
+$stbLines = Get-Content "$ext\stb\stb_image.h"
+$stbAt = ($stbLines | Select-String -SimpleMatch "This software is available under 2 licenses" | Select-Object -First 1).LineNumber
+if (-not $stbAt) { throw "no licence block found in stb_image.h" }
+New-Item -ItemType Directory -Force "$stage\licenses\third_party\stb" | Out-Null
+$stbLines[($stbAt - 1)..($stbLines.Count - 1)] | Where-Object { $_ -notmatch '^\*/\s*$' } |
+    Set-Content -Encoding ascii "$stage\licenses\third_party\stb\LICENSE.txt"
 $sdl = Get-ChildItem third_party\SDL3 -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^LICEN[CS]E' }
 if ($sdl) { New-Item -ItemType Directory -Force "$stage\licenses\third_party\SDL3" | Out-Null; $sdl | Copy-Item -Destination "$stage\licenses\third_party\SDL3\" }
 
@@ -107,7 +115,11 @@ if ($forbidden) {
 
 if (Test-Path $zip) { Remove-Item -Force $zip }
 Compress-Archive -Path "$stage\*" -DestinationPath $zip -CompressionLevel Optimal
-$hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+# (.NET's SHA256, not Get-FileHash: that cmdlet's module isn't found when started from Git Bash)
+$sha = [System.Security.Cryptography.SHA256]::Create()
+$fs = [System.IO.File]::OpenRead($zip)
+$hash = -join ($sha.ComputeHash($fs) | ForEach-Object { $_.ToString("x2") })
+$fs.Dispose(); $sha.Dispose()
 Set-Content -Encoding ascii "$zip.sha256" "$hash  $name.zip"
 $size = [math]::Round((Get-Item $zip).Length / 1MB, 1)
 Write-Host "package: $zip ($size MB)"
