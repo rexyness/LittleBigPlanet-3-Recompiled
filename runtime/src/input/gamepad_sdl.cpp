@@ -4,6 +4,7 @@
 #include "input/gamepad.h"
 #include "hle/ime_dialog.h"
 #include "input/actions.h"
+#include "input/action_table.h"
 #include "input/game_state.h"
 #include "input/motion.h"
 #include "input/mouse_touch.h"
@@ -67,6 +68,9 @@ constexpr ButtonMap kButtons[] = {
     {SDL_GAMEPAD_BUTTON_DPAD_LEFT, ps4::PAD_LEFT},
     {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, ps4::PAD_RIGHT},
 };
+
+// The buttons in use: kButtons, unless input.ini's pad_<button> lines say otherwise (ApplyPadLines).
+std::vector<ButtonMap> g_buttonMap(std::begin(kButtons), std::end(kButtons));
 
 // The PS4 sets the digital L2/R2 bits once the trigger is past a small threshold.
 constexpr uint8_t kTriggerDigitalThreshold = 30;
@@ -281,6 +285,55 @@ void SetVirtualLocked(int players) {
     }
 }
 
+// input.ini's pad lines (input/action_table.h): "pad_cross = east" makes the right face button
+// Cross; "none" leaves a PS4 button unmapped. Lines naming no known button change nothing.
+void ApplyPadLines() {
+    struct Ps4 {
+        const char* name;
+        uint32_t bit;
+    };
+    static constexpr Ps4 kPs4[] = {
+        {"pad_cross", ps4::PAD_CROSS},       {"pad_circle", ps4::PAD_CIRCLE},     {"pad_square", ps4::PAD_SQUARE},
+        {"pad_triangle", ps4::PAD_TRIANGLE}, {"pad_l1", ps4::PAD_L1},             {"pad_r1", ps4::PAD_R1},
+        {"pad_l3", ps4::PAD_L3},             {"pad_r3", ps4::PAD_R3},             {"pad_options", ps4::PAD_OPTIONS},
+        {"pad_touchpad", ps4::PAD_TOUCH_PAD}, {"pad_up", ps4::PAD_UP},            {"pad_down", ps4::PAD_DOWN},
+        {"pad_left", ps4::PAD_LEFT},         {"pad_right", ps4::PAD_RIGHT},
+    };
+    for (const auto& [key, value] : actions::PadLines()) {
+        const Ps4* target = nullptr;
+        for (const auto& p : kPs4)
+            if (key == p.name) target = &p;
+        if (!target) {
+            std::fprintf(stderr, "[input] unknown pad button '%s' in user\\config\\input.ini\n", key.c_str());
+            continue;
+        }
+        std::vector<SDL_GamepadButton> from;
+        bool none = false, bad = false;
+        size_t at = 0;
+        while (at <= value.size()) {
+            size_t comma = value.find(',', at);
+            if (comma == std::string::npos) comma = value.size();
+            std::string word = value.substr(at, comma - at);
+            while (!word.empty() && word.front() == ' ') word.erase(word.begin());
+            while (!word.empty() && word.back() == ' ') word.pop_back();
+            if (word == "none") none = true;
+            else if (!word.empty()) {
+                const SDL_GamepadButton b = actions::PadButtonFromName(word.c_str());
+                if (b == SDL_GAMEPAD_BUTTON_INVALID) bad = true;
+                else from.push_back(b);
+            }
+            at = comma + 1;
+        }
+        if (bad || (from.empty() && !none)) {
+            std::fprintf(stderr, "[input] %s = %s: unknown pad button, kept as it was\n", key.c_str(), value.c_str());
+            continue;
+        }
+        std::erase_if(g_buttonMap, [&](const ButtonMap& m) { return m.ps4 == target->bit; });
+        for (SDL_GamepadButton b : from) g_buttonMap.push_back({b, target->bit});
+        std::fprintf(stderr, "[input] %s = %s\n", key.c_str(), value.c_str());
+    }
+}
+
 }  // namespace
 
 void Init() {
@@ -291,6 +344,7 @@ void Init() {
     if (const char* v = std::getenv("LBP3_VIRTUAL_PADS")) SetVirtualLocked(std::atoi(v));
     if (g_ready) RefreshSlots();
     actions::Init();
+    ApplyPadLines();
 }
 
 bool SlotPresent(int slot, uint32_t* generation) {
@@ -552,7 +606,7 @@ bool Read(int slot, ps4::PadData& out, bool keyboard) {
         return true;
     }
 
-    for (const auto& b : kButtons)
+    for (const auto& b : g_buttonMap)
         if (SDL_GetGamepadButton(p, b.sdl)) out.buttons |= b.ps4;
 
     out.leftStick = {StickAxis(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTX)),

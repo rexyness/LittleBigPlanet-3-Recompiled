@@ -1,4 +1,5 @@
 #include "input/actions.h"
+#include "input/action_table.h"
 #include "input/game_state.h"
 
 #include <array>
@@ -29,28 +30,18 @@ struct ActionInfo {
     const char* description;
 };
 
-constexpr ActionInfo kActions[] = {
-    {Action::MoveLeft, "move_left", "A", "walk left"},
-    {Action::MoveRight, "move_right", "D", "walk right"},
-    {Action::LayerBack, "layer_back", "W", "step one layer back (away from the camera)"},
-    {Action::LayerFront, "layer_front", "S", "step one layer forward (towards the camera)"},
-    {Action::Jump, "jump", "Space", "jump (hold to jump higher)"},
-    {Action::Grab, "grab", "Left Shift", "grab and hold on"},
-    {Action::OpenComputer, "open_computer", "E", "use the Pod computer"},
-    {Action::OpenPopit, "open_popit", "R", "open the Popit"},
-    {Action::MenuUp, "menu_up", "Up", "menus: move up"},
-    {Action::MenuDown, "menu_down", "Down", "menus: move down"},
-    {Action::MenuLeft, "menu_left", "Left", "menus: move left"},
-    {Action::MenuRight, "menu_right", "Right", "menus: move right"},
-    {Action::Confirm, "confirm", "Return", "menus: select"},
-    {Action::Back, "back", "Escape, Backspace", "menus: back / close"},
-    {Action::Pause, "pause", "Tab", "pause menu"},
-    {Action::TiltLeft, "tilt_left", "Keypad 4", "tilt the pad left (for pads without motion sensors, and the keyboard)"},
-    {Action::TiltRight, "tilt_right", "Keypad 6", "tilt the pad right"},
-    {Action::TiltForward, "tilt_forward", "Keypad 8", "tilt the pad forward (front down)"},
-    {Action::TiltBack, "tilt_back", "Keypad 2", "tilt the pad back (front up)"},
-};
-static_assert(std::size(kActions) == static_cast<size_t>(Action::Count));
+// The table lives in input/action_table.h (shared with the launcher's controls editor), in the
+// order of Action.
+static_assert(std::size(kActionRows) == static_cast<size_t>(Action::Count));
+constexpr auto kActions = [] {
+    std::array<ActionInfo, std::size(kActionRows)> a{};
+    for (size_t i = 0; i < a.size(); ++i)
+        a[i] = {static_cast<Action>(i), kActionRows[i].name, kActionRows[i].defaults, kActionRows[i].description};
+    return a;
+}();
+
+// The pad_* lines of input.ini (input/gamepad_sdl.cpp maps the buttons from them).
+std::vector<std::pair<std::string, std::string>> g_padLines;
 
 std::array<std::vector<SDL_Scancode>, static_cast<size_t>(Action::Count)> g_bindings;
 
@@ -85,6 +76,10 @@ void WriteDefaultConfig() {
            "# Key names are SDL's (A, Space, Left Shift, Return, Escape, Up, F1, Keypad 8, ...).\n"
            "# Delete this file to get the defaults back.\n\n";
     for (const auto& a : kActions) out << "# " << a.description << "\n" << a.name << " = " << a.defaults << "\n\n";
+    out << "# Pad buttons (optional): pad_<button> = <pad button>, ... Without these lines each PS4 button\n"
+           "# comes from its own pad button. Pad buttons: south, east, west, north, leftshoulder, rightshoulder,\n"
+           "# leftstick, rightstick, start, back, guide, touchpad, dpup, dpdown, dpleft, dpright, misc1, paddle1-4, none.\n";
+    for (const auto& p : kPadRows) out << "# " << p.name << " = " << p.defaults << "\n";
 }
 
 // Test runs (remote input "action <name> <ms>") hold actions without a keyboard.
@@ -120,6 +115,10 @@ void Init() {
         const auto eq = line.find('=');
         if (eq == std::string::npos) continue;
         const std::string name = Trim(line.substr(0, eq));
+        if (name.rfind("pad_", 0) == 0) {  // the pad's (gamepad_sdl.cpp)
+            g_padLines.emplace_back(name, Trim(line.substr(eq + 1)));
+            continue;
+        }
         bool known = false;
         for (const auto& a : kActions) {
             if (name != a.name) continue;
@@ -129,6 +128,8 @@ void Init() {
         if (!known) std::fprintf(stderr, "[input] unknown action '%s' in %s\n", name.c_str(), kConfigPath);
     }
 }
+
+const std::vector<std::pair<std::string, std::string>>& PadLines() { return g_padLines; }
 
 bool HoldForTest(const std::string& name, uint64_t ms) {
     for (const auto& a : kActions) {

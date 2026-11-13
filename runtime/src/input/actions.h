@@ -8,6 +8,8 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "hle/pad_types.h"
 
@@ -42,6 +44,8 @@ enum class Action {
 
 // Loads bindings (writing a commented default file the first time).
 void Init();
+// The pad_<button> = <pad buttons> lines input.ini had (Init reads them; input/action_table.h).
+const std::vector<std::pair<std::string, std::string>>& PadLines();
 // True while the game window has keyboard focus and some binding is held.
 bool AnyHeld();
 // Holds an action for `ms` as if its key were down (remote-controlled test runs).
