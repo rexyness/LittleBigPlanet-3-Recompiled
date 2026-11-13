@@ -886,7 +886,7 @@ void StartReleaseCheck(App& a) {
 namespace {
 
 void StartReleaseInstall(App& a) {
-    if (a.release_install.running) return;
+    if (a.release_install.running || a.release_check.running) return;
     ReleaseInfo r;
     {
         std::lock_guard lock(a.release_m);
@@ -1019,7 +1019,8 @@ void PageTools(App& a) {
                     ImGui::EndChild();
                 }
                 if (newer) {
-                    const bool can = !GameBusy(a) && !a.release_install.running;
+                    // not while a check runs: the install would take the release the previous check found
+                    const bool can = !GameBusy(a) && !a.release_install.running && !a.release_check.running;
                     if (BigButton(("Download and install " + r.tag).c_str(), ImVec2(S(340), 0), kPlay, can)) StartReleaseInstall(a);
                     if (GameBusy(a)) ImGui::SameLine(), ImGui::TextColored(kWarn, "close the game first");
                 }
