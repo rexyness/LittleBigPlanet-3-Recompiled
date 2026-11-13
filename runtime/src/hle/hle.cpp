@@ -26,6 +26,7 @@ void RegisterAll(core::Linker& linker) {
     RegisterNetOffline(linker);
     RegisterRtc(linker);
     RegisterHttpOffline(linker);
+    RegisterHttpOnline(linker);  // replaces the above only with LBP3_ONLINE=1 (hle/online.h)
     RegisterDialogs(linker);
     RegisterImeDialog(linker);
     RegisterJpeg(linker);
