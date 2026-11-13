@@ -247,9 +247,10 @@ std::vector<Check> RunChecks(const Settings& s, const Paths& p) {
                      files ? "built in (written before Play)" : "the game files have no patch_001.farc (the in-game menu can still quit)"});
     }
     if (s.online) {
-        const bool ok = !NormalizeServer(s.online_server).empty() && ValidOnlineName(s.online_name);
-        c.push_back({ok, "Online", ok ? NormalizeServer(s.online_server) + " as " + s.online_name
-                                      : "needs a server address and a 3-16 character online name"});
+        const Settings e = EffectiveOnline(s, p);  // the active account file decides
+        const bool ok = !NormalizeServer(e.online_server).empty() && ValidOnlineName(e.online_name);
+        c.push_back({ok, "Online", ok ? NormalizeServer(e.online_server) + " as " + e.online_name
+                                      : "needs an online account (Online page), or a server address and a name"});
     }
     return c;
 }

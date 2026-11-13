@@ -106,6 +106,18 @@ void PageDlc(App& a) {
     ImGui::Text("%d packs", static_cast<int>(a.dlc.size()));
     ImGui::SameLine();
     if (ImGui::SmallButton("Open the DLC folder")) OpenPath(a.p.dlc_dir);
+    ImGui::SameLine();
+    ImGui::BeginDisabled(a.shot_mode || GameBusy(a));
+    if (ImGui::SmallButton("Use another folder...")) {
+        const std::string picked = PickFolder(L"Choose your DLC folder");
+        if (!picked.empty()) a.s.dlc_dir = picked, Refresh(a, true), a.dlc_dirty = true;
+    }
+    if (!a.s.dlc_dir.empty()) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Back to the default")) a.s.dlc_dir.clear(), Refresh(a, true), a.dlc_dirty = true;
+    }
+    ImGui::EndDisabled();
+    Help("The game looks for DLC in <dump>\\CUSA00473-DLC; another folder is passed to it as LBP3_ADDCONT_DIR.");
     ImGui::SetNextItemWidth(S(300));
     ImGui::InputTextWithHint("##filter", "filter by name", a.dlc_filter, sizeof a.dlc_filter);
 
