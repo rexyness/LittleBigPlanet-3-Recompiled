@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "core/runner.h"
@@ -67,7 +68,9 @@ uint32_t g_cmdGoToMode = kPlayMode;
 
 // The automatic tour (game thread only, except the atomics ApplyInput reads).
 bool g_enabled = false;
-int g_first = 0, g_last = 1 << 30;
+std::vector<std::pair<int, int>> g_ranges;  // index ranges into the level list, visited in this order
+std::vector<size_t> g_order;                 // the resulting visit order
+size_t g_pos = 0;                            // position in g_order
 int g_dwellSecs = 150;
 std::vector<Level> g_levels;
 size_t g_next = 0;
@@ -100,8 +103,8 @@ uint64_t CurrentSlot() {
 }
 
 bool ProfileLoaded() {
-    using Fn = long*(PS4_SYSV_ABI*)();
-    long* slot = reinterpret_cast<Fn>(Base() + kLocalUser)();
+    using Fn = int64_t*(PS4_SYSV_ABI*)();  // (Windows' long is 32 bits: game pointers are int64_t here)
+    int64_t* slot = reinterpret_cast<Fn>(Base() + kLocalUser)();
     return slot && *slot != 0;
 }
 
@@ -143,8 +146,8 @@ void Collect(const uint8_t* node, const uint8_t* header, std::vector<Level>& out
 std::vector<Level> StoryLevels() {
     std::vector<Level> out;
     uint8_t* base = Base();
-    using Get = long*(PS4_SYSV_ABI*)(long*, char);
-    long ref = 0;
+    using Get = int64_t*(PS4_SYSV_ABI*)(int64_t*, char);
+    int64_t ref = 0;
     reinterpret_cast<Get>(base + kStoryAdventure)(&ref, 1);
     if (!ref) return out;
     const uint8_t* adv = reinterpret_cast<const uint8_t*>(ref);
@@ -152,7 +155,7 @@ std::vector<Level> StoryLevels() {
     if (header) Collect(reinterpret_cast<const uint8_t*>(Q(header, 0x8)), header, out, 0);
     const long old = InterlockedExchangeAdd(reinterpret_cast<volatile long*>(ref + 0x30), -0x10000);
     if (old == 0x10000) {
-        using Release = void(PS4_SYSV_ABI*)(long, int);
+        using Release = void(PS4_SYSV_ABI*)(int64_t, int);
         reinterpret_cast<Release>(base + kAdventureRelease)(ref, 0);
     }
     return out;
@@ -186,15 +189,14 @@ void SetInput(int mode) {
 }
 
 void LaunchNext() {
-    while (g_next < g_levels.size() && (static_cast<int>(g_next) < g_first || static_cast<int>(g_next) > g_last))
-        ++g_next;
-    if (g_next >= g_levels.size()) {
+    if (g_pos >= g_order.size()) {
         SetInput(0);
         SetPhase(Phase::Done);
         std::fprintf(stderr, "[tour] done: %d level(s) visited, %d skipped\n", g_done, g_skipped);
         std::fflush(stderr);
         return;
     }
+    g_next = g_order[g_pos];
     const Level l = g_levels[g_next];
     g_target = Pack(l);
     g_launchTries = 1;
@@ -211,7 +213,7 @@ void Skip(const char* why) {
     std::fprintf(stderr, "[tour] %zu skip (type %u, id 0x%x): %s\n", g_next, l.type, l.id, why);
     LogWhere("at skip");
     ++g_skipped;
-    ++g_next;
+    ++g_pos;
     LaunchNext();
 }
 
@@ -241,7 +243,13 @@ void RunTour() {
             g_profileSince = Clock::now() - std::chrono::seconds(10);
             return;
         }
-        g_next = 0;
+        g_order.clear();
+        for (const auto& [a, b] : g_ranges)
+            for (int i = std::max(a, 0); i <= b && i < static_cast<int>(g_levels.size()); ++i) g_order.push_back(i);
+        if (g_ranges.empty())
+            for (size_t i = 0; i < g_levels.size(); ++i) g_order.push_back(i);
+        std::fprintf(stderr, "[tour] visiting %zu level(s)\n", g_order.size());
+        g_pos = 0;
         LaunchNext();
         return;
     }
@@ -282,7 +290,7 @@ void RunTour() {
         std::fprintf(stderr, "[tour] %zu leave (type %u, id 0x%x) after %.0f s: %s\n", g_next, l.type, l.id,
                      PhaseSecs(), left ? "the game moved on" : "dwell over");
         ++g_done;
-        ++g_next;
+        ++g_pos;
         SetInput(0);
         // Wait for whatever the game is loading (a cutscene hands over to its next level) before the next launch.
         SetPhase(Phase::Settle);
@@ -316,11 +324,19 @@ Move Pattern(uint64_t ms, bool cutscene) {
 void InstallHooks() {
     const char* v = std::getenv("LBP3_WARMUP_TOUR");
     if (!v || !*v || std::string(v) == "0") return;
-    if (std::string(v) != "1") {
-        const std::string s(v);
-        const size_t dash = s.find('-');
-        g_first = std::atoi(s.substr(0, dash).c_str());
-        g_last = dash == std::string::npos ? g_first : std::atoi(s.substr(dash + 1).c_str());
+    if (std::string(v) != "1") {  // "a-b,c,d-e": index ranges into the level list, in visit order
+        std::string s(v);
+        size_t start = 0;
+        while (start < s.size()) {
+            const size_t comma = s.find(',', start);
+            const std::string part = s.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+            const size_t dash = part.find('-');
+            const int a = std::atoi(part.substr(0, dash).c_str());
+            const int b = dash == std::string::npos ? a : std::atoi(part.substr(dash + 1).c_str());
+            if (!part.empty()) g_ranges.emplace_back(a, b);
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
     }
     if (const char* d = std::getenv("LBP3_WARMUP_TOUR_DWELL")) g_dwellSecs = std::max(10, std::atoi(d));
     const DWORD attr = GetFileAttributesA("analysis\\savedata_live_is_test");
@@ -333,8 +349,8 @@ void InstallHooks() {
     g_enabled = true;
     SetPhase(Phase::WaitStart);
     SetInput(3);
-    std::fprintf(stderr, "[tour] warm-up tour on: levels %d-%d, %d s of movement per level\n", g_first,
-                 g_last == (1 << 30) ? -1 : g_last, g_dwellSecs);
+    std::fprintf(stderr, "[tour] warm-up tour on: levels %s, %d s of movement per level\n",
+                 g_ranges.empty() ? "all" : v, g_dwellSecs);
 }
 
 void ApplyInput(ps4::PadData& out) {

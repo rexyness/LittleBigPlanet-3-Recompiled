@@ -1,6 +1,6 @@
 // Warm-up tour (the "shader compilation step", perf/warmup_step.md): on a test save, visit every
 // level of the story adventure once so the shader and pipeline caches fill before the player
-// gets there. LBP3_WARMUP_TOUR=1 (or "<first>-<last>", indexes into the level list) runs it after
+// gets there. LBP3_WARMUP_TOUR=1 (or "a-b,c,...", index ranges into the level list, visited in that order) runs it after
 // the profile has loaded; it refuses to start unless saves.sh has marked the live saves as test
 // saves (analysis\savedata_live_is_test). Each level is launched with the game's own "go to level"
 // (FUN_002689c0 through FUN_007c6780, as GoToTutorialLevel__ does), then the tour waits for the
