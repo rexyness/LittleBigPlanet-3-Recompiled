@@ -372,7 +372,8 @@ bool SendRemote(int s, const void* data, size_t len, const void* to) {
     {
         std::lock_guard lk(g_netMutex);
         auto it = g_sockets.find(s);
-        if (it == g_sockets.end()) return false;
+        // Datagram sockets only: a raw ICMP socket's echo (the server ping) is the ping's business.
+        if (it == g_sockets.end() || it->second.type == kSockRaw) return false;
         srcVport = it->second.vport;
     }
     const auto* b = static_cast<const uint8_t*>(to);

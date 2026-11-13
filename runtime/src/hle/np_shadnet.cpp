@@ -1192,7 +1192,14 @@ void StartLink() {
     };
     auto link = std::make_unique<net::p2p::Link>();
     link->SetDataSink([](const net::p2p::Endpoint& from, uint16_t srcVport, uint16_t dstVport, const uint8_t* data,
-                         size_t len) { p2pnet::DeliverRemote(from.ip, from.port, srcVport, dstVport, data, len); });
+                         size_t len) {
+        if (!p2pnet::DeliverRemote(from.ip, from.port, srcVport, dstVport, data, len)) {
+            static std::atomic<int> logged{0};
+            if (logged++ < 10)
+                std::fprintf(stderr, "[p2p] a game datagram for vport %u: no socket of the game is bound to it\n",
+                             dstVport);
+        }
+    });
     if (!link->Start(c)) {
         std::fprintf(stderr, "[p2p] no UDP socket: online co-op is off\n");
         return;

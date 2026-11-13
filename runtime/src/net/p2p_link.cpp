@@ -52,6 +52,17 @@ Endpoint GetEndpoint(const uint8_t* p) {
     e.port = Get16(p + 4);
     return e;
 }
+// A stable 32-bit tag for an online ID (FNV-1a), carried in DATA.
+uint32_t NameTag(const std::string& name) {
+    uint32_t h = 2166136261u;
+    for (const char ch : name) h = (h ^ static_cast<uint8_t>(ch)) * 16777619u;
+    return h;
+}
+void Put32(std::vector<uint8_t>& b, uint32_t v) {
+    for (int i = 3; i >= 0; --i) b.push_back(static_cast<uint8_t>(v >> (8 * i)));
+}
+uint32_t Get32(const uint8_t* p) { return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3]; }
+
 std::vector<uint8_t> Header(uint8_t type) {
     std::vector<uint8_t> b(kMagic, kMagic + 4);
     b.push_back(type);
@@ -243,11 +254,23 @@ struct Link::Impl {
             break;
         }
         case kData: {
-            if (n < 9) return;
-            Peer* p = PeerFrom(src, relayed);
-            if (!p || p->state != State::Active) return;
+            if (n < 13) return;
+            const uint32_t tag = Get32(d + 9);
+            Peer* p = nullptr;
+            for (auto& [name, peer] : peers)
+                if (NameTag(name) == tag) p = &peer;
+            if (!p || p->state != State::Active) {
+                if (++stats.dataUnknown <= 10)
+                    std::fprintf(stderr, "[p2p] a game datagram from %s%s, from no connected player: dropped\n",
+                                 ToString(src).c_str(), relayed ? " (relayed)" : "");
+                return;
+            }
             Heard(*p, src, relayed, now);
-            if (sink) sink(p->gameAddr, Get16(d + 5), Get16(d + 7), d + 9, n - 9);
+            if (++stats.dataReceived <= 5 || stats.dataReceived % 3000 == 0)
+                std::fprintf(stderr, "[p2p] game datagram %llu from %s (%zu bytes, %s)\n",
+                             static_cast<unsigned long long>(stats.dataReceived), p->name.c_str(), n - 13,
+                             relayed ? "relayed" : "direct");
+            if (sink) sink(p->gameAddr, Get16(d + 5), Get16(d + 7), d + 13, n - 13);
             break;
         }
         case kPing:
@@ -303,10 +326,30 @@ struct Link::Impl {
         HandlePeerPacket(d, n, src, false, now);
     }
 
+    Clock::time_point lastSummary{};
+    uint64_t summarySent = 0, summaryReceived = 0;
+
+    // Lock held: what flowed in the last 5 s, while anything does.
+    void Summary(Clock::time_point now) {
+        if (now - lastSummary < std::chrono::seconds(5)) return;
+        lastSummary = now;
+        const uint64_t sent = stats.dataSent - summarySent, received = stats.dataReceived - summaryReceived;
+        summarySent = stats.dataSent;
+        summaryReceived = stats.dataReceived;
+        if (!sent && !received) return;
+        std::string who;
+        for (const auto& [name, p] : peers)
+            who += " " + name + (p.state == State::Active ? (DirectFresh(p, now) ? " (direct" : " (relayed") : " (pending") +
+                   ", rtt " + std::to_string(p.rttUs / 1000) + " ms)";
+        std::fprintf(stderr, "[p2p] last 5 s: %llu game datagrams sent, %llu received;%s\n",
+                     static_cast<unsigned long long>(sent), static_cast<unsigned long long>(received), who.c_str());
+    }
+
     void Tick(Clock::time_point now) {
         std::vector<std::string> toResolve;
         {
             std::lock_guard lk(m);
+            Summary(now);
             if (cfg.server.Valid() && now - lastStun >= std::chrono::milliseconds(stunAnswered ? cfg.stunMs : 1000)) {
                 lastStun = now;
                 std::vector<uint8_t> b(kStunHeader, kStunHeader + 6);
@@ -573,17 +616,27 @@ std::vector<Event> Link::TakeEvents() {
 
 bool Link::SendData(const Endpoint& gameAddr, uint16_t srcVport, uint16_t dstVport, const void* data, size_t len) {
     const std::string name = PeerAt(gameAddr);
-    if (name.empty()) return false;
     Impl& I = *impl_;
     std::lock_guard lk(I.m);
-    auto it = I.peers.find(name);
-    if (it == I.peers.end() || it->second.state != State::Active) return false;
+    auto it = name.empty() ? I.peers.end() : I.peers.find(name);
+    if (it == I.peers.end() || it->second.state != State::Active) {
+        if (++I.stats.dataNoPeer <= 10)
+            std::fprintf(stderr, "[p2p] the game sent a datagram to %s (vport %u): no connected player there\n",
+                         ToString(gameAddr).c_str(), dstVport);
+        return false;
+    }
     auto b = Header(kData);
     Put16(b, srcVport);
     Put16(b, dstVport);
+    Put32(b, NameTag(I.cfg.self));
     const auto* p = static_cast<const uint8_t*>(data);
     b.insert(b.end(), p, p + len);
-    I.SendToPeer(it->second, b, Clock::now());
+    const auto now = Clock::now();
+    if (++I.stats.dataSent <= 5 || I.stats.dataSent % 3000 == 0)
+        std::fprintf(stderr, "[p2p] game datagram %llu to %s (%zu bytes, %s)\n",
+                     static_cast<unsigned long long>(I.stats.dataSent), name.c_str(), len,
+                     I.DirectFresh(it->second, now) ? "direct" : "relayed");
+    I.SendToPeer(it->second, b, now);
     return true;
 }
 

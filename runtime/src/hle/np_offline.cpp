@@ -240,9 +240,16 @@ bool StateNpId(int32_t userId, uint8_t* out36) {
     return sceNpGetNpId(userId, reinterpret_cast<NpId*>(out36)) == kernel::SCE_OK;
 }
 
+// Signed in to shadNet: the account id the server knows the player by (different for every player,
+// as on PSN). Two players with the same id are one player to LBP3: the host dropped a joining
+// friend a few seconds after connecting. Offline: a fixed id.
 int PS4_SYSV_ABI sceNpGetAccountId(const void*, uint64_t* id) {
     if (!id) return kErrorInvalidArgument;
-    *id = kAccountId;
+    const uint64_t shadnet = net::shadnet::AccountId();
+    *id = shadnet ? shadnet : kAccountId;
+    static std::atomic<bool> logged{false};
+    if (shadnet && !logged.exchange(true))
+        std::fprintf(stderr, "[np] sceNpGetAccountId: %llu (the server's)\n", static_cast<unsigned long long>(shadnet));
     return kernel::SCE_OK;
 }
 

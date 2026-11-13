@@ -74,6 +74,7 @@ struct State {
     std::chrono::steady_clock::time_point started{};
     bool stopping = false;
     std::deque<PushEvent> pushes;
+    uint64_t accountId = 0;
     // RequestSignalingInfos waiting for their reply, by packet id.
     std::map<uint64_t, std::function<void(bool, const std::string&, uint16_t)>> resolves;
 };
@@ -248,6 +249,7 @@ void Start(const Config& config) {
                 std::lock_guard l(S().mutex);
                 S().friends.clear();
                 for (const auto& f : r.friends) S().friends.push_back({f.npid, f.online});
+                S().accountId = r.userId;
             }
             std::fprintf(stderr, "[shadnet] signed in as %s: %zu friend(s), %zu request(s) received, %zu sent\n",
                          S().config.name.c_str(), r.friends.size(), r.requestsReceived.size(), r.requestsSent.size());
@@ -382,6 +384,11 @@ Status GetStatus() {
 std::string Name() {
     std::lock_guard lock(S().mutex);
     return S().client ? S().config.name : std::string();
+}
+
+uint64_t AccountId() {
+    std::lock_guard lock(S().mutex);
+    return S().client && S().status == Status::SignedIn ? S().accountId : 0;
 }
 
 std::vector<Friend> Friends() {
