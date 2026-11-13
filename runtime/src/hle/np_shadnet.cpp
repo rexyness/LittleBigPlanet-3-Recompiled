@@ -36,6 +36,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -1191,9 +1192,22 @@ void StartLink() {
         c.path = v == "lan"      ? net::p2p::Config::Path::Lan
                  : v == "public" ? net::p2p::Config::Path::Public
                  : v == "relay"  ? net::p2p::Config::Path::Relay
+                 : v == "any"    ? net::p2p::Config::Path::Any
                                  : net::p2p::Config::Path::Auto;
         std::fprintf(stderr, "[p2p] LBP3_P2P_PATH=%s\n", p);
     }
+    if (const char* p = std::getenv("LBP3_P2P_DATA3"); p && *p == '0') {
+        c.data3 = false;
+        std::fprintf(stderr, "[p2p] LBP3_P2P_DATA3=0: no gap-free delivery\n");
+    }
+    if (const char* p = std::getenv("LBP3_P2P_TEST_LOSS"); p && *p) {
+        // "N" or "N,burst": drop `burst` incoming game datagrams out of every N (tests).
+        c.testLossEvery = std::atoi(p);
+        if (const char* comma = std::strchr(p, ',')) c.testLossBurst = std::max(1, std::atoi(comma + 1));
+        std::fprintf(stderr, "[p2p] LBP3_P2P_TEST_LOSS=%s: dropping incoming game datagrams (a test)\n", p);
+    }
+    if (const char* p = std::getenv("LBP3_P2P_TEST_LATE"); p && *p) c.testLateEvery = std::atoi(p);
+    if (const char* p = std::getenv("LBP3_P2P_TEST_DUP"); p && *p) c.testDupEvery = std::atoi(p);
     if (const char* p = std::getenv("LBP3_P2P_DIAG"); p && *p == '1') {
         c.diag = true;
         std::fprintf(stderr, "[p2p] LBP3_P2P_DIAG=1: sequence numbers and send times on game datagrams "
@@ -1221,6 +1235,15 @@ void StartLink() {
     }
     g_link = std::move(link);
     p2pnet::SetRemoteSend(&LinkSend);
+    // Tests only (the join protection, live): connect to this player although the game didn't ask.
+    if (const char* p = std::getenv("LBP3_P2P_TEST_CONNECT"); p && *p) {
+        const std::string peer = p;
+        std::fprintf(stderr, "[p2p] LBP3_P2P_TEST_CONNECT: connecting to %s in 20 s (a test)\n", peer.c_str());
+        std::thread([peer] {
+            std::this_thread::sleep_for(std::chrono::seconds(20));
+            if (net::p2p::Link* l = g_link.get()) l->Activate(peer);
+        }).detach();
+    }
 }
 
 int SignalingError(int linkError) {

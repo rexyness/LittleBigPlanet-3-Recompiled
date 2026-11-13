@@ -443,6 +443,104 @@ int main() {
         mock.Stop();
     }
 
+    // --- 9..12. gap-free delivery (DATA3) with lost datagrams -------------------------------------
+    // Sends `count` numbered datagrams A -> B and returns what B's game got, in arrival order.
+    struct Faults {
+        int lossEvery = 0, lossBurst = 1, lateEvery = 0, dupEvery = 0;
+    };
+    std::vector<std::string> gotA;  // what A's game got from B in the last run
+    auto run = [&](const char* what, bool relay, bool data3B, Faults f, int count, Link::Stats* statsA,
+                   Link::Stats* statsB) {
+        UdpMock mock;
+        mock.fakeAddresses = relay;
+        CHECK(mock.Start());
+        Link a, b;
+        Received atA, atB;
+        Sink(a, atA);
+        Sink(b, atB);
+        Config ca = PlayerConfig("Alice_1", mock, {}), cb = PlayerConfig("Bob_2", mock, {"Alice_1"});
+        if (relay) ca.reportLan = cb.reportLan = false;
+        cb.data3 = data3B;
+        for (Config* c : {&ca, &cb}) {
+            c->testLossEvery = f.lossEvery;
+            c->testLossBurst = f.lossBurst;
+            c->testLateEvery = f.lateEvery;
+            c->testDupEvery = f.dupEvery;
+        }
+        CHECK(a.Start(ca));
+        CHECK(b.Start(cb));
+        CHECK(WaitFor([&] { return a.External().Valid() && b.External().Valid(); }));
+        a.Activate("Bob_2");
+        std::vector<Event> evA, evB;
+        CHECK(WaitFor([&] { return HasEvent(evA, a, Event::Established, "Bob_2"); }));
+        CHECK(WaitFor([&] { return HasEvent(evB, b, Event::PeerActivated, "Alice_1"); }));
+        // Both directions at once, faults on both sides.
+        const Endpoint toB = a.Info("Bob_2").gameAddr, toA = b.Info("Alice_1").gameAddr;
+        for (int i = 0; i < count; ++i) {
+            const std::string msg = "frame " + std::to_string(i);
+            a.SendData(toB, 3658, 3658, msg.data(), msg.size());
+            b.SendData(toA, 3658, 3658, msg.data(), msg.size());
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        WaitFor([&] { return atB.Count() >= static_cast<size_t>(count) && atA.Count() >= static_cast<size_t>(count); },
+                6000);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));  // nothing more may come
+        std::vector<std::string> got;
+        {
+            std::lock_guard lk(atB.m);
+            for (const auto& d : atB.data) got.emplace_back(d.begin(), d.end());
+        }
+        gotA.clear();
+        {
+            std::lock_guard lk(atA.m);
+            for (const auto& d : atA.data) gotA.emplace_back(d.begin(), d.end());
+        }
+        if (statsA) *statsA = a.GetStats();
+        if (statsB) *statsB = b.GetStats();
+        std::printf("  %s: %zu and %zu of %d arrived\n", what, got.size(), gotA.size(), count);
+        a.Stop();
+        b.Stop();
+        mock.Stop();
+        return got;
+    };
+    auto inOrder = [](const std::vector<std::string>& got, int count) {
+        if (got.size() != static_cast<size_t>(count)) return false;
+        for (int i = 0; i < count; ++i)
+            if (got[i] != "frame " + std::to_string(i)) return false;
+        return true;
+    };
+    {
+        Link::Stats sa, sb;
+        // 9. Every 5th datagram lost (both ways): each is filled in from the next one's copies.
+        auto got = run("every 5th lost", false, true, {5, 1}, 200, &sa, &sb);
+        CHECK(inOrder(got, 200) && inOrder(gotA, 200));
+        CHECK(sb.testDropped >= 30 && sb.recovered > 0 && sb.skipped == 0 && sa.recovered > 0);
+        // 10. Bursts of 4 lost (more than the 2 copies): the rest come back on request (NACK).
+        got = run("4 in a row lost every 25", false, true, {25, 4}, 200, &sa, &sb);
+        CHECK(inOrder(got, 200) && inOrder(gotA, 200));
+        CHECK(sb.nacks > 0 && sa.resent > 0 && sb.skipped == 0 && sa.skipped == 0);
+        // 11. A player whose link doesn't have DATA3 (an older version): plain DATA, losses and all.
+        got = run("older link, every 10th lost", false, false, {10, 1}, 100, &sa, &sb);
+        CHECK(got.size() >= 85 && got.size() < 100 && gotA.size() >= 85 && gotA.size() < 100);
+        CHECK(sa.resent == 0 && sb.recovered == 0 && sa.recovered == 0);
+        // 12. Through the relay, every 7th lost (the last one too): still all, in order.
+        got = run("relayed, every 7th lost", true, true, {7, 1}, 120, &sa, &sb);
+        CHECK(inOrder(got, 120) && inOrder(gotA, 120));
+        CHECK(sa.sentRelayed > 0);
+        // 13. Every 6th held back 50 ms (its successors overtake it): delivered in order anyway.
+        got = run("every 6th late", false, true, {0, 1, 6, 0}, 150, &sa, &sb);
+        CHECK(inOrder(got, 150) && inOrder(gotA, 150));
+        CHECK(sb.testLate > 0 && sb.skipped == 0);
+        // 14. Every 4th arriving twice: each delivered once.
+        got = run("every 4th doubled", false, true, {0, 1, 0, 4}, 150, &sa, &sb);
+        CHECK(inOrder(got, 150) && inOrder(gotA, 150));
+        CHECK(sb.testDuplicated > 0);
+        // 15. All at once, through the relay: lost, late and doubled.
+        got = run("relayed: lost, late and doubled", true, true, {9, 2, 5, 7}, 150, &sa, &sb);
+        CHECK(inOrder(got, 150) && inOrder(gotA, 150));
+        CHECK(sb.skipped == 0 && sa.skipped == 0);
+    }
+
     // --- 8. MSG_PEEK leaves the datagram queued -----------------------------------------------
     {
         const int s = hle::net::socket(2, 6, 0);

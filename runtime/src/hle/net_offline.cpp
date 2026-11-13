@@ -21,6 +21,7 @@
 #include <ipexport.h>
 #include <icmpapi.h>
 
+#include "core/wait_stats.h"
 #include "hle/kernel_errors.h"
 #include "hle/net_delay.h"
 #include "hle/net_remote.h"
@@ -560,6 +561,8 @@ int PS4_SYSV_ABI sceNetEpollWait(int ep, EpollEvent* events, int maxEvents, int 
                           (timeoutUs < 0 ? std::chrono::duration_cast<std::chrono::microseconds>(kEpollMaxSleep)
                                          : std::min<std::chrono::microseconds>(std::chrono::microseconds(timeoutUs),
                                                                                kEpollMaxSleep));
+    const bool measure = core::waitstats::Enabled();
+    const auto start = std::chrono::steady_clock::now();
     for (;;) {
         int n = 0;
         {
@@ -573,9 +576,22 @@ int PS4_SYSV_ABI sceNetEpollWait(int ep, EpollEvent* events, int maxEvents, int 
             }
         }
         const auto now = std::chrono::steady_clock::now();
-        if (n > 0 || now >= deadline) return n;
-        if (deadline - now > std::chrono::microseconds(1500)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        else std::this_thread::yield();
+        if (n > 0 || now >= deadline) {
+            if (measure && n == 0 && timeoutUs > 0) {
+                using std::chrono::duration_cast;
+                using std::chrono::microseconds;
+                core::waitstats::Note(core::waitstats::kEpollWait, duration_cast<microseconds>(deadline - start).count(),
+                                      duration_cast<microseconds>(now - start).count());
+            }
+            return n;
+        }
+        if (deadline - now > std::chrono::microseconds(1500)) {
+            const auto t0 = measure ? core::waitstats::NowUs() : 0;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if (measure) core::waitstats::Note(core::waitstats::kEpollPoll, 1000, core::waitstats::NowUs() - t0);
+        } else {
+            std::this_thread::yield();
+        }
     }
 }
 
