@@ -230,7 +230,14 @@ std::vector<DlcPack> ListDlc(const fs::path& dlc_dir) {
             out.push_back(std::move(d));
         }
     }
-    std::sort(out.begin(), out.end(), [](const DlcPack& a, const DlcPack& b) { return a.title < b.title; });
+    // Placeholder titles: shown by the pack's label instead.
+    std::map<std::string, int> uses;
+    for (const auto& d : out) ++uses[d.title];
+    for (auto& d : out)
+        if (d.title.size() < 2 || uses[d.title] > 1) d.title = d.label, d.placeholder = true;
+    std::sort(out.begin(), out.end(), [](const DlcPack& a, const DlcPack& b) {
+        return a.placeholder != b.placeholder ? !a.placeholder : a.title < b.title;  // real names first
+    });
     return out;
 }
 

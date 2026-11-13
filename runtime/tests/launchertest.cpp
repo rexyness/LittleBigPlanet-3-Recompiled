@@ -380,13 +380,19 @@ static void TestSfoAndDlc() {
     pack("CUSA00473", "LBPDLCZZZ0001", "Zebra Costume", false);
     pack("CUSA00473", "LBPDLCAAA0001", "Astronaut Costume", true);
     pack("BCUS98148", "PLITTLEBIG000005", "LittleBigPlanet 1 Content", false);
+    // placeholders, as the real license packs have: "1", and one name on several packs
+    pack("CUSA00473", "LBPDLC7ELECO0001", "1", false);
+    pack("CUSA00473", "LBPDLCBTTFLK0001", "Back To The Future\xE2\x84\xA2 Costume Pack 2", false);
+    pack("CUSA00473", "LBPDLCSQEXCK0001", "Back To The Future\xE2\x84\xA2 Costume Pack 2", false);
     fs::create_directories(tmp / "CUSA00473" / "empty_folder");  // no param.sfo: ignored
     const auto packs = ListDlc(tmp);
-    CHECK(packs.size() == 3);
-    if (packs.size() == 3) {
-        CHECK(packs[0].title == "Astronaut Costume" && packs[0].label == "LBPDLCAAA0001" && !packs[0].license_only);
+    CHECK(packs.size() == 6);
+    if (packs.size() == 6) {
+        CHECK(packs[0].title == "Astronaut Costume" && packs[0].label == "LBPDLCAAA0001" && !packs[0].license_only && !packs[0].placeholder);
         CHECK(packs[1].title == "LittleBigPlanet 1 Content" && packs[1].title_id == "BCUS98148");
         CHECK(packs[2].title == "Zebra Costume" && packs[2].license_only);
+        CHECK(packs[3].placeholder && packs[3].title == "LBPDLC7ELECO0001");  // then the placeholders, by label
+        CHECK(packs[4].placeholder && packs[4].title == "LBPDLCBTTFLK0001" && packs[5].title == "LBPDLCSQEXCK0001");
     }
     CHECK(ListDlc(tmp / "nope").empty());
     std::error_code ec;
@@ -806,6 +812,25 @@ static void TestOnlineSwitch() {
     fs::remove_all(tmp, ec);
 }
 
+// Only with LAUNCHERTEST_DUMP=<the folder that holds CUSA00473>: the file check on the real dump
+// (read-only), every line printed. A good dump must have no "X" line.
+static void TestRealDump() {
+    char dir[512];
+    const DWORD n = GetEnvironmentVariableA("LAUNCHERTEST_DUMP", dir, sizeof dir);
+    if (!n || n >= sizeof dir) return;
+    const auto t0 = GetTickCount64();
+    const auto items = CheckDump(dir, nullptr, nullptr);
+    int bad = 0;
+    for (const auto& it : items) {
+        std::printf("  %s %s  %s\n", it.level == DumpItem::Ok ? "OK" : it.level == DumpItem::Warn ? "! " : "X ", it.what.c_str(), it.detail.c_str());
+        bad += it.level == DumpItem::Bad;
+    }
+    std::printf("  (%d lines, %.1f s)\n", static_cast<int>(items.size()), (GetTickCount64() - t0) / 1000.0);
+    CHECK(items.size() > 10 && bad == 0);
+    const auto packs = ListDlc(fs::path(dir) / "CUSA00473-DLC");
+    std::printf("  %d DLC packs; first: %s\n", static_cast<int>(packs.size()), packs.empty() ? "-" : packs[0].title.c_str());
+}
+
 int main() {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     TestAccountAgainstMock();
@@ -825,6 +850,7 @@ int main() {
     TestUpdater();
     TestShell();
     TestOnlineSwitch();
+    TestRealDump();
     std::printf("launchertest: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

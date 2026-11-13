@@ -337,7 +337,8 @@ void LaunchWorker(Settings s, Paths p) {
                 shown_level = "\x01";
             }
             if (rpc.Connected() && current != shown_level) {
-                if (rpc.SetActivity("Playing LittleBigPlanet 3", current, started)) shown_level = current;
+                rpc.SetActivity("Playing LittleBigPlanet 3", current, started);
+                shown_level = current;  // once per change, even if Discord said no (not every 2 s)
             }
             std::lock_guard lock(g_run.m);
             g_run.discord = rpc.Connected() ? "Discord: showing " + (current.empty() ? std::string("the game") : current) : "Discord: " + rpc.why();
@@ -370,6 +371,20 @@ struct PadView {
     Uint64 last_ns = 0;
 };
 
+// The account file (user\config\online_account.txt), read in Refresh every 1.5 s.
+struct AccountView {
+    bool exists = false;
+    AccountFile file;
+};
+AccountView ReadAccountView(const Paths& p) {
+    AccountView v;
+    const fs::path f = AccountFilePath(p);
+    std::error_code ec;
+    v.exists = !f.empty() && fs::exists(f, ec);
+    if (v.exists) v.file = ParseAccountFile(ReadFile(f));
+    return v;
+}
+
 struct App {
     SDL_Window* window = nullptr;
     SDL_Renderer* renderer = nullptr;
@@ -385,6 +400,7 @@ struct App {
     ImVec4 banner_color = kDim;
     int restore_index = -1;
     bool confirm_account = false;
+    AccountView acct;
     Job account_job;
     std::vector<std::string> account_result;
     bool account_ok = false;
@@ -402,7 +418,7 @@ struct App {
     std::mutex file_results_m;
     Job dlc_install;
     std::vector<DlcPack> dlc;
-    double dlc_listed = -100.0;
+    std::atomic<bool> dlc_dirty{true};  // list again (entering the page, after an install)
     char dlc_filter[128] = {};
     Job update_check, update_build;
     UpdateInfo update;
@@ -438,6 +454,16 @@ void Refresh(App& a, bool now = false) {
     a.backups = ListBackups(a.p);
     a.game_running = GameRunning();
     a.marker = TestMarkerSet(a.p);
+    a.acct = ReadAccountView(a.p);
+}
+
+// The settings the game would get: an empty online name or server from the account file
+// (EffectiveOnline, with the file as last read).
+Settings Eff(const App& a) {
+    Settings e = a.s;
+    if (e.online_name.empty()) e.online_name = a.acct.file.name;
+    if (e.online_server.empty()) e.online_server = a.acct.file.server;
+    return e;
 }
 
 bool EssentialsOk(const App& a) {
@@ -528,6 +554,7 @@ void StartDlcInstall(App& a, std::vector<std::string> pkgs) {
                 a.dlc_install.Line("  failed (exit " + std::to_string(r.exit_code) + ") " + r.error);
             }
         }
+        a.dlc_dirty = true;
         a.dlc_install.Finish(failed == 0, std::to_string(ok) + " installed, " + std::to_string(skipped) + " skipped, " + std::to_string(failed) + " failed");
     }).detach();
 }
@@ -671,7 +698,7 @@ void PageHome(App& a) {
     ImGui::Checkbox("on##online", &a.s.online);
     ImGui::SameLine();
     {
-        const Settings eff = EffectiveOnline(a.s, a.p);
+        const Settings eff = Eff(a);
         const std::string srv = NormalizeServer(eff.online_server);
         Dim("%s", !a.s.online ? "(off)" : srv.empty() || !ValidOnlineName(eff.online_name) ? "(set the server and name on the Online page)" : (srv + " as " + eff.online_name).c_str());
     }
@@ -795,20 +822,6 @@ void PageControls(App& a) {
     Dim("Buttons are set in user\\config\\input.ini. The Controllers page shows a pad's buttons and motion live.");
 }
 
-// The account file, read for the Online page (cached: it is read again after a change).
-struct AccountView {
-    bool exists = false;
-    AccountFile file;
-};
-AccountView ReadAccountView(const Paths& p) {
-    AccountView v;
-    const fs::path f = AccountFilePath(p);
-    std::error_code ec;
-    v.exists = !f.empty() && fs::exists(f, ec);
-    if (v.exists) v.file = ParseAccountFile(ReadFile(f));
-    return v;
-}
-
 fs::path AccountTool(const App& a) {
     std::error_code ec;
     for (const fs::path& dir : {a.p.worktree, LauncherDir().parent_path()}) {
@@ -826,8 +839,8 @@ bool IsLbppc(const std::string& server) {
 
 void PageOnline(App& a) {
     Settings& s = a.s;
-    const AccountView acct = ReadAccountView(a.p);
-    const Settings eff = EffectiveOnline(s, a.p);
+    const AccountView& acct = a.acct;
+    const Settings eff = Eff(a);
     const std::string server = NormalizeServer(eff.online_server);
     const bool name_ok = ValidOnlineName(eff.online_name);
 
@@ -940,9 +953,9 @@ void PageOnline(App& a) {
 }
 
 void PageDlc(App& a) {
-    if (ImGui::GetTime() - a.dlc_listed > 5.0 && !a.dlc_install.running) {
+    if (a.dlc_dirty && !a.dlc_install.running) {
         a.dlc = ListDlc(a.p.dlc_dir);
-        a.dlc_listed = ImGui::GetTime();
+        a.dlc_dirty = false;
     }
     Heading("Installed DLC");
     Dim("%s", a.p.dlc_dir.string().c_str());
@@ -981,6 +994,7 @@ void PageDlc(App& a) {
     }
 
     Heading("Packs");
+    Dim("Packs whose own title is a placeholder (\"1\", or one shared name, as most license-only packs have) are listed by their label, dimmed.");
     std::string filter = a.dlc_filter;
     std::transform(filter.begin(), filter.end(), filter.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (ImGui::BeginTable("packs", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY,
@@ -998,7 +1012,8 @@ void PageDlc(App& a) {
             }
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
-            ImGui::TextUnformatted(d.title.c_str());
+            if (d.placeholder) Dim("%s", d.title.c_str());
+            else ImGui::TextUnformatted(d.title.c_str());
             ImGui::TableNextColumn();
             Dim("%s", d.label.c_str());
             ImGui::TableNextColumn();
@@ -1513,7 +1528,7 @@ void Wizard(App& a) {
         ImGui::PushFont(g_bold, 20.f);
         ImGui::TextUnformatted("Online");
         ImGui::PopFont();
-        const AccountView acct = ReadAccountView(a.p);
+        const AccountView& acct = a.acct;
         if (acct.file.ok()) {
             ImGui::TextWrapped("You have an online account: %s%s%s.", acct.file.name.c_str(), acct.file.server.empty() ? "" : " on ",
                                acct.file.server.c_str());
@@ -1648,7 +1663,7 @@ void Header(App& a) {
         if (ImGui::SmallButton("Open the log")) OpenPath(LatestLog(a.p));
     } else if (!a.banner.empty()) ImGui::TextColored(a.banner_color, "%s", a.banner.c_str());
     else {
-        const Settings eff = EffectiveOnline(a.s, a.p);
+        const Settings eff = Eff(a);
         const bool on = eff.online && !NormalizeServer(eff.online_server).empty() && ValidOnlineName(eff.online_name);
         Dim("Ready.  %s", on ? ("Online on " + NormalizeServer(eff.online_server) + " as " + eff.online_name + ".").c_str() : "Offline.");
     }
@@ -1732,6 +1747,7 @@ void Modals(App& a) {
         std::lock_guard lock(a.account_job.m);
         if (a.account_job.done) a.account_job.done = false, account_show = true, a.account_result = a.account_job.lines, a.account_ok = a.account_job.ok, a.account_message = a.account_job.message;
     }
+    if (account_show) Refresh(a, true);  // the new account file
     if (account_show) ImGui::OpenPopup("Accounts"), account_show = false;
     if (ImGui::BeginPopupModal("Accounts", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextColored(a.account_ok ? kGood : kBad, "%s", a.account_message.c_str());
@@ -1745,6 +1761,11 @@ void Modals(App& a) {
 void Frame(App& a) {
     Refresh(a);
     LoadArt(a);
+    static Page last_page = Home;
+    if (a.page != last_page) {
+        if (a.page == Dlc) a.dlc_dirty = true;
+        last_page = a.page;
+    }
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
@@ -1919,7 +1940,7 @@ int main(int argc, char** argv) {
 
     Refresh(a, true);
     a.dlc = ListDlc(a.p.dlc_dir);
-    a.dlc_listed = 0;
+    a.dlc_dirty = false;
     StartStats(a);
     LoadNews(a);
     if (!a.s.setup_done && !shot) a.wizard = true;
@@ -2038,6 +2059,17 @@ int main(int argc, char** argv) {
         if (g_run.state == GameState::Running) g_run.state = GameState::Ended;  // stops its watcher thread
     }
     if (!shot) SaveSettings(a.s);
+    // Background jobs: stop what can be stopped (build.bat, pkg_extractor and git end with their
+    // whole process tree) and give them a moment. They hold this App, so the process ends below
+    // without tearing it down. (Account creation isn't stopped: its tool finishes on its own.)
+    Job* jobs[] = {&a.file_check, &a.dlc_install, &a.update_check, &a.update_build, &a.stats_job, &a.discord_test};
+    for (Job* j : jobs) j->cancel = true;
+    for (int i = 0; i < 100; ++i) {
+        bool busy = false;
+        for (Job* j : jobs) busy |= j->running.load();
+        if (!busy) break;
+        Sleep(30);
+    }
     ClosePads(a);
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
@@ -2048,5 +2080,5 @@ int main(int argc, char** argv) {
     SDL_DestroyWindow(a.window);
     SDL_Quit();
     CoUninitialize();
-    return 0;
+    ExitProcess(0);  // not returning: background threads may still hold the App on this stack
 }

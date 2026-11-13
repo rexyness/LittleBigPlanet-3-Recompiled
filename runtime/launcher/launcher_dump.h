@@ -48,11 +48,14 @@ std::vector<DumpItem> CheckDump(const fs::path& game_dir, const std::function<vo
 
 // An installed DLC pack: <DLC folder>\<title id>\<label>\sce_sys\param.sfo.
 struct DlcPack {
-    std::string title;       // its TITLE, e.g. "Back To The Future Costume Pack 2"
+    std::string title;       // its TITLE, e.g. "Back To The Future Costume Pack 2"; the label when
+                             // the TITLE is a placeholder (see below)
     std::string label;       // the folder (the entitlement label)
     std::string title_id;    // the folder above (CUSA00473, or BCUS98148 for a PS3 pack)
     std::string content_id;
     bool license_only = true;  // nothing but sce_sys inside
+    bool placeholder = false;  // its TITLE was a placeholder: one character, or shared with another
+                               // pack (most license-only packs say "1" or one pack's name)
 };
 std::vector<DlcPack> ListDlc(const fs::path& dlc_dir);
 
