@@ -12,5 +12,8 @@ namespace hle::np {
 void QueueStateNotice(int32_t userId);
 // A user signed out: a notice not yet delivered is dropped. Any thread.
 void DropStateNotice(int32_t userId);
+// Runs at the start of every sceNpCheckCallback, on the game's thread (shadNet's push events and
+// invitations, hle/np_shadnet.cpp). Unset (and nothing extra runs) unless shadNet is on.
+void SetCheckCallbackHook(void (*hook)());
 
 }  // namespace hle::np

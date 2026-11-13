@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -71,6 +72,7 @@ struct State {
     std::function<void(Status)> listener;
     std::chrono::steady_clock::time_point started{};
     bool stopping = false;
+    std::deque<PushEvent> pushes;
 };
 
 State& S() {
@@ -168,6 +170,14 @@ Config ParseConfig(const std::function<const char*(const char*)>& getenv, const 
     c.password = env("LBP3_SHADNET_PASSWORD");
     if (c.password.empty()) c.password = filePassword;
 
+    // The Web API: LBPPC's behind its HTTPS proxy, any other server's on shadNet's own port.
+    const std::string webApi = env("LBP3_SHADNET_WEBAPI");
+    if (Lower(webApi) == "local" || Lower(webApi) == "off") c.webApi.clear();
+    else if (!webApi.empty()) c.webApi = webApi;
+    else if (c.host == "shadnet.lbppc.com" || c.host == "play.lbppc.com") c.webApi = "https://api.lbppc.com";
+    else if (!c.host.empty()) c.webApi = "http://" + c.host + ":31315";
+    while (!c.webApi.empty() && c.webApi.back() == '/') c.webApi.pop_back();
+
     if (c.host.empty() || c.port == 0) c.why = "LBP3_SHADNET_SERVER is not set to a server (\"host:port\", \"tls://host:port\" or \"play.lbppc.com\")";
     else if (!ValidName(c.name)) c.why = "no valid online name (LBP3_SHADNET_NAME / LBP3_ONLINE_NAME / user\\config\\online_account.txt; 3-16 letters, digits, - or _)";
     else if (c.password.empty()) c.why = "no password (LBP3_SHADNET_PASSWORD or user\\config\\online_account.txt)";
@@ -204,6 +214,7 @@ void Start(const Config& config) {
     S().config = config;
     S().status = Status::Connecting;
     S().friends.clear();
+    S().pushes.clear();
     S().stopping = false;
     S().started = std::chrono::steady_clock::now();
     // The client's own Info lines ("TCP connected", "Logged in ...") are worth seeing here.
@@ -250,6 +261,23 @@ void Start(const Config& config) {
         SetStatus(Status::Failed, "the server rejected this client (reason " + std::to_string(n.reason) +
                                       ", version \"" + n.version + "\"): " + n.message);
     };
+    client->onWebApiPushEvent = [](const ShadNet::NotifyWebApiPushEvent& n) {
+        PushEvent e;
+        e.service = n.npServiceName;
+        e.label = n.npServiceLabel;
+        e.dataType = n.dataType;
+        e.data = n.data;
+        e.from = n.fromNpid;
+        e.to = n.toNpid;
+        e.extd = n.extdData;
+        e.fromAccount = n.fromAccountId;
+        e.toAccount = n.toAccountId;
+        std::fprintf(stderr, "[shadnet] push event: service \"%s\", type \"%s\", from \"%s\", %zu bytes\n",
+                     e.service.c_str(), e.dataType.c_str(), e.from.c_str(), e.data.size());
+        std::lock_guard l(S().mutex);
+        if (S().pushes.size() >= 256) S().pushes.pop_front();
+        S().pushes.push_back(std::move(e));
+    };
     client->onServiceUnavailable = [](const ShadNet::NotifyServiceUnavailable& n) {
         std::fprintf(stderr, "[shadnet] server refused service %u (reason %u)\n", n.service, n.reason);
     };
@@ -291,6 +319,7 @@ void Stop() {
         watcher = std::move(S().watcher);
         S().status = Status::Off;
         S().friends.clear();
+        S().pushes.clear();
     }
     S().cv.notify_all();
     if (client) client->Stop();
@@ -334,6 +363,23 @@ double SecondsSinceStart() {
     std::lock_guard lock(S().mutex);
     if (!S().client) return -1.0;
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - S().started).count();
+}
+
+std::string WebApiBase() {
+    std::lock_guard lock(S().mutex);
+    return S().client ? S().config.webApi : std::string();
+}
+
+std::string BearerToken() {
+    std::lock_guard lock(S().mutex);
+    return S().client ? S().client->GetBearerToken() : std::string();
+}
+
+std::vector<PushEvent> TakePushEvents() {
+    std::lock_guard lock(S().mutex);
+    std::vector<PushEvent> out(std::make_move_iterator(S().pushes.begin()), std::make_move_iterator(S().pushes.end()));
+    S().pushes.clear();
+    return out;
 }
 
 }  // namespace net::shadnet

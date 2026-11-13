@@ -70,6 +70,7 @@ add_library(hle STATIC
     src/hle/np_offline.cpp
     src/hle/np_shadnet.cpp
     src/net/shadnet_service.cpp
+    src/net/web_request.cpp
     src/hle/playgo.cpp
     src/hle/pm4.cpp
     src/hle/rtc.cpp

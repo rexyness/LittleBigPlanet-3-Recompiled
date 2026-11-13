@@ -92,7 +92,12 @@ int PS4_SYSV_ABI sceNpUnregisterStateCallback() {
 // is registered, co-op guests as they sign in (hle/users.h). LBP3's connect flow waits for
 // it before deciding to carry on offline. Offline it's "signed out" with no NpId; nothing
 // changes after that.
+std::atomic<void (*)()> g_checkCallbackHook{nullptr};
+
+void SetCheckCallbackHook(void (*hook)()) { g_checkCallbackHook.store(hook); }
+
 int PS4_SYSV_ABI sceNpCheckCallback() {
+    if (void (*hook)() = g_checkCallbackHook.load(std::memory_order_relaxed)) hook();
     for (;;) {
         StateCallback cb = nullptr;
         void* userdata = nullptr;

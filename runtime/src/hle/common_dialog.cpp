@@ -557,8 +557,28 @@ int32_t OpenProgressBar(const SaveDataDialogParam& p, Spec& s, std::function<voi
 // ---------------------------------------------------------------- GameCustomDataDialog
 
 std::atomic<int32_t> g_customStatus{kStatusNone};
+// shadNet's invitation prompt behind mode 2 (common_dialog.h). The rest is guarded by g_customMutex.
+std::atomic<const GameCustomDataHook*> g_customHook{nullptr};
+std::mutex g_customMutex;
+std::shared_ptr<dialog_ui::Window> g_customWindow;
+int32_t g_customResult = kResultUserCanceled;
+bool g_customModal = false;
+
+// Lock held: the prompt was answered (join) or closed (no answer: not joined).
+void FinishCustom(bool join) {
+    if (const GameCustomDataHook* hook = g_customHook.load()) hook->answer(join);
+    g_customResult = join ? kResultOk : kResultUserCanceled;
+    g_customWindow.reset();
+    if (g_customModal) {
+        modal::End();
+        g_customModal = false;
+    }
+    g_customStatus.store(kStatusFinished);
+}
 
 }  // namespace
+
+void SetGameCustomDataHook(const GameCustomDataHook* hook) { g_customHook.store(hook); }
 
 // ================================================================ libSceCommonDialog
 
@@ -736,7 +756,9 @@ int32_t PS4_SYSV_ABI sceSaveDataDialogProgressBarInc(int32_t target, uint32_t de
 // LBP3 opens it from sceNpBasicWrapper_Orbis to send or view PSN invitations, then
 // polls it every frame and calls back with the result; a dialog that never finished
 // would leave that send pending for good. Nothing can be sent offline, so it finishes
-// at once as cancelled.
+// at once as cancelled. With shadNet on, mode 2 with an invitation received asks the
+// player whether to join it (common_dialog.h GameCustomDataHook); sending (mode 1) still
+// finishes as cancelled.
 
 int32_t PS4_SYSV_ABI sceGameCustomDataDialogInitialize() {
     int32_t expected = kStatusNone;
@@ -749,26 +771,70 @@ int32_t PS4_SYSV_ABI sceGameCustomDataDialogOpen(const void* param) {
     const int32_t status = g_customStatus.load();
     if (status == kStatusNone) return kErrorNotInitialized;
     if (status == kStatusRunning) return kErrorBusy;
+    std::lock_guard lock(g_customMutex);
+    g_customResult = kResultUserCanceled;
+    if (const GameCustomDataHook* hook = g_customHook.load()) {
+        int32_t mode = 0;
+        std::memcpy(&mode, static_cast<const uint8_t*>(param) + kGameCustomDataModeOffset, sizeof(mode));
+        hook->opened(mode, param);
+        const std::wstring question = mode == 2 ? hook->invitationText() : std::wstring();
+        if (!question.empty()) {
+            Spec s;
+            s.text = question;
+            s.icon = Icon::Question;
+            s.button1 = L"Join";
+            s.button2 = L"Not now";
+            s.defaultButton = 1;
+            s.cancelButton = 2;
+            s.autoAnswer = 2;  // scripted runs never join
+            s.logName = "customdata";
+            std::fprintf(stderr, "[dialog] game custom data: an invitation: %s\n", Brief(question).c_str());
+            g_customWindow = dialog_ui::Show(std::move(s));
+            modal::Begin("customdata");
+            g_customModal = true;
+            g_customStatus.store(kStatusRunning);
+            return kOk;
+        }
+    }
     std::fprintf(stderr, "[dialog] game custom data (PSN invitations) needs PlayStation Network: closed as cancelled\n");
     g_customStatus.store(kStatusFinished);
     return kOk;
 }
 
-int32_t PS4_SYSV_ABI sceGameCustomDataDialogUpdateStatus() { return g_customStatus.load(); }
+int32_t PS4_SYSV_ABI sceGameCustomDataDialogUpdateStatus() {
+    if (g_customStatus.load() != kStatusRunning) return g_customStatus.load();
+    std::lock_guard lock(g_customMutex);
+    Outcome o;
+    if (g_customStatus.load() == kStatusRunning && g_customWindow && dialog_ui::Poll(*g_customWindow, o))
+        FinishCustom(o.button == 1);
+    return g_customStatus.load();
+}
 
 int32_t PS4_SYSV_ABI sceGameCustomDataDialogGetResult(void* result) {
     if (g_customStatus.load() != kStatusFinished) return kErrorNotFinished;
     if (!result) return kErrorArgNull;
     // As the firmware does: the common result at +0x08, the dialog's own at +0x0C (the one
     // LBP3 reads), and the common result as the return value.
-    const int32_t cancelled = kResultUserCanceled;
-    std::memcpy(static_cast<uint8_t*>(result) + 0x08, &cancelled, sizeof(cancelled));
-    std::memcpy(static_cast<uint8_t*>(result) + kGameCustomDataResultOffset, &cancelled, sizeof(cancelled));
-    return cancelled;
+    int32_t answer;
+    {
+        std::lock_guard lock(g_customMutex);
+        answer = g_customResult;
+    }
+    std::memcpy(static_cast<uint8_t*>(result) + 0x08, &answer, sizeof(answer));
+    std::memcpy(static_cast<uint8_t*>(result) + kGameCustomDataResultOffset, &answer, sizeof(answer));
+    return answer;
 }
 
 int32_t PS4_SYSV_ABI sceGameCustomDataDialogClose() {
-    return g_customStatus.load() == kStatusRunning ? (g_customStatus.store(kStatusFinished), kOk) : kErrorNotRunning;
+    if (g_customStatus.load() != kStatusRunning) return kErrorNotRunning;
+    std::lock_guard lock(g_customMutex);
+    if (g_customWindow) {
+        dialog_ui::Close(*g_customWindow);
+        FinishCustom(false);
+    } else {
+        g_customStatus.store(kStatusFinished);
+    }
+    return kOk;
 }
 
 int32_t PS4_SYSV_ABI sceGameCustomDataDialogTerminate() {

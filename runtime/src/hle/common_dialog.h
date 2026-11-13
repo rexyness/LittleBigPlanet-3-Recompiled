@@ -4,6 +4,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 #include "hle/abi.h"
 
@@ -235,6 +236,19 @@ int32_t PS4_SYSV_ABI sceGameCustomDataDialogClose();
 int32_t PS4_SYSV_ABI sceGameCustomDataDialogTerminate();
 // LBP3 reads the result at +0x0C (sceNpBasicWrapper_Orbis, eboot.bin+0xaddfea): 1 = cancelled.
 constexpr size_t kGameCustomDataResultOffset = 0x0C;
+// The param's mode (after the base param and its own size): 1 = send, 2 = a received one (LBP3 opens
+// it from its own invitation prompt).
+constexpr size_t kGameCustomDataModeOffset = 0x34;
+
+// shadNet (hle/np_shadnet.cpp) puts an invitation it received behind mode 2: the dialog asks whether
+// to join it, and a "Join" answers the dialog with success. Unset (the dialog finishes as cancelled,
+// as offline) unless shadNet is on. The functions run on the game's threads.
+struct GameCustomDataHook {
+    std::wstring (*invitationText)();  // the newest invitation not yet answered, as the question; "" = none
+    void (*answer)(bool join);         // the player's answer to that invitation
+    void (*opened)(int32_t mode, const void* param);  // every Open (for the log)
+};
+void SetGameCustomDataHook(const GameCustomDataHook* hook);
 
 // What RegisterDialogs registers, so tests can check the names against the game's imports.
 struct Export {
