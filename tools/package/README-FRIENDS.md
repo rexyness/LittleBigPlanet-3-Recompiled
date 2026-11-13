@@ -1,0 +1,59 @@
+# LittleBigPlanet 3 Recompiled: getting started
+
+This runs **your own copy** of LittleBigPlanet 3 (PS4) natively on Windows. Nothing from the game comes in
+this download: you bring the game, and your DLC if you have any.
+
+## What you need
+
+- **Windows 10 (version 1903 or later) or Windows 11, 64-bit.**
+- **A graphics card with Vulkan 1.3** and a current driver. Tested on an NVIDIA RTX 3090; other cards
+  should work but haven't been tested.
+- **Your own LittleBigPlanet 3, US edition (CUSA00473), updated to version 01.28**, extracted to a folder: the
+  base game with the 01.28 patch merged in. It's the folder with `eboot.bin` and `sce_sys\`. Name the folder
+  `CUSA00473`, inside a parent folder of your choice (for example `D:\Games\PS4\CUSA00473`).
+- **Optional, your DLC:** your own DLC `.pkg` files and a PS4 pkg extractor (the launcher's DLC page runs the
+  extractor you point it at). Installed DLC goes in a `CUSA00473-DLC` folder next to `CUSA00473`.
+- About 2 GB of free space for settings, saves and the shader cache (more as you play).
+
+## First start
+
+1. Unzip this folder anywhere you can write to (not `Program Files`), for example `D:\Games\LBP3-Recompiled`.
+2. Run **LBP3Launcher.exe**. The setup opens on the first start:
+   - **Game files:** pick the folder that CONTAINS `CUSA00473` (the parent folder). The launcher checks it.
+   - **DLC:** optional; see above.
+   - **Online:** optional; see below.
+3. Press **PLAY**.
+
+The first time you visit each part of the game it can pause for a second or two while your graphics driver
+builds shaders. That happens once; they're kept in `user\shader_cache` for next time. The very first start
+after a reboot can also take 20-40 seconds while Windows reads that cache.
+
+## Playing online (optional)
+
+Online play uses the community servers at **play.lbppc.com** (made by the LBPPC project; Sony's servers are
+gone). You need your own account there: on the launcher's **Online** page, type an online name and press
+**Create account**, then switch **Online** on. Your password stays in `user\config\online_account.txt` on your
+PC. Community levels, Dive In and your friends list work; joining friends' games online is still being built.
+
+If the game says *"A problem occurred when attempting to connect to the LittleBigPlanet servers (403)"*, the
+sign-in failed, usually because of a wrong password in that file.
+
+## Controls
+
+A DualSense or DualShock 4 is best (touchpad and motion work); any controller SDL supports works. Up to four
+controllers for local co-op. **Insert** on the keyboard, or **L3+R3** on the pad, opens the port's own menu
+(frame rate, frame generation, volume, quit).
+
+## Where things are
+
+- `user\` - your settings, saves (`user\savedata\`) and shader cache. Back it up to keep your progress.
+- `analysis\` - logs (`play_launcher_log.txt`) and save backups. The launcher's **Help** page can zip the
+  logs for a bug report (no saves, no passwords).
+
+## Known issues
+
+- Brightness in some scenes is higher than on a PS4.
+- Online: joining or inviting friends into a game isn't done yet.
+- The first-visit shader pauses described above.
+
+See CREDITS.md for who made what, and SOURCE.md for the source code.

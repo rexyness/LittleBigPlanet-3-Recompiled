@@ -170,6 +170,10 @@ fs::path MainCheckoutFromGitFile(const std::string& text) {
 
 fs::path FindRoot(const fs::path& launcher_dir, const std::string& setting) {
     if (!setting.empty()) return fs::path(setting);
+    std::error_code pec;
+    // The portable package (tools/make_package.ps1): everything sits in the launcher's own folder, marked by
+    // portable.txt; user\, analysis\ and game_dir.txt are made there on first use.
+    if (fs::exists(launcher_dir / "portable.txt", pec)) return launcher_dir;
     const fs::path parent = launcher_dir.parent_path();
     if (IsGameRoot(parent)) return parent;
     std::error_code ec;

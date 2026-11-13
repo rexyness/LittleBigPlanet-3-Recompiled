@@ -92,12 +92,19 @@ static bool LoadTrustedRoots(SSL_CTX* ctx) {
     bool loaded = false;
 #ifdef _WIN32
     X509_STORE* store = SSL_CTX_get_cert_store(ctx);
+    FILETIME now{};
+    GetSystemTimeAsFileTime(&now);
     for (const wchar_t* name : {L"ROOT", L"CA"}) {
         HCERTSTORE system = CertOpenSystemStoreW(0, name);
         if (!system)
             continue;
         PCCERT_CONTEXT cert = nullptr;
         while ((cert = CertEnumCertificatesInStore(system, cert)) != nullptr) {
+            // lbp3: skip certificates that have expired. Some PCs keep the expired cross-signed "ISRG Root X2"
+            // (2025-09-15) in their CA store; if OpenSSL builds the chain through it, every connection to a
+            // Let's Encrypt server fails with "certificate has expired" (LBPPC 0.1.2's hotfix, same cause).
+            if (CompareFileTime(&cert->pCertInfo->NotAfter, &now) < 0)
+                continue;
             const unsigned char* data = cert->pbCertEncoded;
             if (X509* x509 = d2i_X509(nullptr, &data, cert->cbCertEncoded)) {
                 loaded |= X509_STORE_add_cert(store, x509) == 1;
