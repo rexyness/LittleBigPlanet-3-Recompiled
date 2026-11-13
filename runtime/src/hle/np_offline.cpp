@@ -20,6 +20,7 @@
 #include "hle/register.h"
 #include "hle/online.h"
 #include "hle/users.h"
+#include "net/shadnet_service.h"
 
 namespace hle::np {
 namespace {
@@ -49,6 +50,11 @@ int SignedOut(const char* fn) {
 
 }  // namespace
 
+// shadNet (LBP3_SHADNET=1, net/shadnet_service.h): signed in once its login has succeeded.
+bool ShadNetSignedIn() {
+    return net::shadnet::Settings().enabled && net::shadnet::GetStatus() == net::shadnet::Status::SignedIn;
+}
+
 int PS4_SYSV_ABI sceNpGetState(int32_t userId, int32_t* state) {
     (void)userId;
     if (!state) return kErrorInvalidArgument;
@@ -59,7 +65,7 @@ int PS4_SYSV_ABI sceNpGetState(int32_t userId, int32_t* state) {
         const char* v = std::getenv("LBP3_NP_STATE");
         return (v && std::strcmp(v, "signedin") == 0) || online::Enabled();
     }();
-    *state = signedIn ? kSignedIn : kSignedOut;
+    *state = signedIn || ShadNetSignedIn() ? kSignedIn : kSignedOut;
     return kernel::SCE_OK;
 }
 
@@ -94,6 +100,12 @@ int PS4_SYSV_ABI sceNpCheckCallback() {
         {
             std::lock_guard lk(g_mutex);
             if (g_pendingUsers.empty() || !g_stateCallback) return kernel::SCE_OK;
+            // shadNet: user 1's state waits for the login's answer (up to 20 s), so the game's
+            // connect flow sees the final state; a later sign-in queues a new notice (np_shadnet.cpp).
+            if (g_pendingUsers.front() == 1 && net::shadnet::Settings().enabled &&
+                net::shadnet::GetStatus() == net::shadnet::Status::Connecting &&
+                net::shadnet::SecondsSinceStart() < 20.0)
+                return kernel::SCE_OK;
             user = g_pendingUsers.front();
             g_pendingUsers.pop_front();
             cb = g_stateCallback;
@@ -129,6 +141,7 @@ struct NpId { OnlineId handle; uint8_t opt[8]; uint8_t reserved[8]; };
 const std::string& PlayerName() {
     static const std::string name = [] {
         if (online::Enabled()) return online::Name();  // the account on the community server
+        if (net::shadnet::Settings().enabled) return net::shadnet::Settings().name;  // shadNet account
         std::string n;
         if (const char* env = std::getenv("LBP3_PLAYER_NAME")) n = env;
         if (n.empty()) {
@@ -321,7 +334,7 @@ constexpr int32_t kStateDisconnected = 0;
 bool LanUp() {
     static const bool up = [] {
         const char* v = std::getenv("LBP3_NET");
-        return (v && std::strcmp(v, "online") == 0) || online::Enabled();
+        return (v && std::strcmp(v, "online") == 0) || online::Enabled() || net::shadnet::Settings().enabled;
     }();
     return up;
 }
