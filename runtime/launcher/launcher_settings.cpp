@@ -80,6 +80,7 @@ std::string ToIni(const Settings& s) {
       << "[game]\n"
       << "skip_intro=" << b(s.skip_intro) << "\n"
       << "framegen=" << b(s.framegen) << "\n"
+      << "; render size: 1280x720, 1920x1080, 2560x1440, 3840x2160, 2560x1080, 3440x1440, 3840x1600, 3840x1080, 4480x1260\n"
       << "res=" << s.res << "\n"
       << "my_unlocks=" << b(s.my_unlocks) << "\n"
       << "bloom_1440=" << b(s.bloom_1440) << "\n"
@@ -165,7 +166,7 @@ Settings FromIni(const std::string& text) {
             if (key == "skip_intro") ParseBool(v, s.skip_intro);
             else if (key == "framegen") ParseBool(v, s.framegen);
             else if (key == "res") {
-                if (ParseInt(v, 0, 10000, n) && (n == 1440 || n == 1080)) s.res = n;
+                if (const std::string r = CanonicalRes(v); !r.empty()) s.res = r;
             } else if (key == "my_unlocks") ParseBool(v, s.my_unlocks);
             else if (key == "bloom_1440") ParseBool(v, s.bloom_1440);
             else if (key == "fg_text") ParseBool(v, s.fg_text);
@@ -260,8 +261,8 @@ LaunchPlan MapSettings(const Settings& s) {
         set("LBP3_FRAMEGEN", "1");
         set("LBP3_FRAMEGEN_MODE", "warp");
     }
-    if (s.res == 1440) {
-        set("LBP3_RES", "1440");
+    if (const std::string r = CanonicalRes(s.res); !r.empty() && r != "1920x1080") {
+        set("LBP3_RES", r == "2560x1440" ? "1440" : r);  // "1440": the original switch, the same size
         set("LBP3_RES_SHADERS", "1");
         if (!s.bloom_1440) set("LBP3_RES_SKIP", "bloom");
     }
@@ -332,6 +333,30 @@ std::string NormalizeServer(const std::string& typed) {
         scheme = local ? "http" : "https";
     }
     return scheme + "://" + rest;
+}
+
+const std::vector<Resolution>& Resolutions() {
+    static const std::vector<Resolution> list = {
+        {"1280x720", "1280 x 720 (lighter on the GPU)"},
+        {"1920x1080", "1920 x 1080 (the PS4's own)"},
+        {"2560x1440", "2560 x 1440"},
+        {"3840x2160", "3840 x 2160 (4K)"},
+        {"2560x1080", "2560 x 1080 (21:9)"},
+        {"3440x1440", "3440 x 1440 (21:9)"},
+        {"3840x1600", "3840 x 1600 (21:9)"},
+        {"3840x1080", "3840 x 1080 (32:9)"},
+        {"4480x1260", "4480 x 1260 (32:9)"},
+    };
+    return list;
+}
+
+std::string CanonicalRes(const std::string& v) {
+    const std::string l = Lower(v);
+    if (l == "1440") return "2560x1440";
+    if (l == "1080") return "1920x1080";
+    for (const Resolution& r : Resolutions())
+        if (l == r.value) return r.value;
+    return {};
 }
 
 const std::vector<Language>& Languages() {

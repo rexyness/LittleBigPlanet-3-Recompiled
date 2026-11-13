@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "common/elf_info.h"
+#include "common/lbp3_res.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/gnmdriver/gnm_error.h"
 #include "core/libraries/gnmdriver/gnmdriver_init.h"
@@ -614,11 +615,11 @@ namespace fg {
 namespace {
 
 constexpr uint32_t kVelocityClear = 0x007f7f00u;
-// One image, 4 bytes/texel: room for 1920x1088, or 2560x1440 when the game renders at 1440p
-// (LBP3_RES=1440, core/patches.cpp); a bigger image is skipped, never overflowed.
+// One image, 4 bytes/texel: room for 1920x1088, or the render size when the game renders at
+// another one (LBP3_RES, core/res_patches.cpp); a bigger image is skipped, never overflowed.
 const vk::DeviceSize kSlot = [] {
-    const char* res = std::getenv("LBP3_RES");
-    return res && std::strcmp(res, "1440") == 0 ? vk::DeviceSize{2560} * 1440 * 4 : vk::DeviceSize{1920} * 1088 * 4;
+    const Lbp3Res::Size s = Lbp3Res::Current();
+    return s == Lbp3Res::kNative ? vk::DeviceSize{1920} * 1088 * 4 : vk::DeviceSize{s.w} * s.h * 4;
 }();
 enum Slot { kHudless = 0, kFinal = 1, kVelocity = 2, kDepth = 3, kSlots = 4 };
 
@@ -868,7 +869,7 @@ void Init() {
         ++g_track.draws;
         const auto& db = regs.depth_buffer;
         if (rt0 && rt0 != g_track.velAddr && db.DepthValid() && regs.depth_control.depth_enable &&
-            db.Pitch() >= 1920 && db.Height() >= 1080)
+            db.Pitch() >= Lbp3Res::Current().w && db.Height() >= Lbp3Res::Current().h)
             ++g_track.zCount[db.DepthAddress()];
         if (!IsDisplay(rt0)) return;
         ++g_track.displayDraws;
@@ -892,7 +893,7 @@ void Init() {
     Vulkan::g_lbp3FgOnFill = [](uint64_t dst, uint64_t bytes, uint32_t value, uint32_t mask, bool full) {
         (void)mask;
         (void)full;
-        if (value == kVelocityClear && bytes >= uint64_t{1920} * 1080 * 4) {
+        if (value == kVelocityClear && bytes >= uint64_t{Lbp3Res::Current().w} * Lbp3Res::Current().h * 4) {
             // The game clears the velocity target after its motion blur has used it (Needlepoint
             // trace: velocity pass, motion blur, then this fill before the composite), so the
             // frame's vectors are copied just before the clear.

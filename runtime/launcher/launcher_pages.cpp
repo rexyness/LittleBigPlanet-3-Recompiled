@@ -449,6 +449,21 @@ void SyncPads(App& a) {
 
 namespace {
 
+// The render size dropdown (Resolutions(), LBP3_RES).
+void ResolutionCombo(const char* id, std::string& res, float width) {
+    const auto& list = Resolutions();
+    const std::string cur = CanonicalRes(res);
+    const char* shown = cur.empty() ? res.c_str() : cur.c_str();
+    for (const Resolution& r : list)
+        if (cur == r.value) shown = r.name;
+    ImGui::SetNextItemWidth(width);
+    if (ImGui::BeginCombo(id, shown)) {
+        for (const Resolution& r : list)
+            if (ImGui::Selectable(r.name, cur == r.value)) res = r.value;
+        ImGui::EndCombo();
+    }
+}
+
 void StatCard(const char* id, Icon icon, const char* title, const std::string& value, const std::string& sub, float w) {
     if (BeginCard(id, ImVec2(w, S(118)))) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -500,12 +515,9 @@ void PageHome(App& a) {
     const float half = (w - S(12)) * 0.5f;
     if (BeginCard("quick", ImVec2(half, S(236)))) {
         Heading("Quick settings");
-        int r = a.s.res == 1080 ? 1 : 0;
         ImGui::TextUnformatted("Resolution");
         ImGui::SameLine(S(170));
-        if (ImGui::RadioButton("1440p", &r, 0)) a.s.res = 1440;
-        ImGui::SameLine();
-        if (ImGui::RadioButton("1080p", &r, 1)) a.s.res = 1080;
+        ResolutionCombo("##quickres", a.s.res, S(220));
         Toggle("60 frames a second on screen", &a.s.framegen, "Frame generation: a generated frame between each pair of real ones.");
         Toggle("Play online", &a.s.online, "Signs in to the community server with your active account (Online page).");
         Toggle("Skip the logos", &a.s.skip_intro, nullptr);
@@ -637,11 +649,13 @@ void PageGraphics(App& a) {
     PageTitle("Graphics & sound", "Resolution, frame generation, the display and window, volume.");
     if (BeginCard("res", ImVec2(0, 0), false)) {
         Heading("Picture");
-        int r = s.res == 1080 ? 1 : 0;
-        if (ImGui::RadioButton("2560x1440 (sharper; the game draws at 1440p)", &r, 0)) s.res = 1440;
-        if (ImGui::RadioButton("1920x1080 (the PS4's own, stretched to the window)", &r, 1)) s.res = 1080;
-        ImGui::BeginDisabled(s.res != 1440);
-        Toggle("Finer glow at 1440p", &s.bloom_1440, "The glow (bloom) is drawn at the higher resolution too.");
+        ImGui::TextUnformatted("Resolution");
+        ImGui::SameLine(S(120));
+        ResolutionCombo("##res", s.res, S(320));
+        Help("The size the game draws at. Above 1080p it's sharper and costs more GPU time; a size wider than "
+             "16:9 widens the view, and shows with black bars on a 16:9 screen. Takes effect when the game starts.");
+        ImGui::BeginDisabled(CanonicalRes(s.res) == "1920x1080" || CanonicalRes(s.res) == "1280x720");
+        Toggle("Finer glow above 1080p", &s.bloom_1440, "The glow (bloom) is drawn at the higher resolution too.");
         ImGui::EndDisabled();
         Toggle("60 frames a second on screen (the game itself stays at 30)", &s.framegen, "A generated frame between each pair of real ones. About 17 ms more input lag.");
         ImGui::BeginDisabled(!s.framegen);

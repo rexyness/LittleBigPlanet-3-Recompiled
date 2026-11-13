@@ -9,7 +9,9 @@ rem Frame generation: a generated frame between each pair of real ones, so 60 on
 rem while the game itself still runs at 30 (about +17 ms input lag): 1 = on, 0 = off.
 set FRAMEGEN=1
 rem Render resolution: 1440 = the game draws at 2560x1440 (patched; the PS4 version draws
-rem 1920x1080), 1080 = the original 1920x1080, stretched to the window.
+rem 1920x1080), 1080 = the original 1920x1080, stretched to the window. Or one of these sizes
+rem (LBPPC's list): 1280x720, 3840x2160 (4K), 2560x1080, 3440x1440 or 3840x1600 (21:9),
+rem 3840x1080 or 4480x1260 (32:9). Wider than 16:9 widens the view (black bars on a 16:9 screen).
 set RES=1440
 rem LBP1/LBP2 items (the old "My Unlocks", whose servers are gone): 1 = run the game's own
 rem import once, the first time the start menu opens; wait for "successfully imported",
@@ -50,8 +52,8 @@ if "%FRAMEGEN%"=="1" (
     set LBP3_FRAMEGEN=1
     set LBP3_FRAMEGEN_MODE=warp
 )
-if "%RES%"=="1440" (
-    set LBP3_RES=1440
+if not "%RES%"=="1080" if not "%RES%"=="" (
+    set LBP3_RES=%RES%
     set LBP3_RES_SHADERS=1
 )
 if "%MY_UNLOCKS%"=="1" set LBP3_MY_UNLOCKS=lbp1,lbp2

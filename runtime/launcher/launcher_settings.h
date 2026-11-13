@@ -35,7 +35,7 @@ struct Settings {
     // play.bat's own switches
     bool skip_intro = true;
     bool framegen = true;
-    int res = 1440;            // 1440 or 1080
+    std::string res = "2560x1440";  // WxH, one of Resolutions() (older files: res=1440 or 1080)
     bool my_unlocks = false;
     // play_best.bat's
     bool bloom_1440 = true;
@@ -119,6 +119,17 @@ bool ValidOnlineName(const std::string& name);
 // on this PC "127.0.0.1:10061") as the URL the game and the account calls use: a bare host gets
 // https://, a local or host:port address http://. Empty when it isn't an address.
 std::string NormalizeServer(const std::string& typed);
+
+// The render sizes offered (LBP3_RES), LBPPC's list: 16:9 from 720p to 4K, 21:9 and 32:9. The game
+// draws at that size; a size wider than the window's aspect is shown with black bars.
+struct Resolution {
+    const char* value;  // "WxH"
+    const char* name;
+};
+const std::vector<Resolution>& Resolutions();
+// A launcher.ini res value as one of Resolutions()' values: "1440" -> "2560x1440", "1080" ->
+// "1920x1080" (the older files), "WxH" when it's in the list; empty otherwise.
+std::string CanonicalRes(const std::string& v);
 
 // The language codes the game knows (LBP3_LANGUAGE), with their names, for the dropdown.
 struct Language {

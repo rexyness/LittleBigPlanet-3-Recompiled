@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 
+#include "common/lbp3_res.h"
 #include "gpu/fg_gpu.h"
 #include "gpu/fg_offline.h"
 #include "sdl_window.h"
@@ -125,7 +126,8 @@ void AfterDraw(uint64_t vs, uint64_t ps, uint32_t n) {
 void OnFill(uint64_t dst, uint64_t bytes, uint32_t value, uint32_t mask, bool full) {
     (void)mask;
     (void)full;
-    if (value != kVelocityClear || g_frame.vel || bytes < uint64_t{1920} * 1080 * 4) return;
+    // The velocity target is screen-sized: 1920x1080, or the render size (LBP3_RES).
+    if (value != kVelocityClear || g_frame.vel || bytes < uint64_t{Lbp3Res::Current().w} * Lbp3Res::Current().h * 4) return;
     // The game clears its velocity target after the motion blur used it: copy it just before.
     if (VideoCore::Image* image = FindTarget(dst)) g_frame.vel = CopyInto(*image, g_gen ? g_gen->VelBuffer() : nullptr);
 }

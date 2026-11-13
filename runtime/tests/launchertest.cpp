@@ -76,7 +76,7 @@ static void TestIni() {
     a.minimize_while_playing = false;
     a.skip_intro = false;
     a.framegen = false;
-    a.res = 1080;
+    a.res = "1920x1080";
     a.my_unlocks = true;
     a.bloom_1440 = false;
     a.fg_text = false;
@@ -95,13 +95,13 @@ static void TestIni() {
     a.online_name = "Sack_boy-1";
     const Settings b = FromIni(ToIni(a));
     CHECK(ToIni(a) == ToIni(b));
-    CHECK(b.build == Build::Best && b.cache == CacheChoice::Shared && b.res == 1080 && b.pipeline_threads == 4);
+    CHECK(b.build == Build::Best && b.cache == CacheChoice::Shared && b.res == "1920x1080" && b.pipeline_threads == 4);
     CHECK(b.language == "pt-br" && b.online_name == "Sack_boy-1" && b.game_root == a.game_root);
     // defaults survive an empty or broken file
     const Settings d = FromIni("");
     CHECK(ToIni(d) == ToIni(Settings{}));
     const Settings e = FromIni("[game]\nres=999\nframegen=maybe\nstatus_flips=-3\n[launcher]\nbuild=weird\nnot a line\n");
-    CHECK(e.res == 1440 && e.framegen && e.status_flips == 30 && e.build == Build::This);
+    CHECK(e.res == "2560x1440" && e.framegen && e.status_flips == 30 && e.build == Build::This);
     // values with line breaks are flattened on write
     Settings f;
     f.online_name = "a\nb";
@@ -149,10 +149,33 @@ static void TestMapping() {
     CHECK(MapSettings(s).args.size() == 1);
     // 1080: no resolution variables at all, bloom irrelevant
     Settings r;
-    r.res = 1080;
+    r.res = "1920x1080";
     r.bloom_1440 = false;
     m = EnvMap(r);
     CHECK(!m.count("LBP3_RES") && !m.count("LBP3_RES_SHADERS") && !m.count("LBP3_RES_SKIP"));
+    // the other sizes (LBPPC's list): LBP3_RES=WxH; 2560x1440 keeps the original "1440"
+    for (const Resolution& res : Resolutions()) {
+        Settings q;
+        q.res = res.value;
+        m = EnvMap(q);
+        const std::string v = res.value;
+        if (v == "1920x1080") CHECK(!m.count("LBP3_RES"));
+        else if (v == "2560x1440") CHECK(m["LBP3_RES"] == "1440" && m["LBP3_RES_SHADERS"] == "1");
+        else CHECK(m["LBP3_RES"] == v && m["LBP3_RES_SHADERS"] == "1");
+    }
+    CHECK(Resolutions().size() == 9);
+    // launcher.ini: the older res=1440 / res=1080 and the new WxH; anything else keeps the default
+    CHECK(FromIni("[game]\nres=1080\n").res == "1920x1080");
+    CHECK(FromIni("[game]\nres=1440\n").res == "2560x1440");
+    CHECK(FromIni("[game]\nres=3440x1440\n").res == "3440x1440");
+    CHECK(FromIni("[game]\nres=5120x1440\n").res == "2560x1440");
+    CHECK(FromIni(ToIni(Settings{})).res == "2560x1440");
+    {
+        Settings w;
+        w.res = "4480x1260";
+        CHECK(FromIni(ToIni(w)).res == "4480x1260");
+    }
+    CHECK(CanonicalRes("1440") == "2560x1440" && CanonicalRes("1920X1080") == "1920x1080" && CanonicalRes("1x1").empty());
     // online only with a valid server and name
     Settings o;
     o.online = true;

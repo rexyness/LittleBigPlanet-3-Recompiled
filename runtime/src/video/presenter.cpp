@@ -204,6 +204,27 @@ void PlaceWindow(SDL_Window* window) {
     SDL_free(ids);
 }
 
+// Where the game's image goes in the window: all of it when the aspects match (within 0.5%, as
+// before), else the largest rectangle of the image's aspect, centred, with black bars (a 21:9
+// render size, LBP3_RES, on a 16:9 window, or a window resized by hand). nullptr = the whole window.
+const SDL_FRect* FitRect(SDL_Renderer* renderer, uint32_t w, uint32_t h) {
+    static SDL_FRect rect;
+    int ow = 0, oh = 0;
+    if (!SDL_GetCurrentRenderOutputSize(renderer, &ow, &oh) || ow <= 0 || oh <= 0 || !w || !h) return nullptr;
+    const double image = double(w) / h, window = double(ow) / oh;
+    if (std::fabs(image / window - 1.0) <= 0.005) return nullptr;
+    if (image > window) {  // bars above and below
+        rect.w = float(ow);
+        rect.h = float(std::round(ow / image));
+    } else {  // bars left and right
+        rect.h = float(oh);
+        rect.w = float(std::round(oh * image));
+    }
+    rect.x = std::floor((float(ow) - rect.w) / 2.0f);
+    rect.y = std::floor((float(oh) - rect.h) / 2.0f);
+    return &rect;
+}
+
 void PresenterThread() {
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
         std::fprintf(stderr, "[video] SDL video init failed: %s\n", SDL_GetError());
@@ -366,7 +387,7 @@ void PresenterThread() {
             }
             // 32-bit BGRA rows. Only upload when a new frame arrived.
             if (upload) SDL_UpdateTexture(texture, nullptr, buf.address, static_cast<int>(buf.pitchPixels * 4));
-            SDL_RenderTexture(renderer, texture, nullptr, nullptr);
+            SDL_RenderTexture(renderer, texture, nullptr, FitRect(renderer, buf.width, buf.height));
         }
         ui::overlay::Draw();
         SDL_RenderPresent(renderer);  // paced by vsync, unless a driver forces it off
