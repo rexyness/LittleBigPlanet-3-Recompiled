@@ -11,15 +11,17 @@ this download: you bring the game, and your DLC if you have any.
 - **Your own LittleBigPlanet 3, US edition (CUSA00473), updated to version 01.28**, extracted to a folder: the
   base game with the 01.28 patch merged in. It's the folder with `eboot.bin` and `sce_sys\`. Name the folder
   `CUSA00473`, inside a parent folder of your choice (for example `D:\Games\PS4\CUSA00473`).
-- **Optional, your DLC:** your own DLC `.pkg` files and a PS4 pkg extractor (the launcher's DLC page runs the
-  extractor you point it at). Installed DLC goes in a `CUSA00473-DLC` folder next to `CUSA00473`.
+- **Optional, your DLC:** your own DLC `.pkg` files, extracted into a `CUSA00473-DLC` folder next to
+  `CUSA00473`. The launcher's DLC page can do the extracting with `pkg_extractor.exe`, a separate third-party
+  tool that isn't included. With another extractor, extract the packs into that folder yourself.
 - About 2 GB of free space next to the launcher: the game's own cache (`user\temp0`, about 600 MB from the first
   start), saves and the shader cache (more as you play).
 
 ## First start
 
 1. Unzip this folder anywhere you can write to (not `Program Files`), for example `D:\Games\LBP3-Recompiled`.
-2. Run **LBP3Launcher.exe**. The setup opens on the first start:
+2. Run **LBP3Launcher.exe**. The programs aren't code-signed, so Windows SmartScreen may say "Windows protected
+   your PC": choose **More info**, then **Run anyway**. The setup opens on the first start:
    - **Game files:** pick the folder that CONTAINS `CUSA00473` (the parent folder). The launcher checks it.
    - **DLC:** optional; see above.
    - **Online:** optional; see below.
