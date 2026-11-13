@@ -38,7 +38,7 @@ if (-not $onFork) {
     if (-not $AllowDirty) { throw "commit $commit isn't on any branch of the fork remote; push it first (the source must be public)" }
     Write-Host "warning: commit $commit isn't on the fork (test package)"
 } elseif ($onFork -notcontains $branch) {
-    $branch = if ($onFork -contains 'bestofboth') { 'bestofboth' } else { $onFork[0] }
+    $branch = if ($onFork -contains 'main') { 'main' } else { $onFork[0] }
 }
 
 if (-not $SkipBuild) {
