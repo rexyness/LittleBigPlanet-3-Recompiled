@@ -362,6 +362,10 @@ CreateResult CreateOnlineAccounts(const std::string& config_dir, const std::stri
         return r;
     }
     say("Website account: " + web.message);
+    if (!web.logins_allowed) {  // made, but the game can't sign in yet: not "ready"
+        r.message = "Both accounts were made for \"" + name + "\", but " + web.message;
+        return r;
+    }
     r.ok = true;
     r.message = "Both accounts are ready for \"" + name + "\".";
     return r;

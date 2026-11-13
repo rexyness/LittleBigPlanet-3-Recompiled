@@ -26,7 +26,8 @@ std::string JsonString(const std::string& json, const std::string& key);
 bool JsonTrue(const std::string& json, const std::string& key);
 
 struct AccountResult {
-    bool ok = false;
+    bool ok = false;               // the account exists
+    bool logins_allowed = false;   // and the game may sign in with it (PSN/RPCN logins turned on)
     std::string message;   // for the player
     std::string password;  // the generated one (shown once, saved to online_account.txt)
 };

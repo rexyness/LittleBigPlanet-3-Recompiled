@@ -263,6 +263,7 @@ AccountResult CreateRefreshAccountWith(const std::string& server, const std::str
         return r;
     }
     r.ok = true;
+    r.logins_allowed = true;
     r.message = "Account \"" + name + "\" created on " + server + ".";
     return r;
 }
