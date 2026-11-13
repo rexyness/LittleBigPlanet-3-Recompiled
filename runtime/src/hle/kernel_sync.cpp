@@ -22,6 +22,7 @@
 namespace hle::videoout {
 int LowLatencyMode();                       // videoout.cpp, LBP3_LOW_LATENCY
 void LowLatencyNoteWait(int kind, int64_t ns);  // the frame thread's blocking waits, by kind
+void LowLatencyAtFlipEvent();                    // may hold the frame thread back a few ms
 }  // namespace hle::videoout
 namespace hle::kernel {
 bool IsMainThread();  // kernel_time.cpp
@@ -368,7 +369,9 @@ int PS4_SYSV_ABI sceKernelWaitEqueue(Equeue* eq, Event* events, int num, int* ou
     if (ll) {  // LBP3_LOW_LATENCY: where the frame thread waits (0 = a flip event, 1 = other equeue events)
         bool flip = false;
         for (int i = 0; i < n; ++i) flip |= events[i].filter == kEvfiltVideoOut;
+        lk.unlock();  // the limiter may hold this thread back: never with the queue locked
         videoout::LowLatencyNoteWait(flip ? 0 : 1, std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - llBegin).count());
+        if (flip) videoout::LowLatencyAtFlipEvent();
     }
     return ok ? SCE_OK : SceErr(kETIMEDOUT);
 }

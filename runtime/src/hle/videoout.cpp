@@ -119,17 +119,18 @@ double g_paceWaitMs = 0, g_paceWorkMs = 0;
 int g_paceTimerFlips = 0;
 
 // ---- LBP3_LOW_LATENCY: a Reflex-style limiter (the idea of LBPPC's low-latency limiter,
-// emurphy04 aad6a91, reimplemented; none of its code). LBP3's frame thread submits a frame and
-// starts the next one at once; the next submit then waits for the previous frame to finish, which
-// with our pacing is its flip slot (the pre-submit wait, gpu::WaitIdle). So the CPU runs a frame
-// ahead, and a pad press read at the start of a frame reaches the screen about two slots later.
-// Holding the frame thread back right after each submit by most of that wait makes it read the
-// pad later, so a press shows sooner, while the frame still submits before its slot.
-//   LBP3_LOW_LATENCY=1: on. =0: measure only (the [lowlat] line), no delay. Unset: nothing.
-// Delay = the 10th percentile over 60 frames of (the pre-submit wait + the delay that frame had)
-// minus a 4 ms margin, at most 25 ms, moving at most 0.5 ms a frame; a submit that barely waited
-// (under 0.5 ms: the frame came late) halves it. The [lowlat] line reports the delay and the time
-// from a frame's CPU start to its flip slot (the part of input latency this changes).
+// emurphy04 aad6a91, reimplemented; none of its code). Measured on our port (perf/best_gfx.md):
+// LBP3's frame thread doesn't run a frame ahead or block anywhere. It takes the flip event without
+// waiting, paces itself on the frame clock, starts each frame at the flip slot and submits it in
+// time; the GPU then finishes 10-15 ms before the next slot and waits there (the [video] "slot
+// wait"). Holding the frame thread back a few ms when it takes the flip event moves its pad read
+// (and the rest of its frame) closer to the slot, so a press shows sooner. The delay counts from
+// the slot and stays inside the frame clock's dead zone (kernel_time.cpp, 8 ms): the frame's clock
+// reads still return the slot's time, so the simulation's steps don't change.
+//   LBP3_LOW_LATENCY=1: on. =0: measure only (the [lowlat] line). Unset: nothing.
+// Delay = the 10th percentile over 60 frames of (slot wait + the delay that frame had) minus a
+// 3 ms margin, at most 6 ms, moving at most 0.5 ms a frame; a frame that nearly misses its slot
+// (under 0.5 ms of slot wait) halves it.
 int LowLatencyMode() {
     static const int mode = [] {
         const char* v = std::getenv("LBP3_LOW_LATENCY");
@@ -137,106 +138,53 @@ int LowLatencyMode() {
     }();
     return mode;
 }
-int64_t g_llDelayNs = 0;     // frame thread only
-int64_t g_llAppliedNs = 0;   // the delay taken after the last submit (frame thread only)
-int64_t g_llCpuStartNs = 0;  // when the current frame's CPU work began (frame thread only)
-std::atomic<int64_t> g_llLatUs{0}, g_llLatCount{0};  // frame start to slot, summed at the flips
+constexpr int64_t kLlMaxDelayNs = 6'000'000;
+std::atomic<int64_t> g_llDelayNs{0};    // set on the GPU thread after each slot, used by the frame thread
+std::atomic<int64_t> g_llAppliedNs{0};  // what the frame thread took after the last flip event
+int64_t g_llCpuStartNs = 0;             // frame thread: when its current frame began (after any delay)
+std::atomic<int64_t> g_llLatUs{0}, g_llLatCount{0};    // frame start to slot, summed at the flips
+std::atomic<int64_t> g_llTakeUs{0}, g_llTakeCount{0};  // flip event taken how long after its slot
+std::atomic<int64_t> g_llSlotWaitUs{0}, g_llLate{0};   // GPU-side slot wait and near misses
 // The frame thread's blocking waits since its last submit, by kind: 0 a flip event, 1 other equeue
 // events, 2 event flags, 3 semaphores, 4 condition variables, 5 usleep (kernel_*.cpp report them).
 constexpr int kLlKinds = 6;
-int64_t g_llWaitNs[kLlKinds] = {}, g_llWaitN[kLlKinds] = {};          // since the last submit
-int64_t g_llMaxWaitNs = 0;                                             // the longest single wait
-int g_llMaxWaitKind = -1;
-double g_llSumWaitMs[kLlKinds] = {};                                   // per status window
-int64_t g_llSumWaitN[kLlKinds] = {};
-int g_llEndKindCount[kLlKinds + 1] = {};  // which kind was the longest wait (last: none)
-void LowLatencyNoteWait(int kind, int64_t ns) {
-    if (kind < 0 || kind >= kLlKinds) return;
-    g_llWaitNs[kind] += ns;
-    ++g_llWaitN[kind];
-    if (ns > g_llMaxWaitNs) g_llMaxWaitNs = ns, g_llMaxWaitKind = kind;
-}
+int64_t g_llWaitNs[kLlKinds] = {}, g_llWaitN[kLlKinds] = {};
 
 int64_t SteadyNowNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
 }
 
-// The frame thread, right after a submit: wait out part of the slack, then start the next frame.
-void LowLatencyAfterSubmit(double preSubmitWaitMs) {
-    if (LowLatencyMode() < 0) return;
-    static double ring[60];
-    static int n = 0, frames = 0, late = 0;
-    static double sumDelay = 0, sumWait = 0;
-    // The slack: the frame thread's wait for its flip (a flip event) when that was its longest wait
-    // since the last submit, else the pre-submit wait.
-    const double flipWaitMs = g_llMaxWaitKind == 0 ? g_llMaxWaitNs / 1e6 : 0.0;
-    const double slackMs = std::max(preSubmitWaitMs, flipWaitMs);
-    for (int k = 0; k < kLlKinds; ++k) {
-        g_llSumWaitMs[k] += g_llWaitNs[k] / 1e6;
-        g_llSumWaitN[k] += g_llWaitN[k];
-        g_llWaitNs[k] = 0, g_llWaitN[k] = 0;
-    }
-    ++g_llEndKindCount[g_llMaxWaitKind < 0 ? kLlKinds : g_llMaxWaitKind];
-    g_llMaxWaitNs = 0, g_llMaxWaitKind = -1;
-    ring[n++ % 60] = slackMs + g_llAppliedNs / 1e6;
-    double cur = g_llDelayNs / 1e6;
-    int64_t applied = 0;
-    if (LowLatencyMode() == 1) {
-        const int cnt = std::min(n, 60);
-        double target = 0;
-        if (cnt >= 30) {
-            double tmp[60];
-            std::copy(ring, ring + cnt, tmp);
-            std::nth_element(tmp, tmp + cnt / 10, tmp + cnt);
-            target = std::clamp(tmp[cnt / 10] - 4.0, 0.0, 25.0);
-        }
-        if (slackMs < 0.5 && n > 1) {
-            cur *= 0.5;
-            ++late;
-        } else {
-            cur += std::clamp(target - cur, -0.5, 0.5);
-        }
-        g_llDelayNs = static_cast<int64_t>(cur * 1e6);
-        if (g_llDelayNs > 0) {
-            const auto before = Clock::now();
-            const auto until = before + std::chrono::nanoseconds(g_llDelayNs);
-            if (g_llDelayNs > 1'500'000) std::this_thread::sleep_until(until - std::chrono::milliseconds(1));
-            while (Clock::now() < until) std::this_thread::yield();
-            applied = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - before).count();
-        }
-    } else if (slackMs < 0.5 && n > 1) {
-        ++late;
-    }
-    g_llAppliedNs = applied;
-    g_llCpuStartNs = SteadyNowNs();
-    sumDelay += applied / 1e6;
-    sumWait += slackMs;
-    if (++frames == 30) {
-        const int64_t latCount = g_llLatCount.exchange(0), latUs = g_llLatUs.exchange(0);
-        std::fprintf(stderr,
-                     "[lowlat] %s: delay %.2f ms avg (next %.2f), slack %.2f ms avg, frame start to slot %.1f ms "
-                     "avg over %lld, late %d; frame-thread waits ms/frame (n/frame): flip %.2f (%.1f), equeue "
-                     "%.2f (%.1f), evflag %.2f (%.1f), sema %.2f (%.1f), cond %.2f (%.1f), usleep %.2f (%.1f); "
-                     "longest wait flip/eq/ef/sema/cond/usleep/none %d/%d/%d/%d/%d/%d/%d\n",
-                     LowLatencyMode() == 1 ? "on" : "measure", sumDelay / frames, cur, sumWait / frames,
-                     latCount ? latUs / 1000.0 / latCount : 0.0, static_cast<long long>(latCount), late,
-                     g_llSumWaitMs[0] / frames, g_llSumWaitN[0] / double(frames), g_llSumWaitMs[1] / frames,
-                     g_llSumWaitN[1] / double(frames), g_llSumWaitMs[2] / frames, g_llSumWaitN[2] / double(frames),
-                     g_llSumWaitMs[3] / frames, g_llSumWaitN[3] / double(frames), g_llSumWaitMs[4] / frames,
-                     g_llSumWaitN[4] / double(frames), g_llSumWaitMs[5] / frames, g_llSumWaitN[5] / double(frames),
-                     g_llEndKindCount[0], g_llEndKindCount[1], g_llEndKindCount[2], g_llEndKindCount[3],
-                     g_llEndKindCount[4], g_llEndKindCount[5], g_llEndKindCount[6]);
-        for (int k = 0; k < kLlKinds; ++k) g_llSumWaitMs[k] = 0, g_llSumWaitN[k] = 0;
-        for (int& c : g_llEndKindCount) c = 0;
-        frames = 0, late = 0, sumDelay = 0, sumWait = 0;
-    }
+void LowLatencyNoteWait(int kind, int64_t ns) {
+    if (kind < 0 || kind >= kLlKinds) return;
+    g_llWaitNs[kind] += ns;
+    ++g_llWaitN[kind];
 }
 
-// At a flip: how long ago that frame's CPU work began (cpuStartNs from its submit).
-void LowLatencyAtSlot(int64_t cpuStartNs, int64_t slotNs) {
-    if (LowLatencyMode() < 0 || !cpuStartNs || slotNs <= cpuStartNs || slotNs - cpuStartNs > 200'000'000) return;
-    g_llLatUs += (slotNs - cpuStartNs) / 1000;
-    ++g_llLatCount;
+// GPU thread, after each slot wait: the slack (the slot wait plus the delay that frame had) sets
+// the next delay.
+void LowLatencyAfterSlotWait(double waitMs) {
+    if (LowLatencyMode() < 0) return;
+    static double ring[60];
+    static int n = 0;
+    ring[n++ % 60] = waitMs + g_llAppliedNs.load() / 1e6;
+    g_llSlotWaitUs += static_cast<int64_t>(waitMs * 1000);
+    if (LowLatencyMode() != 1) return;
+    double cur = g_llDelayNs.load() / 1e6;
+    const int cnt = std::min(n, 60);
+    double target = 0;
+    if (cnt >= 30) {
+        double tmp[60];
+        std::copy(ring, ring + cnt, tmp);
+        std::nth_element(tmp, tmp + cnt / 10, tmp + cnt);
+        target = std::clamp(tmp[cnt / 10] - 3.0, 0.0, kLlMaxDelayNs / 1e6);
+    }
+    if (waitMs < 0.5) {
+        cur *= 0.5;
+        ++g_llLate;
+    } else {
+        cur += std::clamp(target - cur, -0.5, 0.5);
+    }
+    g_llDelayNs.store(static_cast<int64_t>(cur * 1e6));
 }
 
 }  // namespace hle::videoout
@@ -244,6 +192,57 @@ namespace hle::kernel {
 int64_t LastFlipNs();  // kernel_time.cpp: the last flip's slot (steady clock)
 }  // namespace hle::kernel
 namespace hle::videoout {
+
+// The frame thread, when it takes a flip event (kernel_sync.cpp, outside the queue's lock).
+void LowLatencyAtFlipEvent() {
+    if (LowLatencyMode() < 0) return;
+    const int64_t slot = kernel::LastFlipNs();
+    const int64_t now = SteadyNowNs();
+    if (slot && now >= slot && now - slot < 100'000'000) g_llTakeUs += (now - slot) / 1000, ++g_llTakeCount;
+    int64_t applied = 0;
+    if (LowLatencyMode() == 1 && slot) {
+        const int64_t delay = std::min(g_llDelayNs.load(), kLlMaxDelayNs);
+        const int64_t target = slot + delay;
+        if (delay > 0 && target > now) {
+            const auto until = Clock::time_point(std::chrono::nanoseconds(target));
+            if (target - now > 1'500'000) std::this_thread::sleep_until(until - std::chrono::milliseconds(1));
+            while (Clock::now() < until) std::this_thread::yield();
+            applied = SteadyNowNs() - now;
+        }
+    }
+    g_llAppliedNs.store(applied);
+    g_llCpuStartNs = SteadyNowNs();
+}
+
+// The frame thread, right after each submit: the status line (every 30 submits).
+void LowLatencyAfterSubmit(double preSubmitWaitMs) {
+    if (LowLatencyMode() < 0) return;
+    static int frames = 0;
+    static double sumPre = 0, sumWait[kLlKinds] = {}, sumN[kLlKinds] = {};
+    sumPre += preSubmitWaitMs;
+    for (int k = 0; k < kLlKinds; ++k) sumWait[k] += g_llWaitNs[k] / 1e6, sumN[k] += g_llWaitN[k], g_llWaitNs[k] = 0, g_llWaitN[k] = 0;
+    if (++frames < 30) return;
+    const int64_t latN = g_llLatCount.exchange(0), latUs = g_llLatUs.exchange(0);
+    const int64_t takeN = g_llTakeCount.exchange(0), takeUs = g_llTakeUs.exchange(0);
+    std::fprintf(stderr,
+                 "[lowlat] %s: delay %.2f ms, slot wait %.2f ms avg, frame start to slot %.1f ms avg (%lld), flip "
+                 "event taken %.2f ms after its slot (%lld), near misses %lld; frame-thread waits ms/frame: pre-submit "
+                 "%.2f, flip %.2f (%.1f/frame), equeue %.2f, evflag %.2f, sema %.2f, cond %.2f, usleep %.2f\n",
+                 LowLatencyMode() == 1 ? "on" : "measure", g_llDelayNs.load() / 1e6, g_llSlotWaitUs.exchange(0) / 1000.0 / frames,
+                 latN ? latUs / 1000.0 / latN : 0.0, static_cast<long long>(latN), takeN ? takeUs / 1000.0 / takeN : 0.0,
+                 static_cast<long long>(takeN), static_cast<long long>(g_llLate.exchange(0)), sumPre / frames,
+                 sumWait[0] / frames, sumN[0] / frames, sumWait[1] / frames, sumWait[2] / frames, sumWait[3] / frames,
+                 sumWait[4] / frames, sumWait[5] / frames);
+    frames = 0, sumPre = 0;
+    for (int k = 0; k < kLlKinds; ++k) sumWait[k] = 0, sumN[k] = 0;
+}
+
+// GPU thread, at a flip: how long ago that frame's CPU work began (cpuStartNs from its submit).
+void LowLatencyAtSlot(int64_t cpuStartNs, int64_t slotNs) {
+    if (LowLatencyMode() < 0 || !cpuStartNs || slotNs <= cpuStartNs || slotNs - cpuStartNs > 200'000'000) return;
+    g_llLatUs += (slotNs - cpuStartNs) / 1000;
+    ++g_llLatCount;
+}
 
 void WaitFlipSlot() {
     static Clock::time_point lastEnd = Clock::now();
@@ -258,6 +257,7 @@ void WaitFlipSlot() {
     g_paceWaitMs += waitMs;
     g_paceWorkMs += workMs;
     g_paceTimerFlips += !vsynced;
+    LowLatencyAfterSlotWait(waitMs);
     // LBP3_PACE_LOG=1: one line per flip in analysis\pace.csv.
     static FILE* csv = [] {
         FILE* f = std::getenv("LBP3_PACE_LOG") ? std::fopen("analysis\\pace.csv", "w") : nullptr;
