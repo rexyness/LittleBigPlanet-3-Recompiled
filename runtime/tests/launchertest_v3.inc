@@ -43,6 +43,12 @@ static void TestReleaseHighlights() {
     CHECK(ReadReleaseHighlights(tmp).size() == 2);
     std::error_code ec;
     fs::remove_all(tmp, ec);
+    // the updater test's stand-in for GitHub: loopback http with a port only
+    CHECK(ReleaseApiBase(nullptr) == "https://api.github.com" && ReleaseApiBase("") == "https://api.github.com");
+    CHECK(ReleaseApiBase("http://127.0.0.1:8123") == "http://127.0.0.1:8123" && ReleaseApiBase("http://127.0.0.1:8123/") == "http://127.0.0.1:8123");
+    CHECK(ReleaseApiBase("http://127.0.0.1:8123.evil.example") == "https://api.github.com");
+    CHECK(ReleaseApiBase("http://127.0.0.1:@evil.example") == "https://api.github.com");
+    CHECK(ReleaseApiBase("https://evil.example") == "https://api.github.com" && ReleaseApiBase("http://localhost:80") == "https://api.github.com");
 }
 
 static void TestV3Settings() {

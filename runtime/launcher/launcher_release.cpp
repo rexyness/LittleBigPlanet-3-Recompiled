@@ -8,6 +8,8 @@
 #include <winhttp.h>
 
 #include <cctype>
+#include <cstdlib>
+#include <cstring>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -123,8 +125,20 @@ ReleaseInfo ParseLatestRelease(const std::string& body) {
     return r;
 }
 
+std::string ReleaseApiBase(const char* test_api) {
+    if (test_api && std::strncmp(test_api, "http://127.0.0.1:", 17) == 0) {
+        std::string base = test_api;
+        while (!base.empty() && base.back() == '/') base.pop_back();
+        bool digits = base.size() > 17;
+        for (size_t i = 17; i < base.size(); ++i) digits &= std::isdigit(static_cast<unsigned char>(base[i])) != 0;
+        if (digits) return base;
+    }
+    return "https://api.github.com";
+}
+
 ReleaseInfo FetchLatestRelease(const std::string& repo) {
-    const HttpReply h = HttpJson("GET", "https://api.github.com/repos/" + repo + "/releases/latest", "", "");
+    const std::string api = ReleaseApiBase(std::getenv("LBP3_UPDATE_TEST_API"));
+    const HttpReply h = HttpJson("GET", api + "/repos/" + repo + "/releases/latest", "", "");
     if (h.status == 404) {
         ReleaseInfo r;
         r.error = "no release has been published yet";

@@ -915,7 +915,9 @@ void StartReleaseInstall(App& a) {
                 j.progress = t ? static_cast<float>(double(d) / double(t)) : -1.f;
             }, &j.cancel, &error))
             return fail("download: " + error);
-        if (!r.sha_url.empty()) {
+        // Every release attaches LBP3-Recompiled-<tag>.zip.sha256; one without it isn't installed.
+        if (r.sha_url.empty()) return fail("the release has no .sha256 to check the download against; nothing was changed");
+        {
             j.Line("Checking it against its .sha256...");
             const HttpReply sha = HttpJson("GET", r.sha_url, "", "");
             const std::string want = ParseSha256Text(sha.body);

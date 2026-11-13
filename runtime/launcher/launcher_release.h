@@ -37,7 +37,11 @@ struct ReleaseInfo {
 };
 // GitHub's releases/latest JSON: the asset LBP3-Recompiled-<tag>.zip and its .sha256 if attached.
 ReleaseInfo ParseLatestRelease(const std::string& body);
+// GET <api>/repos/<repo>/releases/latest. <api> is https://api.github.com, except for the updater test
+// (tools/fake_release_server.py): LBP3_UPDATE_TEST_API=http://127.0.0.1:<port> answers in GitHub's
+// place. Only that exact loopback form is taken (ReleaseApiBase), so nothing outside the PC can.
 ReleaseInfo FetchLatestRelease(const std::string& repo = kReleaseRepo);
+std::string ReleaseApiBase(const char* test_api);
 
 using Progress = std::function<void(std::uint64_t done, std::uint64_t total)>;
 // GET to a file (redirects followed, as GitHub's asset links need). False with *error otherwise.
