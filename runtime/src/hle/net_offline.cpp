@@ -23,6 +23,7 @@
 
 #include "hle/kernel_errors.h"
 #include "hle/net_delay.h"
+#include "hle/net_remote.h"
 #include "hle/online.h"
 #include "hle/register.h"
 
@@ -359,7 +360,64 @@ bool SendIcmpEcho(int s, const void* data, size_t len, const void* to, void* cal
     return true;
 }
 
+// --- online co-op: other players' games (hle/net_remote.h) ------------------------------------
+
+std::atomic<p2pnet::RemoteSend> g_remoteSend{nullptr};
+
+// After the loopback path declined it (not for 127.x): a P2P datagram for another player's game.
+bool SendRemote(int s, const void* data, size_t len, const void* to) {
+    const p2pnet::RemoteSend send = g_remoteSend.load(std::memory_order_relaxed);
+    if (!send || !to) return false;
+    uint16_t srcVport = 0;
+    {
+        std::lock_guard lk(g_netMutex);
+        auto it = g_sockets.find(s);
+        if (it == g_sockets.end()) return false;
+        srcVport = it->second.vport;
+    }
+    const auto* b = static_cast<const uint8_t*>(to);
+    uint32_t ip;
+    std::memcpy(&ip, b + 4, 4);
+    return send(ip, PortOf(to), srcVport, VportOf(to), data, len);
+}
+
 }  // namespace
+}  // namespace hle::net
+
+namespace hle::p2pnet {
+
+void SetRemoteSend(RemoteSend send) { net::g_remoteSend.store(send); }
+
+bool DeliverRemote(uint32_t ip, uint16_t port, uint16_t srcVport, uint16_t dstVport, const uint8_t* data, size_t len) {
+    using namespace hle::net;
+    std::lock_guard lk(g_netMutex);
+    // The game's P2P socket: bound to that virtual port (else to that port, as a plain UDP socket).
+    Socket* target = nullptr;
+    for (auto& [id, sock] : g_sockets)
+        if (sock.vport == dstVport && sock.port != 0) {
+            target = &sock;
+            break;
+        }
+    if (!target)
+        for (auto& [id, sock] : g_sockets)
+            if (sock.port == dstVport) {
+                target = &sock;
+                break;
+            }
+    if (!target) return false;
+    if (target->inbox.size() >= kMaxQueued) return true;  // a full receive buffer: dropped, as UDP does
+    Datagram d;
+    d.data.assign(data, data + len);
+    d.fromPort = port;
+    d.fromVport = srcVport;
+    std::memcpy(d.fromAddr, &ip, 4);
+    target->inbox.push_back(std::move(d));
+    return true;
+}
+
+}  // namespace hle::p2pnet
+
+namespace hle::net {
 
 // --- POSIX ------------------------------------------------------------------------
 
@@ -384,6 +442,7 @@ int64_t PS4_SYSV_ABI recvfrom(int s, void* buf, size_t len, int, void* from, uin
 int64_t PS4_SYSV_ABI recv(int s, void* buf, size_t len, int flags) { return recvfrom(s, buf, len, flags, nullptr, nullptr); }
 int64_t PS4_SYSV_ABI sendto(int s, const void* data, size_t len, int, const void* addr, uint32_t) {
     if (SendLocal(s, data, len, addr)) return static_cast<int64_t>(len);
+    if (SendRemote(s, data, len, addr)) return static_cast<int64_t>(len);
     if (online::Enabled() && SendIcmpEcho(s, data, len, addr, __builtin_return_address(0)))
         return static_cast<int64_t>(len);
     NetLog("posix sendto", s, std::to_string(len) + " bytes to " + Addr(addr) + " -> unreachable");

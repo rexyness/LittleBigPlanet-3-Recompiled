@@ -752,6 +752,23 @@ u64 ShadNetClient::LookupOnlineId(const std::string& npid) {
     return SubmitRequest(CommandType::LookupOnlineId, MakeProtoPayload(req));
 }
 
+// lbp3: see client.h.
+u64 ShadNetClient::RequestSignalingInfos(const std::string& npid) {
+    shadnet::RequestSignalingInfosRequest req;
+    req.set_target_npid(npid);
+    return SubmitRequest(CommandType::RequestSignalingInfos, MakeProtoPayload(req));
+}
+
+bool ShadNetClient::ParseSignalingInfos(const std::vector<u8>& body, std::string& npid, std::string& ip, u16& port) {
+    shadnet::RequestSignalingInfosReply pb;
+    const std::string blob = ExtractBlob(body, 0);
+    if (blob.empty() || !pb.ParseFromString(blob)) return false;
+    npid = pb.target_npid();
+    ip = pb.target_ip();
+    port = static_cast<u16>(pb.target_port());
+    return !ip.empty() && port != 0;
+}
+
 static std::vector<u8> MakeComIdPayload(const std::string& com_id, const std::string& proto_bytes) {
     std::vector<u8> payload;
     payload.reserve(12 + 4 + proto_bytes.size());

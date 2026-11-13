@@ -3,20 +3,29 @@
 //  2. off means no client: no thread and no socket when LBP3_SHADNET is unset or incomplete;
 //  3. a login against an in-process mock server speaking the shadNet protocol (ServerInfo, the
 //     Login request and reply, the friends list), a refused login, an unreachable server;
-//  4. the NP sign-in state the game sees (hle/np_offline.cpp) follows the login.
-// Nothing here contacts a real server: the mock listens on 127.0.0.1 only.
+//  4. the NP sign-in state the game sees (hle/np_offline.cpp) follows the login;
+//  5. phase (b): the game's PSN Web API requests go to a mock Web API (127.0.0.1) with the session
+//     token, repeated GETs come from the cache, the local answers (friend list from shadNet's friends)
+//     when there's no Web API, push events from the mock shadNet reach the game's callbacks, NpId
+//     parsing, and the token never reaches the log.
+// Nothing here contacts a real server: the mocks listen on 127.0.0.1 only.
 //   shadnettest
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <tlhelp32.h>
+#include <io.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <map>
+#include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -39,6 +48,31 @@ static int g_checks = 0, g_failed = 0;
 namespace hle::np {
 int __attribute__((sysv_abi)) sceNpGetState(int32_t userId, int32_t* state);
 }
+#define SYSV __attribute__((sysv_abi))
+namespace hle::npsn {
+int SYSV sceNpWebApiInitialize(int32_t libHttpCtxId, uint64_t poolSize);
+int SYSV sceNpWebApiCreateContext(int32_t libCtxId, const void* onlineId);
+int SYSV sceNpWebApiDeleteContext(int32_t titleUserCtxId);
+int SYSV sceNpWebApiCreateRequest(int32_t titleUserCtxId, const char* apiGroup, const char* path, int32_t method,
+                                  const void* contentParameter, int64_t* requestId);
+int SYSV sceNpWebApiDeleteRequest(int64_t requestId);
+int SYSV sceNpWebApiSendRequest(int64_t requestId, const void* data, uint64_t size);
+int SYSV sceNpWebApiReadData(int64_t requestId, void* data, uint64_t size);
+int SYSV sceNpWebApiGetHttpStatusCode(int64_t requestId, int32_t* status);
+int SYSV sceNpWebApiCreatePushEventFilter(int32_t libCtxId, const void* filterParam, uint64_t filterParamNum);
+int SYSV sceNpWebApiCreateServicePushEventFilter(int32_t libCtxId, int32_t handleId, const char* serviceName,
+                                                 uint32_t serviceLabel, const void* filterParam, uint64_t filterParamNum);
+int SYSV sceNpWebApiRegisterPushEventCallback(int32_t titleUserCtxId, int32_t filterId, void* cb, void* userArg);
+int SYSV sceNpWebApiRegisterServicePushEventCallback(int32_t titleUserCtxId, int32_t filterId, void* cb, void* userArg);
+int SYSV sceNpWebApiUtilityParseNpId(const char* json, void* npId);
+void DispatchPushEvents();
+std::wstring InvitationText();
+void AnswerInvitation(bool join);
+int SYSV sceSystemServiceReceiveEvent(void* event);
+int SYSV sceSystemServiceGetStatusShadNet(void* status);
+std::vector<std::string> PrepareSend(const void* param);
+bool SendCustomData(const std::string& to);
+}  // namespace hle::npsn
 
 namespace {
 
@@ -137,6 +171,33 @@ struct Mock {
     std::string npid, password, titleId, titleName;
     std::vector<uint16_t> commands;  // every request after the login
     uint8_t loginError = 0;          // 0 = accept; else the ErrorType byte to refuse with
+    std::string token;               // GetToken's answer ("" = refuse it)
+    bool pushInvite = false;         // after SetClientVersion: a sessionInvitation push event
+
+    static void Blob(std::vector<uint8_t>& out, const std::string& s) {
+        std::vector<uint8_t> len(4);
+        Put32(len, 0, uint32_t(s.size()));
+        out.insert(out.end(), len.begin(), len.end());
+        out.insert(out.end(), s.begin(), s.end());
+    }
+    // Notification 17, as shadNet's server lays it out (net/shadnet/client.cpp HandleNotification).
+    static std::vector<uint8_t> InvitePush() {
+        std::vector<uint8_t> p;
+        Blob(p, "sessionInvitation");
+        std::vector<uint8_t> label(4);
+        Put32(label, 0, 0);
+        p.insert(p.end(), label.begin(), label.end());
+        Blob(p, "np:service:invitation");
+        Blob(p, "{\"sessionId\":\"sess-1\",\"invitationId\":\"inv-7\"}");
+        Blob(p, "Pal_1");
+        Blob(p, "Tester_1");
+        std::vector<uint8_t> count(4);
+        Put32(count, 0, 1);
+        p.insert(p.end(), count.begin(), count.end());
+        Blob(p, "sessionId");
+        Blob(p, "sess-1");
+        return p;
+    }
 
     bool Listen() {
         listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -196,7 +257,17 @@ struct Mock {
             } else {
                 commands.push_back(cmd);
                 if (cmd == 39 /*GetToken*/) {
-                    SendAll(c, Packet(1, cmd, id, {1 /*error: no token*/}));
+                    if (token.empty()) {
+                        SendAll(c, Packet(1, cmd, id, {1 /*error: no token*/}));
+                    } else {
+                        shadnet::GetTokenReply r;
+                        r.set_token(token);
+                        r.set_user_id(42);
+                        r.set_npid(npid);
+                        std::vector<uint8_t> reply{0};
+                        Blob(reply, r.SerializeAsString());
+                        SendAll(c, Packet(1, cmd, id, reply));
+                    }
                 } else if (cmd == 12 /*GetServerFeatures*/) {
                     shadnet::ServerFeaturesReply r;
                     r.set_matching2_enabled(true);
@@ -208,6 +279,7 @@ struct Mock {
                     SendAll(c, Packet(1, cmd, id, reply));
                 } else {
                     SendAll(c, Packet(1, cmd, id, {0}));
+                    if (cmd == 13 /*SetClientVersion*/ && pushInvite) SendAll(c, Packet(2, 17, 0, InvitePush()));
                 }
             }
         }
@@ -220,6 +292,160 @@ struct Mock {
         if (thread.joinable()) thread.join();
     }
 };
+
+// --- the mock Web API: plain HTTP on 127.0.0.1, one request per connection --------------------
+struct WebMock {
+    SOCKET listener = INVALID_SOCKET;
+    uint16_t port = 0;
+    std::thread thread;
+    std::mutex m;
+    struct Request {
+        std::string method, path, authorization, contentType, body;
+    };
+    std::vector<Request> seen;
+
+    bool Listen() {
+        listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (bind(listener, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0) return false;
+        if (listen(listener, 8) != 0) return false;
+        int len = sizeof(a);
+        getsockname(listener, reinterpret_cast<sockaddr*>(&a), &len);
+        port = ntohs(a.sin_port);
+        thread = std::thread([this] {
+            for (;;) {
+                SOCKET c = accept(listener, nullptr, nullptr);
+                if (c == INVALID_SOCKET) return;
+                Serve(c);
+                closesocket(c);
+            }
+        });
+        return true;
+    }
+    static std::string Header(const std::string& head, const std::string& name) {
+        std::istringstream in(head);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const size_t colon = line.find(':');
+            if (colon == std::string::npos) continue;
+            std::string k = line.substr(0, colon);
+            for (char& ch : k) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+            if (k == name) return line.substr(line.find_first_not_of(' ', colon + 1));
+        }
+        return {};
+    }
+    void Serve(SOCKET c) {
+        std::string data;
+        char buf[4096];
+        size_t headEnd;
+        while ((headEnd = data.find("\r\n\r\n")) == std::string::npos) {
+            const int n = recv(c, buf, sizeof(buf), 0);
+            if (n <= 0) return;
+            data.append(buf, size_t(n));
+        }
+        const std::string head = data.substr(0, headEnd);
+        const size_t length = size_t(std::atoi(Header(head, "content-length").c_str()));
+        std::string body = data.substr(headEnd + 4);
+        while (body.size() < length) {
+            const int n = recv(c, buf, sizeof(buf), 0);
+            if (n <= 0) return;
+            body.append(buf, size_t(n));
+        }
+        Request s;
+        std::istringstream first(head.substr(0, head.find("\r\n")));
+        first >> s.method >> s.path;
+        s.authorization = Header(head, "authorization");
+        s.contentType = Header(head, "content-type");
+        s.body = body;
+        int status = 200;
+        std::string answer;
+        const std::string route = s.path.substr(0, s.path.find('?'));
+        if (route == "/v1/users/Tester_1/friendList")
+            answer = "{\"friendList\":[{\"onlineId\":\"Pal_1\",\"npId\":\"UGFsXzFA\"}],\"start\":0,\"size\":1,\"totalResults\":1}";
+        else if (route == "/v1/users/Tester_1/profile")
+            answer = "{\"profile\":{\"onlineId\":\"Tester_1\"}}";
+        else if (route == "/v1/sessions" && s.method == "POST")
+            answer = "{\"sessionId\":\"sess-1\"}";
+        else if (route == "/v1/gameCustomData/items" && s.method == "POST")
+            answer = "{\"itemId\":\"77\"}";
+        else
+            status = 404, answer = "{\"error\":{\"code\":2105868,\"message\":\"Not found\"}}";
+        {
+            std::lock_guard lk(m);
+            seen.push_back(std::move(s));
+        }
+        const std::string reply = "HTTP/1.1 " + std::to_string(status) + (status == 200 ? " OK" : " Not Found") +
+                                  "\r\nContent-Type: application/json\r\nContent-Length: " + std::to_string(answer.size()) +
+                                  "\r\nConnection: close\r\n\r\n" + answer;
+        send(c, reply.data(), int(reply.size()), 0);
+        shutdown(c, SD_SEND);
+    }
+    std::vector<Request> Seen() {
+        std::lock_guard lk(m);
+        return seen;
+    }
+    void Close() {
+        if (listener != INVALID_SOCKET) closesocket(listener);
+        if (thread.joinable()) thread.join();
+    }
+};
+
+// What the game's push event callbacks were given.
+struct PushSeen {
+    int calls = 0;
+    int32_t ctx = 0, cbId = 0;
+    std::string service, dataType, data, from, to;
+    void* arg = nullptr;
+};
+PushSeen g_servicePush, g_basicPush;
+struct PeerAddr {
+    char onlineId[16];
+    int8_t term;
+    int8_t dummy[3];
+    int32_t platform;
+};
+void SYSV OnServicePush(int32_t ctx, int32_t cbId, const char* service, uint32_t, const PeerAddr* to, const PeerAddr* from,
+                        const char* dataType, const char* data, uint64_t len, void* arg) {
+    ++g_servicePush.calls;
+    g_servicePush.ctx = ctx;
+    g_servicePush.cbId = cbId;
+    g_servicePush.service = service ? service : "";
+    g_servicePush.dataType = dataType ? dataType : "";
+    g_servicePush.data = data ? std::string(data, len) : "";
+    g_servicePush.from = from ? std::string(from->onlineId, strnlen(from->onlineId, 16)) : "";
+    g_servicePush.to = to ? std::string(to->onlineId, strnlen(to->onlineId, 16)) : "";
+    g_servicePush.arg = arg;
+}
+void SYSV OnBasicPush(int32_t, int32_t, const PeerAddr*, const PeerAddr*, const char*, const char*, uint64_t, void*) {
+    ++g_basicPush.calls;
+}
+
+// One Web API request, as the game makes it: create, send, status, read everything, delete.
+struct WebResult {
+    int sendResult = -1, status = 0;
+    std::string body;
+};
+WebResult WebRequest(int32_t ctx, const char* path, int32_t method = 0, const char* contentType = nullptr,
+                     const std::string& payload = {}) {
+    struct ContentParameter {
+        uint64_t contentLength;
+        const char* contentType;
+        uint8_t reserved[16];
+    } cp{payload.size(), contentType, {}};
+    WebResult r;
+    int64_t id = 0;
+    if (hle::npsn::sceNpWebApiCreateRequest(ctx, "userProfile", path, method, contentType ? &cp : nullptr, &id) != 0)
+        return r;
+    r.sendResult = hle::npsn::sceNpWebApiSendRequest(id, payload.empty() ? nullptr : payload.data(), payload.size());
+    hle::npsn::sceNpWebApiGetHttpStatusCode(id, &r.status);
+    char buf[7];  // small, so the body is read in pieces
+    for (int n; (n = hle::npsn::sceNpWebApiReadData(id, buf, sizeof(buf))) > 0;) r.body.append(buf, size_t(n));
+    hle::npsn::sceNpWebApiDeleteRequest(id);
+    return r;
+}
 
 Config Local(uint16_t port) {
     Config c;
@@ -260,10 +486,18 @@ int main(int argc, char** argv) {
         CHECK(lbppc.tls);
         CHECK(lbppc.name == "Tester_1");
         CHECK(lbppc.password == "secret");
+        CHECK(lbppc.webApi == "https://api.lbppc.com");
 
         Config tls = Parse({{"LBP3_SHADNET", "1"}, {"LBP3_SHADNET_SERVER", "tls://example.org:4000"},
                             {"LBP3_SHADNET_NAME", "abc"}, {"LBP3_SHADNET_PASSWORD", "p"}});
         CHECK(tls.enabled && tls.tls && tls.host == "example.org" && tls.port == 4000);
+        CHECK(tls.webApi == "http://example.org:31315");  // shadNet's own Web API port
+        Config localApi = Parse({{"LBP3_SHADNET", "1"}, {"LBP3_SHADNET_SERVER", "play.lbppc.com"}, {"LBP3_SHADNET_NAME", "abc"},
+                                 {"LBP3_SHADNET_PASSWORD", "p"}, {"LBP3_SHADNET_WEBAPI", "local"}});
+        CHECK(localApi.enabled && localApi.webApi.empty());
+        Config ownApi = Parse({{"LBP3_SHADNET", "1"}, {"LBP3_SHADNET_SERVER", "h:1"}, {"LBP3_SHADNET_NAME", "abc"},
+                               {"LBP3_SHADNET_PASSWORD", "p"}, {"LBP3_SHADNET_WEBAPI", "https://api.example.org/"}});
+        CHECK(ownApi.webApi == "https://api.example.org");
 
         Config plain = Parse({{"LBP3_SHADNET", "1"}, {"LBP3_SHADNET_SERVER", "127.0.0.1:31313"},
                               {"LBP3_SHADNET_NAME", "abc"}, {"LBP3_SHADNET_PASSWORD", "p"}});
@@ -396,6 +630,223 @@ int main(int argc, char** argv) {
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     CHECK(NamedThreads().find("ShadNet") == std::string::npos);
+
+    // --- 5. phase (b): the Web API and push events ---------------------------------------------------
+    // stderr goes to a file meanwhile, to check what's logged (and that the token isn't).
+    const std::string logPath = std::string(std::getenv("TEMP") ? std::getenv("TEMP") : ".") + "\\shadnettest_b.log";
+    std::fflush(stderr);
+    const int savedErr = _dup(2);
+    FILE* logFile = std::fopen(logPath.c_str(), "w");
+    _dup2(_fileno(logFile), 2);
+    {
+        Mock mock;
+        mock.token = "tok-SECRET-123";
+        mock.pushInvite = true;
+        WebMock web;
+        CHECK(mock.Listen());
+        CHECK(web.Listen());
+        Config c = Local(mock.port);
+        c.webApi = "http://127.0.0.1:" + std::to_string(web.port);
+        Start(c);
+        CHECK(WaitSettled(10000) == Status::SignedIn);
+        for (int i = 0; i < 100 && BearerToken().empty(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        CHECK(BearerToken() == "tok-SECRET-123");
+        CHECK(WebApiBase() == c.webApi);
+
+        const int lib = hle::npsn::sceNpWebApiInitialize(1, 0x20000);
+        CHECK(lib > 0);
+        const int ctx = hle::npsn::sceNpWebApiCreateContext(lib, "Tester_1");
+        CHECK(ctx > 0);
+
+        // A friend list: the server's answer, read back in pieces, with the token as a bearer.
+        const char* friendPath =
+            "/v1/users/Tester_1/friendList?friendStatus=friend&fields=onlineId,npId,avatarUrl,personalDetail"
+            "&presenceType=incontext&presenceDetail=true&sort=onlineId&limit=500&offset=0";
+        WebResult fl = WebRequest(ctx, friendPath);
+        CHECK(fl.sendResult == 0);
+        CHECK(fl.status == 200);
+        CHECK(fl.body.find("\"onlineId\":\"Pal_1\"") != std::string::npos);
+        auto seen = web.Seen();
+        CHECK(seen.size() == 1);
+        CHECK(!seen.empty() && seen[0].method == "GET" && seen[0].path == friendPath);
+        CHECK(!seen.empty() && seen[0].authorization == "Bearer tok-SECRET-123");
+
+        // A session: POST with the game's content type and body; "/v1/sessions/" loses its slash.
+        WebResult ss = WebRequest(ctx, "/v1/sessions/", 1, "multipart/mixed; boundary=xyz", "--xyz\r\nbody\r\n--xyz--\r\n");
+        CHECK(ss.status == 200 && ss.body == "{\"sessionId\":\"sess-1\"}");
+        seen = web.Seen();
+        CHECK(seen.size() == 2);
+        CHECK(seen.size() == 2 && seen[1].method == "POST" && seen[1].path == "/v1/sessions");
+        CHECK(seen.size() == 2 && seen[1].contentType == "multipart/mixed; boundary=xyz");
+        CHECK(seen.size() == 2 && seen[1].body == "--xyz\r\nbody\r\n--xyz--\r\n");
+
+        // An invitation path with a slash before its query (LBP3's), and a PUT and a 404.
+        WebResult inv = WebRequest(ctx, "/v1/users/Tester_1/invitations/inv-7/?fields=sessionId");
+        CHECK(inv.status == 404);
+        seen = web.Seen();
+        CHECK(seen.size() == 3 && seen[2].path == "/v1/users/Tester_1/invitations/inv-7?fields=sessionId");
+        WebResult put = WebRequest(ctx, "/v1/users/Tester_1/presence/gameStatus", 2, "application/json", "{\"gameStatus\":\"Pod\"}");
+        seen = web.Seen();
+        CHECK(seen.size() == 4 && seen[3].method == "PUT" && seen[3].body == "{\"gameStatus\":\"Pod\"}");
+        CHECK(put.status == 404);
+
+        // The avatar, asked for again and again: one server request, then the cache.
+        for (int i = 0; i < 5; ++i) {
+            WebResult pr = WebRequest(ctx, "/v1/users/Tester_1/profile?fields=avatarUrl&avatarSize=l");
+            CHECK(pr.status == 200 && pr.body.find("Tester_1") != std::string::npos);
+        }
+        CHECK(web.Seen().size() == 5);
+
+        // Push events: a service filter for invitations takes the mock's push; a basic filter doesn't.
+        char types[2][65] = {};
+        std::snprintf(types[0], 65, "%s", "np:service:invitation");
+        std::snprintf(types[1], 65, "%s", "np:service:other");
+        const int sf = hle::npsn::sceNpWebApiCreateServicePushEventFilter(lib, 1, "sessionInvitation", 0, types, 2);
+        const int bf = hle::npsn::sceNpWebApiCreatePushEventFilter(lib, types, 1);
+        CHECK(sf > 0 && bf > 0 && sf != bf);
+        int argMarker = 0;
+        const int scb = hle::npsn::sceNpWebApiRegisterServicePushEventCallback(ctx, sf, reinterpret_cast<void*>(&OnServicePush), &argMarker);
+        const int bcb = hle::npsn::sceNpWebApiRegisterPushEventCallback(ctx, bf, reinterpret_cast<void*>(&OnBasicPush), nullptr);
+        CHECK(scb > 0 && bcb > 0);
+        for (int i = 0; i < 150 && g_servicePush.calls == 0; ++i) {
+            hle::npsn::DispatchPushEvents();
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        CHECK(g_servicePush.calls == 1);
+        CHECK(g_servicePush.ctx == ctx && g_servicePush.cbId == scb && g_servicePush.arg == &argMarker);
+        CHECK(g_servicePush.service == "sessionInvitation");
+        CHECK(g_servicePush.dataType == "np:service:invitation");
+        CHECK(g_servicePush.data.find("\"invitationId\":\"inv-7\"") != std::string::npos);
+        CHECK(g_servicePush.from == "Pal_1" && g_servicePush.to == "Tester_1");
+        CHECK(g_basicPush.calls == 0);  // a service's event isn't a basic one
+        hle::npsn::DispatchPushEvents();
+        CHECK(g_servicePush.calls == 1);  // delivered once
+
+        // The invitation, behind the game custom data dialog's mode 2; joining it raises
+        // SESSION_INVITATION through libSceSystemService.
+        uint8_t status[160] = {};
+        CHECK(hle::npsn::sceSystemServiceGetStatusShadNet(status) == 0);
+        int32_t eventNum = -1;
+        std::memcpy(&eventNum, status, 4);
+        CHECK(eventNum == 0);
+        std::vector<uint8_t> event(4 + 8192);
+        CHECK(hle::npsn::sceSystemServiceReceiveEvent(event.data()) == int(0x80A10004));  // no event
+        const std::wstring question = hle::npsn::InvitationText();
+        CHECK(question.find(L"Pal_1 invited you") == 0);
+        hle::npsn::AnswerInvitation(true);
+        CHECK(hle::npsn::InvitationText().empty());  // answered
+        CHECK(hle::npsn::sceSystemServiceGetStatusShadNet(status) == 0);
+        std::memcpy(&eventNum, status, 4);
+        CHECK(eventNum == 1);
+        CHECK(hle::npsn::sceSystemServiceReceiveEvent(event.data()) == 0);
+        int32_t type = 0, flag = 0, user = 0;
+        std::memcpy(&type, event.data(), 4);
+        std::memcpy(&flag, event.data() + 4 + 112, 4);
+        std::memcpy(&user, event.data() + 4 + 140, 4);
+        CHECK(type == 0x10000002);
+        CHECK(std::string(reinterpret_cast<const char*>(event.data() + 4)) == "sess-1");
+        CHECK(std::string(reinterpret_cast<const char*>(event.data() + 4 + 51)) == "inv-7");
+        CHECK(flag == 1 && user == 1);
+        CHECK(std::string(reinterpret_cast<const char*>(event.data() + 4 + 120)) == "Tester_1");
+        CHECK(std::string(reinterpret_cast<const char*>(event.data() + 4 + 144)) == "Pal_1");
+        CHECK(hle::npsn::sceSystemServiceReceiveEvent(event.data()) == int(0x80A10004));
+        hle::npsn::AnswerInvitation(false);  // nothing left: no-op
+        CHECK(hle::npsn::sceSystemServiceGetStatusShadNet(status) == 0);
+        std::memcpy(&eventNum, status, 4);
+        CHECK(eventNum == 0);
+
+        // ParseNpId: the npId of a friend list entry.
+        uint8_t npId[36];
+        std::memset(npId, 0xcc, sizeof(npId));
+        CHECK(hle::npsn::sceNpWebApiUtilityParseNpId("UGFsXzFA", npId) == 0);  // "Pal_1@"
+        CHECK(std::memcmp(npId, "Pal_1\0", 6) == 0 && npId[16] == 0 && npId[28] == 1);
+
+        // Sending game custom data (the dialog's mode 1), laid out as LBP3 fills it (eboot.bin+0xadeda0).
+        {
+            std::vector<uint8_t> param(0x90), modeData(0x88);
+            uint8_t named[36] = "Pal_1";
+            const char* name = "Join my game";
+            const char* description = "A level in LittleBigPlanet 3";
+            const char* message = "Come and play";
+            const uint8_t thumb[] = {0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3};
+            const uint8_t data[] = {9, 8, 7, 6, 5};
+            const auto put = [&](size_t off, const void* p) { std::memcpy(modeData.data() + off, &p, 8); };
+            const auto put32 = [&](size_t off, uint32_t v) { std::memcpy(modeData.data() + off, &v, 4); };
+            put(0x00, name);
+            put(0x08, description);
+            put(0x20, message);
+            put(0x38, thumb);
+            put32(0x40, sizeof(thumb));
+            put(0x48, data);
+            put32(0x50, sizeof(data));
+            put(0x78, named);
+            put32(0x80, 1);
+            const void* md = modeData.data();
+            std::memcpy(param.data() + 0x48, &md, 8);
+            param[0x34] = 1;
+            auto to = hle::npsn::PrepareSend(param.data());
+            CHECK(to.size() == 1 && to[0] == "Pal_1");
+            CHECK(hle::npsn::SendCustomData("Pal_1"));
+            seen = web.Seen();
+            const auto& post = seen.back();
+            CHECK(post.method == "POST" && post.path == "/v1/gameCustomData/items");
+            CHECK(post.authorization == "Bearer tok-SECRET-123");
+            CHECK(post.contentType.find("multipart/mixed; boundary=") == 0);
+            CHECK(post.body.find("\"toAccountIds\":[\"Pal_1\"]") != std::string::npos);
+            CHECK(post.body.find("\"dataName\":\"Join my game\"") != std::string::npos);
+            CHECK(post.body.find("\"message\":\"Come and play\"") != std::string::npos);
+            CHECK(post.body.find("Content-Description: game-data-binary-0\r\n\r\n\x09\x08\x07\x06\x05\r\n") != std::string::npos);
+            CHECK(post.body.find("Content-Description: game-data-thumbnail-0") != std::string::npos);
+            // No players named: the friends.
+            put32(0x80, 0);
+            to = hle::npsn::PrepareSend(param.data());
+            CHECK(to.size() == 2 && to[0] == "Pal_1" && to[1] == "Pal_2");
+        }
+
+        Stop();
+        // Signed out: answered locally (and nothing reaches the server).
+        WebResult off = WebRequest(ctx, friendPath);
+        CHECK(off.status == 200 && off.body == "{\"friendList\":[],\"start\":0,\"size\":0,\"totalResults\":0}");
+        CHECK(web.Seen().size() == 6);  // as before Stop(): 5 requests and the send
+        hle::npsn::sceNpWebApiDeleteContext(ctx);
+        mock.Close();
+        web.Close();
+    }
+    {
+        // No Web API (LBP3_SHADNET_WEBAPI=local): the friend list is shadNet's friends.
+        Mock mock;
+        CHECK(mock.Listen());
+        Start(Local(mock.port));
+        CHECK(WaitSettled(10000) == Status::SignedIn);
+        const int ctx = hle::npsn::sceNpWebApiCreateContext(1, "Tester_1");
+        WebResult fl = WebRequest(ctx, "/v1/users/Tester_1/friendList?friendStatus=friend&presenceType=incontext");
+        CHECK(fl.status == 200);
+        CHECK(fl.body.find("\"onlineId\":\"Pal_1\"") != std::string::npos);
+        CHECK(fl.body.find("\"onlineId\":\"Pal_2\"") != std::string::npos);
+        CHECK(fl.body.find("\"npId\":\"UGFsXzFA\"") != std::string::npos);
+        CHECK(fl.body.find("\"totalResults\":2") != std::string::npos);
+        CHECK(fl.body.find("\"incontextInfoList\":[]") != std::string::npos);
+        WebResult other = WebRequest(ctx, "/v1/users/Tester_1/profile?fields=avatarUrl");
+        CHECK(other.status == 200 && other.body == "{}");
+        hle::npsn::sceNpWebApiDeleteContext(ctx);
+        Stop();
+        mock.Close();
+    }
+    std::fflush(stderr);
+    _dup2(savedErr, 2);
+    _close(savedErr);
+    std::fclose(logFile);
+    {
+        std::ifstream in(logPath);
+        std::stringstream ss;
+        ss << in.rdbuf();
+        const std::string log = ss.str();
+        CHECK(log.find("push event") != std::string::npos);
+        CHECK(log.find("from server") != std::string::npos);
+        CHECK(log.find("from cache") != std::string::npos);
+        CHECK(log.find("tok-SECRET-123") == std::string::npos);  // the token is never logged
+        std::printf("phase (b) log: %zu bytes (%s)\n", log.size(), logPath.c_str());
+    }
 
     WSACleanup();
     std::printf("shadnettest: %d checks, %d failed\n", g_checks, g_failed);

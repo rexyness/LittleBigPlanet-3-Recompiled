@@ -9,6 +9,10 @@
 //   LBP3_SHADNET_NAME     the online name (3-16 letters, digits, '-', '_'); else LBP3_ONLINE_NAME;
 //                         else the account file below.
 //   LBP3_SHADNET_PASSWORD the account's password; else the account file below.
+//   LBP3_SHADNET_WEBAPI   the server's Web API (friends, presence, sessions, invitations), where
+//                         the game's PSN Web API requests go: "http(s)://host[:port]", or "local" to
+//                         answer them here. Default: https://api.lbppc.com for LBPPC's server, else
+//                         http://<host>:31315 (shadNet's own Web API port).
 //   user\config\online_account.txt  lines "name=..." / "password=..." (also "key: value").
 //
 // The client is shadPS4's (rpcs3/rpcsn lineage), GPL-2.0-or-later, as vendored by LBPPC (emurphy04,
@@ -17,6 +21,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace net::shadnet {
@@ -28,6 +33,11 @@ struct Config {
     bool tls = false;
     std::string name;
     std::string password;
+    std::string webApi;  // the Web API's base URL, no trailing slash ("" = answer locally)
+    // shadNet's UDP service (STUN pings, the relay; phase (c)): the server's host, its port + 1, or
+    // LBP3_SHADNET_UDP ("host:port", or "off"). Empty host = none.
+    std::string udpHost;
+    uint16_t udpPort = 0;
     std::string why;  // when not enabled although LBP3_SHADNET=1: what's missing (for the log)
 };
 
@@ -59,5 +69,33 @@ Status WaitSettled(int ms);
 void SetStatusListener(std::function<void(Status)> listener);
 // Seconds since Start() (sign-in hold-back in sceNpCheckCallback); -1 when not started.
 double SecondsSinceStart();
+
+// The Web API base URL of the running client ("" when off or "local").
+std::string WebApiBase();
+// The session token the server gave after the login (GetToken), for the Web API's Authorization
+// header; "" until then. Never logged.
+std::string BearerToken();
+
+// A Web API push event from the server (notification 17): friend, presence, invitation and game
+// custom data changes, for the game's push event callbacks (hle/np_shadnet.cpp).
+struct PushEvent {
+    std::string service;  // npServiceName ("" for the basic, non-service events)
+    uint32_t label = 0;
+    std::string dataType;  // e.g. "np:service:invitation"
+    std::string data;      // the event's body (JSON)
+    std::string from, to;  // online IDs ("" when not sent)
+    std::vector<std::pair<std::string, std::string>> extd;
+    uint64_t fromAccount = 0, toAccount = 0;
+};
+// The push events received since the last call, oldest first (at most 256 are kept).
+std::vector<PushEvent> TakePushEvents();
+
+// Where the server says another player is (RequestSignalingInfos: the address it has seen their
+// STUN pings from): done(ok, "a.b.c.d", port) once, from the client's thread (it must not wait).
+// Not signed in: done(false) at once.
+void ResolvePeer(const std::string& npid, std::function<void(bool ok, const std::string& ip, uint16_t port)> done);
+// The running client's UDP service, as configured ("" when off).
+std::string UdpHost();
+uint16_t UdpPort();
 
 }  // namespace net::shadnet

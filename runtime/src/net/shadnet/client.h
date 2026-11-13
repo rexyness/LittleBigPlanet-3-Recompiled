@@ -401,6 +401,10 @@ public:
     u64 SetAppearOffline(bool enable);
     // Global online ID to account ID resolution
     u64 LookupOnlineId(const std::string& npid);
+    // lbp3: where the server says another player is (matching command RequestSignalingInfos). The
+    // reply comes to onAsyncReply (cmd RequestSignalingInfos); ParseSignalingInfos reads its body.
+    u64 RequestSignalingInfos(const std::string& npid);
+    static bool ParseSignalingInfos(const std::vector<u8>& body, std::string& npid, std::string& ip, u16& port);
 
 private:
     void ConnectThread();
