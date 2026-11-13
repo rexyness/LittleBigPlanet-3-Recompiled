@@ -18,6 +18,7 @@
 #include <thread>
 #include <vector>
 
+#include "core/log_stamp.h"
 #include "core/runner.h"
 #include "hle/abi.h"
 #include "hle/kernel_errors.h"
@@ -596,8 +597,8 @@ void TraceSimSteps() {
     lastGame = game;
     lastTime = now;
     if (simSteps.size() >= 60) {
-        std::fprintf(stderr, "[sim] steps per flip: %s | game frames: %s\n[sim] ms between submits: %s\n",
-                     simSteps.c_str(), gameSteps.c_str(), gaps.c_str());
+        std::fprintf(stderr, "[sim] %s steps per flip: %s | game frames: %s\n[sim] ms between submits: %s\n",
+                     core::Stamp().text, simSteps.c_str(), gameSteps.c_str(), gaps.c_str());
         simSteps.clear();
         gameSteps.clear();
         gaps.clear();

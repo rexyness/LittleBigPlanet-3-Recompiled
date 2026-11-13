@@ -21,6 +21,7 @@
 #include <ipexport.h>
 #include <icmpapi.h>
 
+#include "core/wait_stats.h"
 #include "hle/kernel_errors.h"
 #include "hle/net_delay.h"
 #include "hle/net_remote.h"
@@ -104,6 +105,15 @@ std::map<int, std::vector<EpollEntry>> g_epolls;
 uint16_t g_nextEphemeral = 49152;
 constexpr uint32_t kEpollIn = 0x1;
 constexpr size_t kMaxQueued = 256;  // per socket, like a full receive buffer
+constexpr int kMsgPeek = 0x2;       // MSG_PEEK (FreeBSD): read the next datagram without taking it
+
+// Lock held: a datagram that didn't fit the socket's queue (dropped, as a full UDP buffer does).
+void NoteDropped(int s, const char* kind, size_t len) {
+    static int logged = 0;
+    if (logged++ < 20)
+        std::fprintf(stderr, "[net] the queue of socket %d is full (%zu): a %zu-byte %s datagram dropped\n", s,
+                     kMaxQueued, len, kind);
+}
 
 // PS4 sockaddr_in: len, family, port (big endian), address.
 uint16_t PortOf(const void* sa) {
@@ -193,21 +203,40 @@ bool SendLocal(int s, const void* data, size_t len, const void* to) {
         if (sock.inbox.size() < kMaxQueued) {
             const auto* p = static_cast<const uint8_t*>(data);
             sock.inbox.push_back({std::vector<uint8_t>(p, p + len), from.port, from.vport});
+        } else {
+            NoteDropped(id, "loopback", len);
         }
         break;
     }
     return true;  // UDP: unanswered datagrams to a closed port are just dropped
 }
 
-// Pops one datagram; -1 if none.
-int64_t RecvLocal(int s, void* buf, size_t len, void* from, uint32_t* fromLen) {
+// Pops one datagram (MSG_PEEK: copies it and leaves it queued); -1 if none.
+int64_t RecvLocal(int s, void* buf, size_t len, void* from, uint32_t* fromLen, int flags = 0) {
     std::lock_guard lk(g_netMutex);
     ++g_recvCalls;
+    {
+        // Each kind of read the game makes, once: the flags and the buffer size.
+        static std::set<std::pair<int, size_t>> seen;
+        if (seen.size() < 20 && seen.insert({flags, len}).second)
+            std::fprintf(stderr, "[net] recv on socket %d: flags %#x, %zu-byte buffer\n", s, flags, len);
+    }
     auto it = g_sockets.find(s);
     if (it == g_sockets.end() || it->second.inbox.empty()) return -1;
     ++g_recvData;
-    Datagram d = std::move(it->second.inbox.front());
-    it->second.inbox.pop_front();
+    if (it->second.inbox.front().data.size() > len) {
+        static int truncated = 0;
+        if (truncated++ < 20)
+            std::fprintf(stderr, "[net] recv on socket %d: a %zu-byte datagram into a %zu-byte buffer (cut short)\n", s,
+                         it->second.inbox.front().data.size(), len);
+    }
+    Datagram d;
+    if (flags & kMsgPeek) {
+        d = it->second.inbox.front();
+    } else {
+        d = std::move(it->second.inbox.front());
+        it->second.inbox.pop_front();
+    }
     static int logged = 0;
     if (logged++ < 30)
         std::fprintf(stderr, "[net] loopback recv %zu bytes on %u from %u\n", d.data.size(), it->second.port,
@@ -406,7 +435,10 @@ bool DeliverRemote(uint32_t ip, uint16_t port, uint16_t srcVport, uint16_t dstVp
                 break;
             }
     if (!target) return false;
-    if (target->inbox.size() >= kMaxQueued) return true;  // a full receive buffer: dropped, as UDP does
+    if (target->inbox.size() >= kMaxQueued) {  // a full receive buffer: dropped, as UDP does
+        NoteDropped(-1, "remote", len);
+        return true;
+    }
     Datagram d;
     d.data.assign(data, data + len);
     d.fromPort = port;
@@ -435,9 +467,9 @@ int PS4_SYSV_ABI bind(int s, const void* addr, uint32_t) {
     BindSocket(s, addr);
     return 0;
 }
-int64_t PS4_SYSV_ABI recvfrom(int s, void* buf, size_t len, int, void* from, uint32_t* fromLen) {
+int64_t PS4_SYSV_ABI recvfrom(int s, void* buf, size_t len, int flags, void* from, uint32_t* fromLen) {
     // The game reads its ping's echo replies here too (polling, as for its loopback datagrams).
-    const int64_t n = RecvLocal(s, buf, len, from, fromLen);
+    const int64_t n = RecvLocal(s, buf, len, from, fromLen, flags);
     return n >= 0 ? n : PosixFail(kEWouldBlock);
 }
 int64_t PS4_SYSV_ABI recv(int s, void* buf, size_t len, int flags) { return recvfrom(s, buf, len, flags, nullptr, nullptr); }
@@ -484,8 +516,8 @@ int PS4_SYSV_ABI sceNetConnect(int s, const void* addr, uint32_t) {
     return SceFail(kENetUnreach);
 }
 int PS4_SYSV_ABI sceNetAccept(int, void*, uint32_t*) { return SceFail(kEWouldBlock); }
-int PS4_SYSV_ABI sceNetRecv(int s, void* buf, size_t len, int) {
-    const int64_t n = RecvLocal(s, buf, len, nullptr, nullptr);
+int PS4_SYSV_ABI sceNetRecv(int s, void* buf, size_t len, int flags) {
+    const int64_t n = RecvLocal(s, buf, len, nullptr, nullptr, flags);
     return n >= 0 ? static_cast<int>(n) : SceFail(kEWouldBlock);
 }
 int PS4_SYSV_ABI sceNetSend(int, const void*, size_t, int) { return SceFail(kENetUnreach); }
@@ -529,6 +561,8 @@ int PS4_SYSV_ABI sceNetEpollWait(int ep, EpollEvent* events, int maxEvents, int 
                           (timeoutUs < 0 ? std::chrono::duration_cast<std::chrono::microseconds>(kEpollMaxSleep)
                                          : std::min<std::chrono::microseconds>(std::chrono::microseconds(timeoutUs),
                                                                                kEpollMaxSleep));
+    const bool measure = core::waitstats::Enabled();
+    const auto start = std::chrono::steady_clock::now();
     for (;;) {
         int n = 0;
         {
@@ -542,9 +576,22 @@ int PS4_SYSV_ABI sceNetEpollWait(int ep, EpollEvent* events, int maxEvents, int 
             }
         }
         const auto now = std::chrono::steady_clock::now();
-        if (n > 0 || now >= deadline) return n;
-        if (deadline - now > std::chrono::microseconds(1500)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        else std::this_thread::yield();
+        if (n > 0 || now >= deadline) {
+            if (measure && n == 0 && timeoutUs > 0) {
+                using std::chrono::duration_cast;
+                using std::chrono::microseconds;
+                core::waitstats::Note(core::waitstats::kEpollWait, duration_cast<microseconds>(deadline - start).count(),
+                                      duration_cast<microseconds>(now - start).count());
+            }
+            return n;
+        }
+        if (deadline - now > std::chrono::microseconds(1500)) {
+            const auto t0 = measure ? core::waitstats::NowUs() : 0;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if (measure) core::waitstats::Note(core::waitstats::kEpollPoll, 1000, core::waitstats::NowUs() - t0);
+        } else {
+            std::this_thread::yield();
+        }
     }
 }
 

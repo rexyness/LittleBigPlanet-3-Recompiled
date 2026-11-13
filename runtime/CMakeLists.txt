@@ -255,7 +255,11 @@ target_include_directories(shadnettest PRIVATE ${SHADNET_PROTO_OUT})
 add_executable(p2ptest tests/p2ptest.cpp)
 target_link_libraries(p2ptest PRIVATE hle)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest unlocktest vkcachetest uxtest motiontest shadnettest p2ptest LBP3Launcher)
+# Every game-visible clock advances 1 s per second (no test needs the game).
+add_executable(clocktest tests/clocktest.cpp)
+target_link_libraries(clocktest PRIVATE hle)
+
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest unlocktest vkcachetest uxtest motiontest shadnettest p2ptest clocktest LBP3Launcher)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()
