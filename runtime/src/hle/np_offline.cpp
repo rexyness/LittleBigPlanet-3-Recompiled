@@ -96,6 +96,9 @@ std::atomic<void (*)()> g_checkCallbackHook{nullptr};
 
 void SetCheckCallbackHook(void (*hook)()) { g_checkCallbackHook.store(hook); }
 
+// The signed-in player's NpId for the state callback (defined with sceNpGetNpId below).
+bool StateNpId(int32_t userId, uint8_t* out36);
+
 int PS4_SYSV_ABI sceNpCheckCallback() {
     if (void (*hook)() = g_checkCallbackHook.load(std::memory_order_relaxed)) hook();
     for (;;) {
@@ -118,8 +121,16 @@ int PS4_SYSV_ABI sceNpCheckCallback() {
         }
         int32_t state = kSignedOut;
         sceNpGetState(user, &state);
-        std::fprintf(stderr, "[np] reporting sign-in state %d of user %d to the game\n", state, user);
-        cb(user, state, nullptr, userdata);
+        // Signed in, the callback gets the player's NpId, as on a console (and as LBPPC's shadPS4 passes
+        // it): LBP3 takes the player's online ID from it, and without it its parental-controls check
+        // fails, so joining a friend or an invitation stops at "Content created by other players is
+        // restricted". The buffer outlives the call (the game may keep the pointer).
+        static uint8_t npIds[5][36];
+        uint8_t* npId = user >= 0 && user < 5 ? npIds[user] : nullptr;
+        const bool withId = state == kSignedIn && npId && StateNpId(user, npId);
+        std::fprintf(stderr, "[np] reporting sign-in state %d of user %d to the game%s\n", state, user,
+                     withId ? " (with its NpId)" : "");
+        cb(user, state, withId ? npId : nullptr, userdata);
     }
 }
 
@@ -222,6 +233,11 @@ int PS4_SYSV_ABI sceNpGetNpId(int32_t userId, NpId* out) {
     if (!out) return kErrorInvalidArgument;
     std::memset(out, 0, sizeof(*out));
     return FillUserOnlineId(userId, out->handle, "sceNpGetNpId (co-op guest)");
+}
+
+bool StateNpId(int32_t userId, uint8_t* out36) {
+    static_assert(sizeof(NpId) == 36);
+    return sceNpGetNpId(userId, reinterpret_cast<NpId*>(out36)) == kernel::SCE_OK;
 }
 
 int PS4_SYSV_ABI sceNpGetAccountId(const void*, uint64_t* id) {
