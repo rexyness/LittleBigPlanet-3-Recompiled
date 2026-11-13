@@ -16,5 +16,5 @@
 - **Refresh** (LittleBigRefresh) and **shadNet** (shadps4-emu): the community game server and PSN stand-in
   that online play connects to.
 - Libraries: SDL3, Dear ImGui, abseil, protobuf, LibreSSL, glslang, Vulkan headers, Vulkan Memory Allocator,
-  fmt, sirit, Zydis, xbyak, xxHash, miniz, robin-map, magic_enum, half, Boost headers, Tracy, stb
+  fmt, sirit, Zydis, xbyak, xxHash, miniz, robin-map, magic_enum, half, Boost headers, Tracy, stb, nlohmann/json
   (licences in `licenses\`).

@@ -79,7 +79,7 @@ Clone the first with ``git clone --recursive $remote``, check out that commit, a
 
 # Third-party licences: the shadPS4 core and every library the build links (runtime/CMakeLists.txt, cmake/*.cmake).
 $ext = "third_party\shadPS4\externals"
-$libs = "abseil-cpp", "ext-boost", "fmt", "glslang", "half", "imgui", "libressl", "magic_enum", "miniz", "protobuf",
+$libs = "abseil-cpp", "ext-boost", "fmt", "glslang", "half", "imgui", "json", "libressl", "magic_enum", "miniz", "protobuf",
         "robin-map", "sirit", "tracy", "vma", "vulkan-headers", "xbyak", "xxhash", "zydis"
 New-Item -ItemType Directory -Force "$stage\licenses\third_party\shadPS4" | Out-Null
 Copy-Item third_party\shadPS4\LICENSE "$stage\licenses\third_party\shadPS4\LICENSE"
