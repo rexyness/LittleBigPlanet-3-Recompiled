@@ -22,6 +22,7 @@
 #include "input/game_state.h"
 #include "hle/my_unlocks.h"
 #include "video/presenter.h"
+#include "hle/quit.h"
 #include "core/tls.h"
 #include "hle/abi.h"
 
@@ -693,6 +694,7 @@ void Run(Module& eboot, const std::vector<Module*>& startFirst, const std::vecto
     InstallNativeCounters(eboot);
     input::game_state::InstallHooks();  // keyboard actions' hooks, before the game starts
     hle::my_unlocks::InstallHooks();    // LBP3_MY_UNLOCKS (ticket 19)
+    hle::quit::InstallPauseMenuQuit();  // LBP3_QUIT_MENU: Quit Game in the pause menu (best/README.md)
     AddVectoredExceptionHandler(0, CrashHandler);  // last, after breakpoints
     AddVectoredExceptionHandler(0, CxxThrowReporter);
     SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);

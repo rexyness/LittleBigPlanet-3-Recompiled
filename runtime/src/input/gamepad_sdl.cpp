@@ -348,6 +348,24 @@ void Parse(const std::string& line) {
         hle::ime_dialog::ScriptCancel();
         return;
     }
+    if (word == "key") {  // "key <SDL key name>": a PC key press through the window's events (Insert, Escape...)
+        std::string name;
+        in >> name;
+        const SDL_Keycode key = SDL_GetKeyFromName(name.c_str());
+        if (key == SDLK_UNKNOWN) {
+            std::fprintf(stderr, "[remote] unknown key '%s'\n", name.c_str());
+            return;
+        }
+        for (const bool down : {true, false}) {
+            SDL_Event e{};
+            e.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+            e.key.key = key;
+            e.key.scancode = SDL_GetScancodeFromKey(key, nullptr);
+            e.key.down = down;
+            SDL_PushEvent(&e);
+        }
+        return;
+    }
     if (word == "wait") {
         in >> c.ms;
     } else if (word == "lstick" || word == "rstick") {

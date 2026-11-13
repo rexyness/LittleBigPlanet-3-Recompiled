@@ -26,6 +26,12 @@ namespace video::framegen {
 // LBP3_FRAMEGEN=1 (read once). Everything below is inert when it's off.
 bool Enabled();
 
+// The in-game menu's live toggle (only meaningful when Enabled): paused, generated frames are
+// still made (the GPU work is already queued) but not shown, and real frames go out half a game
+// period earlier (no frame to wait for). Any thread.
+void SetPaused(bool paused);
+bool Paused();
+
 // The GPU generator's work for one frame (gpu/fg_live.h): submitted by the command-processor
 // thread after the frame's readback, waited for by the worker. id 0 = none.
 struct GpuTicket {

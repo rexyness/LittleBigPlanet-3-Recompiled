@@ -53,3 +53,18 @@ bool Event(const SDL_Event& e);
 void Frame(bool top, ImVec2 display);
 void Reset();
 }  // namespace ui::dialog::layer
+
+// The in-game menu (ui/menu_overlay.h), a third layer, plus its hotkeys and the corner stats
+// overlay, which is drawn (without taking input) whenever it's on and the menu is closed.
+namespace ui::menu::layer {
+bool Wanted();
+uint64_t Sync();
+bool Poll(bool top);
+bool Event(const SDL_Event& e);
+void Frame(bool top, ImVec2 display);
+void Reset();
+void PollHotkey(bool othersUp);                       // L3+R3, every present
+bool HotkeyEvent(const SDL_Event& e, bool othersUp);  // Insert; true = used
+bool Hud();
+void DrawHudLayer(ImVec2 display);
+}  // namespace ui::menu::layer

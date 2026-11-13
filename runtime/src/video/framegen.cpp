@@ -3,6 +3,7 @@
 #include <emmintrin.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -99,6 +100,9 @@ void CountDrop(Drop d) {
     ++g_stats.dropped[static_cast<int>(d)];
 }
 
+std::atomic<bool> g_paused{false};
+std::atomic<uint64_t> g_pausedFrames{0};
+
 void Worker() {
     const char* mode = std::getenv("LBP3_FRAMEGEN_MODE");
     std::unique_ptr<Generator> gen = MakeGenerator(mode && *mode ? mode : "blend");
@@ -137,7 +141,8 @@ void Worker() {
         const int64_t refreshNs = hz > 0 ? static_cast<int64_t>(1e9 / hz) : 16'666'667;
         const int64_t delayNs = DelayNs(hz, delayOverride, gen->MarginMs());
         const int64_t genDue = s.info.slotNs + delayNs;
-        const int64_t realDue = genDue + s.info.periodNs / 2;
+        const bool paused = g_paused.load(std::memory_order_relaxed);
+        const int64_t realDue = paused ? genDue : genDue + s.info.periodNs / 2;
 
         const HostFrame cur{s.pixels.data(), s.width, s.height};
         const HostFrame old{prev.data(), prevW, prevH};
@@ -180,6 +185,8 @@ void Worker() {
             }
             if (!ok) {
                 drop = Drop::Generator;
+            } else if (paused) {
+                g_pausedFrames.fetch_add(1, std::memory_order_relaxed);  // made, not shown (in-game menu)
             } else if (t1 > realDue - refreshNs) {
                 drop = Drop::GenLate;  // it would land on or after the real frame's refresh
             } else {
@@ -235,6 +242,13 @@ void Worker() {
 
 }  // namespace
 
+void SetPaused(bool paused) {
+    if (g_paused.exchange(paused) != paused)
+        std::fprintf(stderr, "[framegen] %s from the in-game menu\n", paused ? "paused" : "resumed");
+}
+
+bool Paused() { return g_paused.load(); }
+
 bool Enabled() {
     static const bool on = [] {
         const char* v = std::getenv("LBP3_FRAMEGEN");
@@ -289,6 +303,9 @@ void PrintStatus() {
                  attempts ? s.genMsSum / double(attempts) : 0.0, s.genMsMax,
                  s.diffCount ? s.diffSum / double(s.diffCount) : 0.0, s.diffMax, (unsigned long long)shownReal,
                  (unsigned long long)shownGen, (unsigned long long)skipped);
+    if (const uint64_t paused = g_pausedFrames.exchange(0))
+        std::fprintf(stderr, "[framegen] paused: %llu generated frames not shown (in-game menu)\n",
+                     (unsigned long long)paused);
     if (s.gpuN || s.gpuMissing)
         std::fprintf(stderr,
                      "[framegen] gpu: %llu fetched (%llu with HUD-less images, %llu with the game's vectors), %llu without "

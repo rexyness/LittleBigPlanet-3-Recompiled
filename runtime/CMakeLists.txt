@@ -41,6 +41,8 @@ add_library(hle STATIC
     src/hle/hle.cpp
     src/hle/app_content.cpp
     src/hle/my_unlocks.cpp
+    src/hle/file_edits.cpp
+    src/hle/quit.cpp
     src/hle/audioout.cpp
     src/hle/audio_downmix.cpp
     src/hle/trophy.cpp
@@ -77,10 +79,13 @@ add_library(hle STATIC
     src/video/framegen.cpp
     src/video/framegen_warp.cpp
     src/video/framegen_gpu.cpp
+    src/video/live_stats.cpp
     src/ui/osk_model.cpp
     src/ui/overlay.cpp
     src/ui/osk_overlay.cpp
     src/ui/dialog_overlay.cpp
+    src/ui/menu_model.cpp
+    src/ui/menu_overlay.cpp
 )
 target_include_directories(hle PUBLIC src)
 target_include_directories(hle PRIVATE ${SHADPS4_EXT}/stb)  # hle/jpeg.cpp
@@ -153,7 +158,12 @@ target_link_libraries(unlocktest PRIVATE hle)
 add_executable(vkcachetest tests/vkcachetest.cpp)
 target_link_libraries(vkcachetest PRIVATE hle)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest unlocktest vkcachetest)
+# The best-of-both-worlds UX (best/README.md): the virtual file edits behind Quit Game in the
+# pause menu, the pause menu's two-press logic, the in-game menu's model, the language codes.
+add_executable(uxtest tests/uxtest.cpp)
+target_link_libraries(uxtest PRIVATE hle)
+
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest unlocktest vkcachetest uxtest)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()

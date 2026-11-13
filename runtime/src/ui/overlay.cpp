@@ -8,6 +8,7 @@
 #include <imgui_impl_sdlrenderer3.h>
 
 #include <algorithm>
+#include <iterator>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -62,14 +63,16 @@ void ShutdownImGui() {
 
 // The newest layer that is up takes the input; returns false if none is.
 struct Up {
-    uint64_t osk = 0, dialog = 0;
-    bool Any() const { return osk || dialog; }
-    bool OskTop() const { return osk > dialog; }
+    uint64_t osk = 0, dialog = 0, menu = 0;
+    bool Any() const { return osk || dialog || menu; }
+    bool OskTop() const { return osk > dialog && osk > menu; }
+    bool MenuTop() const { return menu > dialog && menu > osk; }
+    bool OthersUp() const { return osk || dialog; }
 };
 
-Up SyncLayers() { return {osk::layer::Sync(), dialog::layer::Sync()}; }
+Up SyncLayers() { return {osk::layer::Sync(), dialog::layer::Sync(), menu::layer::Sync()}; }
 
-bool Wanted() { return osk::layer::Wanted() || dialog::layer::Wanted(); }
+bool Wanted() { return osk::layer::Wanted() || dialog::layer::Wanted() || menu::layer::Wanted(); }
 
 }  // namespace
 
@@ -126,6 +129,7 @@ void Attach(SDL_Window* window, SDL_Renderer* renderer) {
         // textures belong to the old one.
         osk::layer::Reset();
         dialog::layer::Reset();
+        menu::layer::Reset();
         ShutdownImGui();
     }
     g_window = window;
@@ -140,6 +144,8 @@ bool HandleEvent(const SDL_Event& e) {
     if (e.type == SDL_EVENT_KEY_UP) std::erase(g_dialogKeys, e.key.scancode);
     Up up;
     if (Wanted()) up = SyncLayers();
+    if (menu::layer::HotkeyEvent(e, up.OthersUp())) return true;  // Insert opens the in-game menu
+    if (Wanted()) up = SyncLayers();
     if (!up.Any()) {
         // The release of a click that closed the last layer: the SDL3 backend still counts the
         // button as down until it sees it.
@@ -148,6 +154,7 @@ bool HandleEvent(const SDL_Event& e) {
     }
     if (e.type == SDL_EVENT_TEXT_INPUT && !g_dialogKeys.empty()) return true;
     if (g_imgui) ImGui_ImplSDL3_ProcessEvent(&e);  // the mouse
+    if (up.MenuTop()) return menu::layer::Event(e);
     if (up.OskTop()) return osk::layer::Event(e);
     const bool used = dialog::layer::Event(e);
     if (used && e.type == SDL_EVENT_KEY_DOWN &&
@@ -157,36 +164,51 @@ bool HandleEvent(const SDL_Event& e) {
 }
 
 void Draw() {
-    if (!Wanted()) return;
+    // The in-game menu's pad hotkey (L3+R3) is looked for even with nothing up.
+    if (g_attached.load()) {
+        Up before;
+        if (Wanted()) before = SyncLayers();
+        menu::layer::PollHotkey(before.OthersUp());
+    }
+    const bool hud = menu::layer::Hud();
+    if (!Wanted() && !hud) return;
+    if (hud) detail::EnsureImGui();
     Up up = SyncLayers();
-    if (!up.Any()) return;
-    // The pad: the top layer acts on it; the other only notes that it isn't on top.
-    const bool oskTop = up.OskTop();
+    if (!up.Any() && !hud) return;
+    // The pad: the top layer acts on it; the others only note that they aren't on top.
+    const bool oskTop = up.OskTop(), menuTop = up.MenuTop();
     if (up.osk) osk::layer::Poll(oskTop);
-    if (up.dialog) dialog::layer::Poll(!oskTop);
+    if (up.dialog) dialog::layer::Poll(!oskTop && !menuTop);
+    if (up.menu) menu::layer::Poll(menuTop);
     up = SyncLayers();  // a layer may have answered
-    if (!up.Any() || !g_imgui) return;
+    if ((!up.Any() && !hud) || !g_imgui) return;
 
     ImGui_ImplSDLRenderer3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
     const ImVec2 display = ImGui::GetIO().DisplaySize;
-    ImGui::GetForegroundDrawList()->AddRectFilled({0.f, 0.f}, display, detail::kDim);
-    // Oldest first, so the newest is drawn on top; the one underneath is dimmed once more.
     ImDrawList* dl = ImGui::GetForegroundDrawList();
-    if (up.OskTop()) {
-        if (up.dialog) {
-            dialog::layer::Frame(false, display);
-            dl->AddRectFilled({0.f, 0.f}, display, detail::kDim);
+    if (up.Any()) {
+        dl->AddRectFilled({0.f, 0.f}, display, detail::kDim);
+        // Oldest first, so the newest is drawn on top; each one underneath is dimmed once more.
+        struct L { uint64_t stamp; int which; };
+        L order[3] = {{up.osk, 0}, {up.dialog, 1}, {up.menu, 2}};
+        std::sort(std::begin(order), std::end(order), [](const L& a, const L& b) { return a.stamp < b.stamp; });
+        int last = -1;
+        for (int i = 0; i < 3; ++i)
+            if (order[i].stamp) last = i;
+        for (int i = 0; i < 3; ++i) {
+            if (!order[i].stamp) continue;
+            const bool top = i == last;
+            switch (order[i].which) {
+            case 0: osk::layer::Frame(top, display); break;
+            case 1: dialog::layer::Frame(top, display); break;
+            default: menu::layer::Frame(top, display); break;
+            }
+            if (!top) dl->AddRectFilled({0.f, 0.f}, display, detail::kDim);
         }
-        osk::layer::Frame(true, display);
-    } else {
-        if (up.osk) {
-            osk::layer::Frame(false, display);
-            dl->AddRectFilled({0.f, 0.f}, display, detail::kDim);
-        }
-        dialog::layer::Frame(true, display);
     }
+    menu::layer::DrawHudLayer(display);  // the corner stats, when on and the menu is closed
     ImGui::Render();
     ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), g_renderer);
 }
