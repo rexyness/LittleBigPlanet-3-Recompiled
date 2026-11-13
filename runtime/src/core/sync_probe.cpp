@@ -10,6 +10,15 @@
 // Facts about these sites (and the matrix path world+0x120 -> [i] -> +8 -> +0x40 -> +0x10, matrix at
 // +0x40) were found by LBPPC (emurphy04, aad6a91; its src/probe.c, read only for these facts); this
 // code is ours. Off by default: nothing is patched without the variable.
+//
+// With each check it also logs the game's online player slots when they change ("[slots]" lines, and
+// every 30 s): eboot.bin+0x130d5c0 points to 8 slots of 0x300 bytes, each a player's NpId (+0), join
+// state (+0x2f8), when that state began (+0x2f0, the game's monotonic clock in ns, eboot+0x1b1b0) and
+// timeout strikes (+0x2fc). States 4 and 5 time out after 200 s, 6 and 8 after 240 s, 10 after 120 s,
+// 11 after 60 s (eboot+0x3ac2a0, x4 the constants at +0xe7a4f4..+0xe7a500, or the server's network
+// settings at [+0x130d670]+0xe8..+0xf8 when that block's byte +0x45 is 4 or 5); after 5 strikes the
+// player is removed (eboot+0x3acef0 -> +0x34e9f0, which ends the connection). Found by us (Ghidra).
+#include <string>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +27,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include "core/log_stamp.h"
 #include "core/module.h"
 #include "hle/abi.h"
 
@@ -42,7 +52,63 @@ bool Read(uint64_t addr, T& out) {
     return true;
 }
 
+uint8_t* g_base = nullptr;  // eboot.bin's load address
+
+void LogSlots() {
+    uint64_t slots = 0;
+    if (!g_base || !Read(reinterpret_cast<uint64_t>(g_base + 0x130d5c0), slots) || !slots) return;
+    using Clock = int64_t(PS4_SYSV_ABI*)();
+    const int64_t now = reinterpret_cast<Clock>(g_base + 0x1b1b0)();
+    std::string line, key;
+    for (int i = 0; i < 8; ++i) {
+        const uint64_t slot = slots + 0x300ull * i;
+        int32_t state = 0, strikes = 0;
+        int64_t since = 0;
+        if (!Read(slot + 0x2f8, state) || state == 0) continue;
+        Read(slot + 0x2f0, since);
+        Read(slot + 0x2fc, strikes);
+        char name[17] = {};
+        if (Readable(reinterpret_cast<const void*>(slot), 16)) std::memcpy(name, reinterpret_cast<const void*>(slot), 16);
+        for (char& c : name)
+            if (c && (c < 0x20 || c > 0x7e)) c = '.';
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "  [%d] %s: state %d for %.0f s, strikes %d", i, name, state,
+                      (now - since) / 1e9, strikes);
+        line += buf;
+        key += std::to_string(i) + name + ":" + std::to_string(state) + "/" + std::to_string(strikes) + ";";
+    }
+    std::string roles;
+    for (int k = 0; k < 4; ++k) {
+        uint64_t r = 0;
+        Read(slots + 0x1800 + 8ull * k, r);
+        roles += " " + (r >= slots && r < slots + 0x1800 ? std::to_string((r - slots) / 0x300) : std::string(r ? "?" : "-"));
+    }
+    key += roles;
+    // The server's network settings (if any), which can replace the timeouts.
+    uint64_t settings = 0;
+    std::string net;
+    if (Read(reinterpret_cast<uint64_t>(g_base + 0x130d670), settings) && settings) {
+        uint8_t mode = 0;
+        float t[5] = {};
+        Read(settings + 0x45, mode);
+        Read(settings + 0xe8, t);
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "; settings mode %u, timeouts %.0f %.0f %.0f %.0f %.0f", mode, t[0], t[1], t[2],
+                      t[3], t[4]);
+        net = buf;
+        key += net;
+    }
+    static std::string last;
+    static int calls = 0;
+    if (key != last || ++calls % 15 == 0) {
+        last = key;
+        std::fprintf(stderr, "[slots] %s%s; roles%s%s\n", core::Stamp().text, line.empty() ? " none" : line.c_str(),
+                     roles.c_str(), net.c_str());
+    }
+}
+
 void PS4_SYSV_ABI LogSent(uint64_t world, uint32_t hash, uint32_t frame) {
+    LogSlots();
     uint32_t count = 0;
     uint64_t players = 0;
     Read(world + 0x128, count);
@@ -59,7 +125,7 @@ void PS4_SYSV_ABI LogSent(uint64_t world, uint32_t hash, uint32_t frame) {
         std::fprintf(stderr, "[sync] the sync check runs with MXCSR %#x, x87 control %#x%s\n", mxcsr, fcw,
                      mxcsr == 0x9fc0 && fcw == 0x037f ? "" : " (NOT the PS4's 0x9fc0 / 0x37f)");
     }
-    std::fprintf(stderr, "[sync] sent frame %u hash %08x, %u player(s)\n", frame, hash, count);
+    std::fprintf(stderr, "[sync] %s sent frame %u hash %08x, %u player(s)\n", core::Stamp().text, frame, hash, count);
     for (uint32_t i = 0; i < count && i < 4; ++i) {
         uint64_t p = 0;
         if (!Read(players + 8 * i, p) || !Read(p + 8, p) || !Read(p + 0x40, p) || !Read(p + 0x10, p)) continue;
@@ -82,7 +148,8 @@ void PS4_SYSV_ABI LogReceived(uint64_t, uint64_t message) {
     if (Readable(reinterpret_cast<const void*>(message), 0x24)) std::memcpy(id, reinterpret_cast<const void*>(message), 0x24);
     for (char& c : id)
         if (c && (c < 0x20 || c > 0x7e)) c = '.';
-    std::fprintf(stderr, "[sync] received frame %u hash %08x from \"%s\" (session %u)\n", frame, hash, id, session);
+    std::fprintf(stderr, "[sync] %s received frame %u hash %08x from \"%s\" (session %u)\n", core::Stamp().text, frame,
+                 hash, id, session);
 }
 
 // Executable memory within reach of a rel32 call from the image.
@@ -131,6 +198,7 @@ bool Redirect(Module& m, uint64_t site, uint64_t expectTarget, const uint8_t* st
 void ApplySyncProbe(Module& m) {
     const char* v = std::getenv("LBP3_SYNC_PROBE");
     if (!v || v[0] != '1' || m.fileName != "eboot.bin") return;
+    g_base = m.Addr(0);
     uint8_t* mem = AllocNear(m.Addr(kHashCall), 4096);
     if (!mem) {
         std::fprintf(stderr, "[sync] no memory near the image: probe not installed\n");

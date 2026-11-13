@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -15,6 +16,8 @@
 #include <windows.h>
 #include <timeapi.h>
 
+#include "core/wait_stats.h"
+#include "hle/clock_check.h"
 #include "core/runner.h"
 #include "hle/kernel_errors.h"
 #include "hle/register.h"
@@ -124,7 +127,13 @@ int64_t CpuNs(HANDLE h, bool thread) {
 }
 
 void SleepUs(uint64_t usec) {
+    if (!core::waitstats::Enabled()) {
+        std::this_thread::sleep_for(std::chrono::microseconds(usec));
+        return;
+    }
+    const int64_t t0 = core::waitstats::NowUs();
     std::this_thread::sleep_for(std::chrono::microseconds(usec));
+    core::waitstats::Note(core::waitstats::kSleep, static_cast<int64_t>(usec), core::waitstats::NowUs() - t0);
 }
 
 // LBP3_TRACE_TIME=1: every 5 s, log which game code reads which clock, and how often
@@ -132,6 +141,24 @@ void SleepUs(uint64_t usec) {
 // `frame` is the HLE function's frame: it holds the game caller's saved rbp, and the
 // game keeps frame-pointer chains, so the next two callers can be read from it.
 void NoteTimeCall(const char* fn, void* caller, void* frame) {
+    // LBP3_CLOCK_THREADS=1: once per thread and clock, which thread reads it (and from where).
+    static const bool threads = [] {
+        const char* v = std::getenv("LBP3_CLOCK_THREADS");
+        return v && *v == '1';
+    }();
+    if (threads) {
+        static std::mutex seenMutex;
+        static std::set<std::pair<std::string, const char*>> seen;
+        const std::string thread = core::ThreadName(GetCurrentThreadId());
+        bool first;
+        {
+            std::lock_guard lock(seenMutex);
+            first = seen.size() < 400 && seen.insert({thread, fn}).second;
+        }
+        if (first)
+            std::fprintf(stderr, "[time] thread '%s' reads %s (first from %s)\n", thread.c_str(), fn,
+                         core::DescribeAddress(reinterpret_cast<uint64_t>(caller)).c_str());
+    }
     static const bool enabled = std::getenv("LBP3_TRACE_TIME") != nullptr;
     if (!enabled) return;
     using Key = std::tuple<const char*, uint64_t, uint64_t, uint64_t>;
@@ -171,6 +198,10 @@ void NoteTimeCall(const char* fn, void* caller, void* frame) {
 #define NOTE_TIME_CALL() NoteTimeCall(__func__, __builtin_return_address(0), __builtin_frame_address(0))
 
 }  // namespace
+
+uint64_t PS4_SYSV_ABI sceKernelGetProcessTime();
+uint64_t PS4_SYSV_ABI sceKernelReadTsc();
+uint64_t PS4_SYSV_ABI sceKernelGetTscFrequency();
 
 void NoteFlip(int64_t steadyNs) { g_lastFlipNs.store(steadyNs, std::memory_order_relaxed); }
 void NoteMainThread() { g_mainThread.store(GetCurrentThreadId(), std::memory_order_relaxed); }
@@ -254,6 +285,30 @@ int PS4_SYSV_ABI nanosleep(const Timespec* req, Timespec* rem) {
     SleepUs(static_cast<uint64_t>(req->sec) * 1'000'000 + static_cast<uint64_t>(req->nsec) / 1000);
     if (rem) *rem = {};
     return 0;
+}
+
+std::vector<ClockSample> SampleClocks() {
+    std::vector<ClockSample> out;
+    auto clock = [&](const char* name, int id) {
+        Timespec t{};
+        if (sceKernelClockGettime(id, &t) == SCE_OK) out.push_back({name, t.sec + t.nsec / 1e9});
+    };
+    clock("clock_gettime(REALTIME)", kClockRealtime);
+    clock("clock_gettime(MONOTONIC)", kClockMonotonic);
+    clock("clock_gettime(UPTIME)", kClockUptime);
+    clock("clock_gettime(UPTIME_PRECISE)", kClockUptimePrecise);
+    clock("clock_gettime(UPTIME_FAST)", kClockUptimeFast);
+    clock("clock_gettime(REALTIME_PRECISE)", kClockRealtimePrecise);
+    clock("clock_gettime(REALTIME_FAST)", kClockRealtimeFast);
+    clock("clock_gettime(MONOTONIC_PRECISE)", kClockMonotonicPrecise);
+    clock("clock_gettime(MONOTONIC_FAST)", kClockMonotonicFast);
+    clock("clock_gettime(SECOND)", kClockSecond);
+    Timeval tv{};
+    if (sceKernelGettimeofday(&tv) == SCE_OK) out.push_back({"gettimeofday", tv.sec + tv.usec / 1e6});
+    out.push_back({"sceKernelGetProcessTime", sceKernelGetProcessTime() / 1e6});
+    out.push_back({"sceKernelReadTsc / sceKernelGetTscFrequency",
+                   static_cast<double>(sceKernelReadTsc()) / static_cast<double>(sceKernelGetTscFrequency())});
+    return out;
 }
 
 // Microseconds since the process started.
