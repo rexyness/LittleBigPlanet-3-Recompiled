@@ -18,6 +18,7 @@
 
 #include "hle/kernel_errors.h"
 #include "hle/register.h"
+#include "hle/online.h"
 #include "hle/users.h"
 
 namespace hle::np {
@@ -53,9 +54,10 @@ int PS4_SYSV_ABI sceNpGetState(int32_t userId, int32_t* state) {
     if (!state) return kErrorInvalidArgument;
     // Experiment switch: LBP3_NP_STATE=signedin reports the account as signed
     // in while the network stays down.
+    // Online play (hle/online.h) signs in locally the same way.
     static const bool signedIn = [] {
         const char* v = std::getenv("LBP3_NP_STATE");
-        return v && std::strcmp(v, "signedin") == 0;
+        return (v && std::strcmp(v, "signedin") == 0) || online::Enabled();
     }();
     *state = signedIn ? kSignedIn : kSignedOut;
     return kernel::SCE_OK;
@@ -126,6 +128,7 @@ struct NpId { OnlineId handle; uint8_t opt[8]; uint8_t reserved[8]; };
 
 const std::string& PlayerName() {
     static const std::string name = [] {
+        if (online::Enabled()) return online::Name();  // the account on the community server
         std::string n;
         if (const char* env = std::getenv("LBP3_PLAYER_NAME")) n = env;
         if (n.empty()) {
@@ -318,7 +321,7 @@ constexpr int32_t kStateDisconnected = 0;
 bool LanUp() {
     static const bool up = [] {
         const char* v = std::getenv("LBP3_NET");
-        return v && std::strcmp(v, "online") == 0;
+        return (v && std::strcmp(v, "online") == 0) || online::Enabled();
     }();
     return up;
 }

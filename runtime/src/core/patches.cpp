@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "core/module.h"
+#include "hle/online.h"
 
 namespace core {
 namespace {
@@ -234,8 +235,40 @@ void ApplyRes1440(Module& m) {
 
 }  // namespace
 
+// ---- Online play (hle/online.h, LBP3_ONLINE=1 with a server): the request-signing key ----
+// LBP3 signs its requests and checks the server's replies (HMAC-SHA1, X-Digest-A/B) with an
+// 18-character key, built from three immediates in 0x1ec60 and kept as a string at 0xe4aff1 for
+// the reply check (0x222a0). Community servers (Refresh, Lighthouse) use "CustomServerDigest", as
+// PS3 patchers do. All four sites are checked against the original bytes first; if any differs,
+// none is changed (the server's replies would then be refused, and the game plays offline).
+// The sites and the key are as found by LBPPC (emurphy04, docs/online.md; src/probe.c).
+void ApplyOnlineKey(Module& m) {
+    if (!hle::online::Enabled()) return;
+    struct Site {
+        uint64_t offset;
+        const char* original;
+        const char* custom;
+    };
+    static const Site kSites[] = {
+        {0x1edb9, "C5S^FWw*", "CustomSe"},
+        {0x1eda8, "8yIp3O%M", "rverDige"},
+        {0x1edd6, "e!", "st"},
+        {0xe4aff1, "C5S^FWw*8yIp3O%Me!", "CustomServerDigest"},
+    };
+    for (const Site& s : kSites) {
+        if (std::memcmp(m.Addr(s.offset), s.original, std::strlen(s.original)) != 0) {
+            std::fprintf(stderr, "[online] signing key: eboot.bin+0x%llx differs, key NOT changed\n",
+                         static_cast<unsigned long long>(s.offset));
+            return;
+        }
+    }
+    for (const Site& s : kSites) std::memcpy(m.Addr(s.offset), s.custom, std::strlen(s.custom));
+    std::fprintf(stderr, "[online] signing key: CustomServerDigest (4 sites)\n");
+}
+
 void ApplyPatches(Module& m) {
     if (m.fileName == "eboot.bin") ApplyRes1440(m);
+    if (m.fileName == "eboot.bin") ApplyOnlineKey(m);
     for (const Patch& p : kPatches) {
         if (m.fileName != p.module) continue;
         if (p.onlyWithEnv && !std::getenv(p.onlyWithEnv)) continue;

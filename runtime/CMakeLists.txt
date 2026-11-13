@@ -53,6 +53,8 @@ add_library(hle STATIC
     src/hle/modal.cpp
     src/hle/gnm_packets.cpp
     src/hle/http_offline.cpp
+    src/hle/http_online.cpp
+    src/hle/online.cpp
     src/hle/kernel_fs.cpp
     src/hle/kernel_memory.cpp
     src/hle/kernel_module.cpp
@@ -86,7 +88,7 @@ target_include_directories(hle PUBLIC src)
 target_include_directories(hle PRIVATE ${SHADPS4_EXT}/stb)  # hle/jpeg.cpp
 target_link_libraries(hle PUBLIC shader_recompiler video_core)
 target_compile_definitions(hle PUBLIC _WIN32_WINNT=0x0A00 NOMINMAX _CRT_SECURE_NO_WARNINGS)
-target_link_libraries(hle PUBLIC imgui SDL3::SDL3 bcrypt winmm dbghelp onecore advapi32 dxgi comctl32)
+target_link_libraries(hle PUBLIC imgui SDL3::SDL3 bcrypt winmm dbghelp onecore advapi32 dxgi comctl32 winhttp ws2_32)
 
 add_executable(lbp3 src/main.cpp)
 target_link_libraries(lbp3 PRIVATE hle)
@@ -104,6 +106,10 @@ target_link_libraries(imetest PRIVATE hle)
 # Local co-op offline: user service events, pads per player, seating, remote input per player.
 add_executable(cooptest tests/cooptest.cpp)
 target_link_libraries(cooptest PRIVATE hle)
+
+# Online play offline checks: login ticket layout, reply signing, off without a server.
+add_executable(onlinetest tests/onlinetest.cpp)
+target_link_libraries(onlinetest PRIVATE hle)
 
 # System dialogs offline: drives MsgDialog/SaveDataDialog the way LBP3 does and answers the windows.
 add_executable(dialogtest tests/dialogtest.cpp)

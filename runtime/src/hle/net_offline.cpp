@@ -20,6 +20,7 @@
 
 #include "hle/kernel_errors.h"
 #include "hle/net_delay.h"
+#include "hle/online.h"
 #include "hle/register.h"
 
 namespace hle::net {
@@ -367,8 +368,15 @@ const char* PS4_SYSV_ABI sceNetInetNtop(int af, const void* src, char* dst, uint
 
 int PS4_SYSV_ABI sceNetResolverCreate(const char*, int, int) { return g_nextId++; }
 int PS4_SYSV_ABI sceNetResolverDestroy(int) { return kernel::SCE_OK; }
-int PS4_SYSV_ABI sceNetResolverStartNtoa(int, const char* host, void*, int, int, int) {
+int PS4_SYSV_ABI sceNetResolverStartNtoa(int, const char* host, void* addr, int, int, int) {
     std::fprintf(stderr, "[net] resolve %s\n", host ? host : "?");
+    if (online::Enabled()) {  // hle/online.h: every name is the community server
+        const uint32_t ip = online::ServerIPv4();
+        if (ip && addr) {
+            std::memcpy(addr, &ip, sizeof(ip));
+            return kernel::SCE_OK;
+        }
+    }
     UnreachableDelay("sceNetResolverStartNtoa");
     return SceFail(kETimedOut);
 }
