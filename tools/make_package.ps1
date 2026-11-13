@@ -108,7 +108,11 @@ if ($forbidden) {
 
 if (Test-Path $zip) { Remove-Item -Force $zip }
 Compress-Archive -Path "$stage\*" -DestinationPath $zip -CompressionLevel Optimal
-$hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+# (.NET's SHA256, not Get-FileHash: that cmdlet's module isn't found when started from Git Bash)
+$sha = [System.Security.Cryptography.SHA256]::Create()
+$fs = [System.IO.File]::OpenRead($zip)
+$hash = -join ($sha.ComputeHash($fs) | ForEach-Object { $_.ToString("x2") })
+$fs.Dispose(); $sha.Dispose()
 Set-Content -Encoding ascii "$zip.sha256" "$hash  $name.zip"
 $size = [math]::Round((Get-Item $zip).Length / 1MB, 1)
 Write-Host "package: $zip ($size MB)"
