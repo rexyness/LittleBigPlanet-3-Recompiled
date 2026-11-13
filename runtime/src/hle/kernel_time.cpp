@@ -19,6 +19,11 @@
 #include "hle/kernel_errors.h"
 #include "hle/register.h"
 
+namespace hle::videoout {
+int LowLatencyMode();  // videoout.cpp, LBP3_LOW_LATENCY
+void LowLatencyNoteWait(int kind, int64_t ns);
+}  // namespace hle::videoout
+
 namespace hle::kernel {
 namespace {
 
@@ -176,6 +181,7 @@ void NoteFlip(int64_t steadyNs) { g_lastFlipNs.store(steadyNs, std::memory_order
 void NoteMainThread() { g_mainThread.store(GetCurrentThreadId(), std::memory_order_relaxed); }
 // For the low-latency limiter (videoout.cpp, LBP3_LOW_LATENCY): the last flip's slot (steady clock, ns).
 int64_t LastFlipNs() { return g_lastFlipNs.load(std::memory_order_relaxed); }
+bool IsMainThread() { return GetCurrentThreadId() == g_mainThread.load(std::memory_order_relaxed); }
 
 int PS4_SYSV_ABI sceKernelClockGettime(int clock, Timespec* tp) {
     NOTE_TIME_CALL();
@@ -241,6 +247,12 @@ int PS4_SYSV_ABI sceKernelGettimezone(Timezone* tz) {
 
 int PS4_SYSV_ABI sceKernelUsleep(uint32_t usec) {
     NOTE_TIME_CALL();
+    if (videoout::LowLatencyMode() >= 0 && IsMainThread()) {
+        const auto begin = std::chrono::steady_clock::now();
+        SleepUs(usec);
+        videoout::LowLatencyNoteWait(5, std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin).count());
+        return SCE_OK;
+    }
     SleepUs(usec);
     return SCE_OK;
 }

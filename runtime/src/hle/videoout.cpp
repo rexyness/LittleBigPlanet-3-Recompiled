@@ -141,6 +141,21 @@ int64_t g_llDelayNs = 0;     // frame thread only
 int64_t g_llAppliedNs = 0;   // the delay taken after the last submit (frame thread only)
 int64_t g_llCpuStartNs = 0;  // when the current frame's CPU work began (frame thread only)
 std::atomic<int64_t> g_llLatUs{0}, g_llLatCount{0};  // frame start to slot, summed at the flips
+// The frame thread's blocking waits since its last submit, by kind: 0 a flip event, 1 other equeue
+// events, 2 event flags, 3 semaphores, 4 condition variables, 5 usleep (kernel_*.cpp report them).
+constexpr int kLlKinds = 6;
+int64_t g_llWaitNs[kLlKinds] = {}, g_llWaitN[kLlKinds] = {};          // since the last submit
+int64_t g_llMaxWaitNs = 0;                                             // the longest single wait
+int g_llMaxWaitKind = -1;
+double g_llSumWaitMs[kLlKinds] = {};                                   // per status window
+int64_t g_llSumWaitN[kLlKinds] = {};
+int g_llEndKindCount[kLlKinds + 1] = {};  // which kind was the longest wait (last: none)
+void LowLatencyNoteWait(int kind, int64_t ns) {
+    if (kind < 0 || kind >= kLlKinds) return;
+    g_llWaitNs[kind] += ns;
+    ++g_llWaitN[kind];
+    if (ns > g_llMaxWaitNs) g_llMaxWaitNs = ns, g_llMaxWaitKind = kind;
+}
 
 int64_t SteadyNowNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
@@ -152,7 +167,18 @@ void LowLatencyAfterSubmit(double preSubmitWaitMs) {
     static double ring[60];
     static int n = 0, frames = 0, late = 0;
     static double sumDelay = 0, sumWait = 0;
-    ring[n++ % 60] = preSubmitWaitMs + g_llAppliedNs / 1e6;
+    // The slack: the frame thread's wait for its flip (a flip event) when that was its longest wait
+    // since the last submit, else the pre-submit wait.
+    const double flipWaitMs = g_llMaxWaitKind == 0 ? g_llMaxWaitNs / 1e6 : 0.0;
+    const double slackMs = std::max(preSubmitWaitMs, flipWaitMs);
+    for (int k = 0; k < kLlKinds; ++k) {
+        g_llSumWaitMs[k] += g_llWaitNs[k] / 1e6;
+        g_llSumWaitN[k] += g_llWaitN[k];
+        g_llWaitNs[k] = 0, g_llWaitN[k] = 0;
+    }
+    ++g_llEndKindCount[g_llMaxWaitKind < 0 ? kLlKinds : g_llMaxWaitKind];
+    g_llMaxWaitNs = 0, g_llMaxWaitKind = -1;
+    ring[n++ % 60] = slackMs + g_llAppliedNs / 1e6;
     double cur = g_llDelayNs / 1e6;
     int64_t applied = 0;
     if (LowLatencyMode() == 1) {
@@ -164,7 +190,7 @@ void LowLatencyAfterSubmit(double preSubmitWaitMs) {
             std::nth_element(tmp, tmp + cnt / 10, tmp + cnt);
             target = std::clamp(tmp[cnt / 10] - 4.0, 0.0, 25.0);
         }
-        if (preSubmitWaitMs < 0.5 && n > 1) {
+        if (slackMs < 0.5 && n > 1) {
             cur *= 0.5;
             ++late;
         } else {
@@ -178,20 +204,30 @@ void LowLatencyAfterSubmit(double preSubmitWaitMs) {
             while (Clock::now() < until) std::this_thread::yield();
             applied = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - before).count();
         }
-    } else if (preSubmitWaitMs < 0.5 && n > 1) {
+    } else if (slackMs < 0.5 && n > 1) {
         ++late;
     }
     g_llAppliedNs = applied;
     g_llCpuStartNs = SteadyNowNs();
     sumDelay += applied / 1e6;
-    sumWait += preSubmitWaitMs;
+    sumWait += slackMs;
     if (++frames == 30) {
         const int64_t latCount = g_llLatCount.exchange(0), latUs = g_llLatUs.exchange(0);
         std::fprintf(stderr,
-                     "[lowlat] %s: delay %.2f ms avg (next %.2f), pre-submit wait %.2f ms avg, frame start to "
-                     "slot %.1f ms avg over %lld, late submits %d\n",
+                     "[lowlat] %s: delay %.2f ms avg (next %.2f), slack %.2f ms avg, frame start to slot %.1f ms "
+                     "avg over %lld, late %d; frame-thread waits ms/frame (n/frame): flip %.2f (%.1f), equeue "
+                     "%.2f (%.1f), evflag %.2f (%.1f), sema %.2f (%.1f), cond %.2f (%.1f), usleep %.2f (%.1f); "
+                     "longest wait flip/eq/ef/sema/cond/usleep/none %d/%d/%d/%d/%d/%d/%d\n",
                      LowLatencyMode() == 1 ? "on" : "measure", sumDelay / frames, cur, sumWait / frames,
-                     latCount ? latUs / 1000.0 / latCount : 0.0, static_cast<long long>(latCount), late);
+                     latCount ? latUs / 1000.0 / latCount : 0.0, static_cast<long long>(latCount), late,
+                     g_llSumWaitMs[0] / frames, g_llSumWaitN[0] / double(frames), g_llSumWaitMs[1] / frames,
+                     g_llSumWaitN[1] / double(frames), g_llSumWaitMs[2] / frames, g_llSumWaitN[2] / double(frames),
+                     g_llSumWaitMs[3] / frames, g_llSumWaitN[3] / double(frames), g_llSumWaitMs[4] / frames,
+                     g_llSumWaitN[4] / double(frames), g_llSumWaitMs[5] / frames, g_llSumWaitN[5] / double(frames),
+                     g_llEndKindCount[0], g_llEndKindCount[1], g_llEndKindCount[2], g_llEndKindCount[3],
+                     g_llEndKindCount[4], g_llEndKindCount[5], g_llEndKindCount[6]);
+        for (int k = 0; k < kLlKinds; ++k) g_llSumWaitMs[k] = 0, g_llSumWaitN[k] = 0;
+        for (int& c : g_llEndKindCount) c = 0;
         frames = 0, late = 0, sumDelay = 0, sumWait = 0;
     }
 }

@@ -20,6 +20,14 @@
 #include "hle/kernel_errors.h"
 #include "hle/register.h"
 
+namespace hle::videoout {
+int LowLatencyMode();
+void LowLatencyNoteWait(int kind, int64_t ns);
+}  // namespace hle::videoout
+namespace hle::kernel {
+bool IsMainThread();
+}  // namespace hle::kernel
+
 namespace hle::kernel {
 namespace {
 
@@ -229,7 +237,16 @@ struct Rwlock {
     std::atomic<DWORD> writer{0};
 };
 
+int CondWaitInner(void* cond, void* mutex, const DWORD timeoutMs);
 int CondWait(void* cond, void* mutex, const DWORD timeoutMs) {
+    if (videoout::LowLatencyMode() < 0 || !IsMainThread()) return CondWaitInner(cond, mutex, timeoutMs);
+    const auto begin = std::chrono::steady_clock::now();
+    const int r = CondWaitInner(cond, mutex, timeoutMs);
+    videoout::LowLatencyNoteWait(4, std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin).count());
+    return r;
+}
+
+int CondWaitInner(void* cond, void* mutex, const DWORD timeoutMs) {
     if (!cond || !mutex) return SceErr(kEINVAL);
     Cond* c = Lazy<Cond>(cond);
     Mutex* m = Lazy<Mutex>(mutex);

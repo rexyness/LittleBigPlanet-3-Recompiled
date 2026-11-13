@@ -19,6 +19,14 @@
 #include "hle/kernel_errors.h"
 #include "hle/register.h"
 
+namespace hle::videoout {
+int LowLatencyMode();                       // videoout.cpp, LBP3_LOW_LATENCY
+void LowLatencyNoteWait(int kind, int64_t ns);  // the frame thread's blocking waits, by kind
+}  // namespace hle::videoout
+namespace hle::kernel {
+bool IsMainThread();  // kernel_time.cpp
+}  // namespace hle::kernel
+
 namespace hle::kernel {
 namespace {
 
@@ -191,7 +199,13 @@ int PS4_SYSV_ABI sceKernelDeleteSema(Sema* sem) {
     return SCE_OK;
 }
 
-int PS4_SYSV_ABI sceKernelWaitSema(Sema* sem, int need, uint32_t* timeout) { return SemaWait(sem, need, timeout); }
+int PS4_SYSV_ABI sceKernelWaitSema(Sema* sem, int need, uint32_t* timeout) {
+    if (videoout::LowLatencyMode() < 0 || !IsMainThread()) return SemaWait(sem, need, timeout);
+    const auto begin = Clock::now();
+    const int r = SemaWait(sem, need, timeout);
+    videoout::LowLatencyNoteWait(3, std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - begin).count());
+    return r;
+}
 
 int PS4_SYSV_ABI sceKernelSignalSema(Sema* sem, int count) { return SemaSignal(sem, count); }
 
@@ -302,9 +316,12 @@ int PS4_SYSV_ABI sceKernelWaitEventFlag(EventFlag* ef, uint64_t pattern, uint32_
                          timeout ? std::to_string(*timeout).c_str() : "none",
                          static_cast<unsigned long long>(ef->bits));
     }
+    const bool ll = videoout::LowLatencyMode() >= 0 && IsMainThread();
+    const auto llBegin = ll ? Clock::now() : Clock::time_point{};
     std::unique_lock lk(ef->m);
     auto ready = [&] { return (mode & kWaitAnd) ? (ef->bits & pattern) == pattern : (ef->bits & pattern) != 0; };
     bool ok = WaitWithTimeout(ef->cv, lk, timeout, ready);
+    if (ll) videoout::LowLatencyNoteWait(2, std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - llBegin).count());
     if (result) *result = ef->bits;
     if (!ok) return SceErr(kETIMEDOUT);
     if (mode & kClearAll) ef->bits = 0;
@@ -338,6 +355,8 @@ int PS4_SYSV_ABI sceKernelDeleteEqueue(Equeue* eq) {
 
 int PS4_SYSV_ABI sceKernelWaitEqueue(Equeue* eq, Event* events, int num, int* out, uint32_t* timeout) {
     if (!eq || !events || num < 1) return SceErr(kEINVAL);
+    const bool ll = videoout::LowLatencyMode() >= 0 && IsMainThread();
+    const auto llBegin = ll ? Clock::now() : Clock::time_point{};
     std::unique_lock lk(eq->m);
     bool ok = WaitWithTimeout(eq->cv, lk, timeout, [&] { return !eq->pending.empty(); });
     int n = 0;
@@ -346,6 +365,11 @@ int PS4_SYSV_ABI sceKernelWaitEqueue(Equeue* eq, Event* events, int num, int* ou
         eq->pending.pop_front();
     }
     if (out) *out = n;
+    if (ll) {  // LBP3_LOW_LATENCY: where the frame thread waits (0 = a flip event, 1 = other equeue events)
+        bool flip = false;
+        for (int i = 0; i < n; ++i) flip |= events[i].filter == kEvfiltVideoOut;
+        videoout::LowLatencyNoteWait(flip ? 0 : 1, std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - llBegin).count());
+    }
     return ok ? SCE_OK : SceErr(kETIMEDOUT);
 }
 
