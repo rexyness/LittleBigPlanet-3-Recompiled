@@ -19,14 +19,6 @@
 #include "hle/kernel_errors.h"
 #include "hle/register.h"
 
-namespace hle::videoout {
-int LowLatencyMode();          // videoout.cpp, LBP3_LOW_LATENCY
-void LowLatencyFrameStart();
-}  // namespace hle::videoout
-namespace hle::kernel {
-bool IsMainThread();  // kernel_time.cpp
-}  // namespace hle::kernel
-
 namespace hle::kernel {
 namespace {
 
@@ -354,16 +346,6 @@ int PS4_SYSV_ABI sceKernelWaitEqueue(Equeue* eq, Event* events, int num, int* ou
         eq->pending.pop_front();
     }
     if (out) *out = n;
-    // LBP3_LOW_LATENCY (videoout.cpp): when the main thread takes a flip event it is about to
-    // start its next frame; the limiter may hold it back a few ms first (outside the lock).
-    if (videoout::LowLatencyMode() >= 0 && IsMainThread()) {
-        bool flip = false;
-        for (int i = 0; i < n; ++i) flip |= events[i].filter == kEvfiltVideoOut;
-        if (flip) {
-            lk.unlock();
-            videoout::LowLatencyFrameStart();
-        }
-    }
     return ok ? SCE_OK : SceErr(kETIMEDOUT);
 }
 
