@@ -30,6 +30,9 @@ struct Paths {
 };
 
 fs::path LauncherDir();
+// A packaged install (tools/make_package.ps1): portable.txt beside the launcher. Everything (user\,
+// analysis\, game_dir.txt) then lives in the launcher's own folder.
+bool Portable(const fs::path& launcher_dir);
 // The game folder: the setting if given; else the launcher's parent folder if it has
 // game_dir.txt or user\savedata; else, when the launcher is built in a git worktree, the main
 // checkout that worktree belongs to (its .git file names it).
@@ -81,8 +84,8 @@ std::filesystem::path PythonPath();
 
 // user\config\online_account.txt of the game folder.
 std::filesystem::path AccountFilePath(const Paths& p);
-// The settings with an empty online name or server filled in from the account file (what the
-// game is started with).
+// The settings with the online name and server of the active account file, when there is one
+// (it is the single source: the game reads that file's password). What the game is started with.
 Settings EffectiveOnline(const Settings& s, const Paths& p);
 
 // Everything LBP3_* the game gets: the mapped settings, plus LBP3_GAME_DIR (from game_dir.txt, as

@@ -2,6 +2,7 @@
 #include "launcher_sys.h"
 
 #include "launcher_account.h"  // ParseAccountFile
+#include "launcher_quitmenu.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -168,6 +169,11 @@ fs::path MainCheckoutFromGitFile(const std::string& text) {
     return fs::path(dir.substr(0, at)).make_preferred();
 }
 
+bool Portable(const fs::path& launcher_dir) {
+    std::error_code ec;
+    return fs::exists(launcher_dir / "portable.txt", ec);
+}
+
 fs::path FindRoot(const fs::path& launcher_dir, const std::string& setting) {
     if (!setting.empty()) return fs::path(setting);
     std::error_code pec;
@@ -204,6 +210,7 @@ Paths ResolvePaths(const Settings& s) {
         p.game_dir = line.empty() ? p.root.parent_path() / "LBP3 Game Files" : fs::path(line);
     }
     if (!p.game_dir.empty()) p.dlc_dir = p.game_dir / "CUSA00473-DLC";
+    if (!s.dlc_dir.empty()) p.dlc_dir = fs::path(s.dlc_dir);
     std::error_code ec;
     const bool is_port = !port_exe.empty() && fs::equivalent(p.exe, port_exe, ec);
     const fs::path own = p.root / "user" / "shader_cache_best";
@@ -235,11 +242,9 @@ std::vector<Check> RunChecks(const Settings& s, const Paths& p) {
     if (!p.cache_dir.empty())
         c.push_back({fs::exists(p.cache_dir / "CUSA00473", ec), "This build's shader cache", p.cache_dir.string()});
     if (s.quit_menu) {
-        const bool tool = fs::exists(p.worktree / "tools" / "quit_menu_setup.py", ec);
-        const bool py = PythonFound();
-        c.push_back({tool && py, "Quit Game setup",
-                     !tool ? "this build has no tools\\quit_menu_setup.py (the in-game menu can still quit)"
-                           : (!py ? "needs Python on PATH (the in-game menu can still quit)" : "Python found")});
+        const bool files = !QuitMenuFolder(p.game_dir).empty();
+        c.push_back({files, "Quit Game setup",
+                     files ? "built in (written before Play)" : "the game files have no patch_001.farc (the in-game menu can still quit)"});
     }
     if (s.online) {
         const bool ok = !NormalizeServer(s.online_server).empty() && ValidOnlineName(s.online_name);
@@ -364,66 +369,16 @@ fs::path PythonPath() {
 }
 
 EnvList QuitMenuSetup(const Paths& p, std::string* note) {
-    std::error_code ec;
-    const fs::path script = p.worktree / "tools" / "quit_menu_setup.py";
-    if (!fs::exists(script, ec)) {
-        if (note) *note = "Quit Game: this build has no Quit Game setup";
+    // Native (launcher_quitmenu, a port of LBPPC's quit_menu.py): no Python needed.
+    const fs::path folder = QuitMenuFolder(p.game_dir);
+    if (folder.empty()) {
+        if (note) *note = "Quit Game: not added (no patch_001.farc with output\\orbisguids.map in the game files)";
         return {};
     }
-    wchar_t python[MAX_PATH];
-    if (!PythonFound() || !SearchPathW(nullptr, L"python.exe", nullptr, MAX_PATH, python, nullptr)) {
-        if (note) *note = "Quit Game: not added (Python isn't installed); the in-game menu (Insert) can still quit";
-        return {};
-    }
-    const fs::path out = p.root / "analysis" / "launcher_quit_menu.txt";
-    fs::create_directories(out.parent_path(), ec);
-    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
-    HANDLE file = CreateFileW(out.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    std::wstring cmd = L"\"" + std::wstring(python) + L"\" \"" + script.wstring() + L"\"";
-    // Its environment: the launcher's, with LBP3_GAME_DIR as play_best.bat gives it.
-    std::wstring env;
-    {
-        EnvList pairs;
-        if (!p.game_dir.empty()) pairs.emplace_back("LBP3_GAME_DIR", p.game_dir.string());
-        LPWCH block = GetEnvironmentStringsW();
-        for (LPWCH e = block; *e; e += wcslen(e) + 1) {
-            if (_wcsnicmp(e, L"LBP3_", 5) == 0) continue;
-            env += e;
-            env.push_back(L'\0');
-        }
-        FreeEnvironmentStringsW(block);
-        for (const auto& [k, v] : pairs) {
-            env += W(k + "=" + v);
-            env.push_back(L'\0');
-        }
-        env.push_back(L'\0');
-    }
-    STARTUPINFOW si{sizeof si};
-    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    si.hStdOutput = si.hStdError = file;
-    si.hStdInput = nullptr;
-    PROCESS_INFORMATION pi{};
-    const BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
-                                   env.data(), p.root.c_str(), &si, &pi);
-    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
-    if (!ok) {
-        if (note) *note = "Quit Game: not added (Python didn't start)";
-        return {};
-    }
-    const DWORD wait = WaitForSingleObject(pi.hProcess, 120000);
-    DWORD code = 1;
-    if (wait == WAIT_OBJECT_0) GetExitCodeProcess(pi.hProcess, &code);
-    else TerminateProcess(pi.hProcess, 1);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    const std::string said = FirstLine(ReadFile(out));
-    const fs::path edits = p.worktree / "user" / "file_edits.bin";
-    if (code != 0 || !fs::exists(edits, ec)) {
-        if (note) *note = said.empty() ? "Quit Game: not added (its setup failed)" : said;
-        return {};
-    }
-    if (note) *note = said.empty() ? "Quit Game: added to the pause menu" : said;
+    const fs::path edits = p.root / "user" / "file_edits.bin";
+    const QuitMenuResult r = WriteQuitMenuEdits(folder, edits);
+    if (note) *note = r.message;
+    if (!r.ok) return {};
     return {{"LBP3_FILE_EDITS", edits.string()}, {"LBP3_QUIT_MENU", "1"}};
 }
 
@@ -431,15 +386,14 @@ fs::path AccountFilePath(const Paths& p) { return p.root.empty() ? fs::path() : 
 
 Settings EffectiveOnline(const Settings& s, const Paths& p) {
     Settings e = s;
-    if (e.online_name.empty() || e.online_server.empty()) {
-        const fs::path f = AccountFilePath(p);
-        std::error_code ec;
-        if (!f.empty() && fs::exists(f, ec)) {
-            const AccountFile a = ParseAccountFile(ReadFile(f));
-            if (e.online_name.empty()) e.online_name = a.name;
-            if (e.online_server.empty()) e.online_server = a.server;
-        }
-    }
+    const fs::path f = AccountFilePath(p);
+    std::error_code ec;
+    if (f.empty() || !fs::exists(f, ec)) return e;  // no account file: the typed name and server
+    // The active account file decides: its name and server (the game reads its password from it,
+    // so a typed name must never be paired with another account's password).
+    const AccountFile a = ParseAccountFile(ReadFile(f));
+    if (!a.name.empty()) e.online_name = a.name;
+    if (!a.server.empty()) e.online_server = a.server;
     return e;
 }
 
@@ -448,6 +402,8 @@ EnvList GameEnvironment(const Settings& s, const Paths& p, const EnvList& extra)
     // ResolvePaths already took LBP3_GAME_DIR from the launcher's own environment if it was set.
     if (!p.game_dir.empty()) env.emplace_back("LBP3_GAME_DIR", p.game_dir.string());
     if (!p.cache_dir.empty()) env.emplace_back("LBP3_SHADER_CACHE_DIR", p.cache_dir.string());
+    // A DLC folder of the player's choosing (the runtime looks in <dump>\CUSA00473-DLC otherwise).
+    if (!s.dlc_dir.empty()) env.emplace_back("LBP3_ADDCONT_DIR", s.dlc_dir);
     env.insert(env.end(), extra.begin(), extra.end());
     return env;
 }

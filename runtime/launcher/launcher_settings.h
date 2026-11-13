@@ -50,6 +50,12 @@ struct Settings {
     bool motion_filter = true;
     bool tilt_keys = true;
     bool mouse_touch = false;
+    // display and sound
+    std::string display;       // LBP3_DISPLAY: empty = where Windows puts it, "2" = the 2nd display, "165hz"
+    std::string window_mode = "windowed";  // LBP3_WINDOW: windowed, borderless or fullscreen
+    int volume = 100;          // LBP3_VOLUME (0-100; 100 = unset)
+    bool downmix = true;       // the runtime's own 7.1 -> stereo; false = SDL's (LBP3_DOWNMIX=sdl)
+    std::string dlc_dir;       // empty = <dump>\CUSA00473-DLC; else LBP3_ADDCONT_DIR
     // online (off; no server is built in). One switch: the levels/profiles server (Refresh,
     // LBP3_ONLINE*) and shadNet (sign-in, friends, multiplayer; LBP3_SHADNET*) together. An empty
     // server or name is taken from user\config\online_account.txt (EffectiveOnline), and the
@@ -69,8 +75,17 @@ struct Settings {
     bool discord = false;
     std::string discord_app_id;
     std::string pkg_extractor;       // empty = <game dump folder>\pkg_extractor.exe
-    std::string update_remote = "fork";  // the git remote "Check for updates" reads
+    std::string update_remote = "fork";  // the git remote "Check for updates" reads (dev checkouts)
+    bool update_on_start = false;    // check for a new release (or new commits) when the launcher opens
+    bool tray_while_playing = false; // hide to the notification area while the game runs
+    bool tour_done = false;          // the short tour of the launcher was shown
+    bool confirm_quit = true;        // ask before closing the launcher while the game runs
 };
+
+// Window modes the runtime knows (LBP3_WINDOW).
+bool ValidWindowMode(const std::string& mode);
+// LBP3_DISPLAY: a display number (1-16) or a refresh rate ("165hz", "59.94Hz"); empty = none.
+bool ValidDisplay(const std::string& display);
 
 // A Discord application ID is a snowflake: 17-20 digits.
 bool ValidDiscordAppId(const std::string& id);

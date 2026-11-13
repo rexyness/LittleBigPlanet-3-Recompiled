@@ -30,6 +30,8 @@ struct Image {
     bool ok() const { return w > 0 && h > 0; }
 };
 Image LoadImageFile(const std::filesystem::path& path);
+// The same from bytes in memory (a server's level icon, a resource).
+Image LoadImageMemory(const void* data, size_t size);
 // The same image scaled down to fit max_w x max_h (box filter; returns it unchanged if smaller).
 Image Downscale(const Image& in, int max_w, int max_h);
 

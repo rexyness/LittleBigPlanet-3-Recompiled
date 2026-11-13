@@ -181,10 +181,26 @@ target_link_libraries(motiontest PRIVATE hle)
 
 # LBP3Launcher.exe: the settings window (launcher/). Our own code; it needs only ImGui, SDL3 and
 # Windows (not the runtime), so it builds next to lbp3.exe without linking the game.
+# miniz (externals, MIT): zlib for the Quit Game writer and zip for the release updater.
+add_library(launcher_miniz STATIC
+    ${SHADPS4_EXT}/miniz/miniz.c
+    ${SHADPS4_EXT}/miniz/miniz_tdef.c
+    ${SHADPS4_EXT}/miniz/miniz_tinfl.c
+    ${SHADPS4_EXT}/miniz/miniz_zip.c)
+target_include_directories(launcher_miniz PUBLIC ${SHADPS4_EXT}/miniz launcher)
+target_compile_definitions(launcher_miniz PUBLIC MINIZ_NO_TIME _CRT_SECURE_NO_WARNINGS)
+target_compile_options(launcher_miniz PRIVATE -Wno-everything)
+
 add_library(launcher_core STATIC
     launcher/launcher_settings.cpp
     launcher/launcher_sys.cpp
     launcher/launcher_account.cpp
+    launcher/launcher_accounts.cpp
+    launcher/launcher_refresh.cpp
+    launcher/launcher_friends.cpp
+    launcher/launcher_quitmenu.cpp
+    launcher/launcher_release.cpp
+    launcher/launcher_input.cpp
     launcher/launcher_dump.cpp
     launcher/launcher_proc.cpp
     launcher/launcher_update.cpp
@@ -195,17 +211,34 @@ add_library(launcher_core STATIC
 target_include_directories(launcher_core PUBLIC launcher)
 target_compile_definitions(launcher_core PUBLIC _CRT_SECURE_NO_WARNINGS)
 target_include_directories(launcher_core PRIVATE ${SHADPS4_EXT}/stb)  # the dump's PNGs (launcher_shell)
-target_link_libraries(launcher_core PUBLIC winhttp bcrypt shell32 advapi32 ole32 uuid propsys)
+# nlohmann/json (externals, MIT) for the web APIs; input/action_table.h (shared with the runtime;
+# SDL's gamepad enum only, nothing linked from SDL).
+target_include_directories(launcher_core PUBLIC ${SHADPS4_EXT}/json/include src
+    $<TARGET_PROPERTY:SDL3::SDL3,INTERFACE_INCLUDE_DIRECTORIES>)
+target_link_libraries(launcher_core PUBLIC winhttp bcrypt shell32 advapi32 ole32 uuid propsys launcher_miniz)
+# LBP3_PORT_VERSION: a packaged build's version (tools/make_package.ps1); empty in dev builds, which
+# read SOURCE.md beside the launcher instead.
+set(LBP3_PORT_VERSION "" CACHE STRING "The package version compiled into the launcher (v0.1.0-lbp3port)")
+if(LBP3_PORT_VERSION)
+    target_compile_definitions(launcher_core PRIVATE LBP3_PORT_VERSION="${LBP3_PORT_VERSION}")
+endif()
+# shadNet for the launcher (Friends, Test sign-in, Create account): the runtime's own client.
+add_library(launcher_net STATIC launcher/launcher_net.cpp launcher/launcher_net_glue.cpp)
+set_target_properties(launcher_net PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
+target_include_directories(launcher_net PRIVATE ${SHADPS4}/src ${SHADPS4_EXT}/libressl/include)
+target_compile_definitions(launcher_net PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
+target_link_libraries(launcher_net PUBLIC launcher_core shadnet_client PRIVATE ssl crypto fmt::fmt ws2_32)
 # The window, with its own icon and version information (launcher.rc), and the port's motion
 # filter (input/motion, standalone) for the controller tester.
 add_executable(LBP3Launcher WIN32 launcher/launcher_main.cpp launcher/launcher.rc src/input/motion.cpp)
 target_include_directories(LBP3Launcher PRIVATE src)
-target_link_libraries(LBP3Launcher PRIVATE launcher_core imgui SDL3::SDL3)
+target_link_libraries(LBP3Launcher PRIVATE launcher_core launcher_net imgui SDL3::SDL3)
 # Its offline test: the ini, the settings -> LBP3_* mapping, names and addresses, JSON, SHA-512,
 # the zip, saves backup/restore on a temporary folder, param.sfo and archive checks, git log
 # parsing, the log readers, Discord's frames against a fake pipe, and the process runner.
 add_executable(launchertest tests/launchertest.cpp)
-target_link_libraries(launchertest PRIVATE launcher_core)
+target_link_libraries(launchertest PRIVATE launcher_core launcher_net libprotobuf)
+target_include_directories(launchertest PRIVATE ${SHADNET_PROTO_OUT})  # the fake shadNet server's replies
 
 # shadNet offline (net/shadnet_service, best/shadnet_design.md): the settings, off means no client
 # (no thread, no socket), and a login against an in-process mock server speaking the protocol.

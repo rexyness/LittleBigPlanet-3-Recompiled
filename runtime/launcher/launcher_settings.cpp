@@ -96,6 +96,14 @@ std::string ToIni(const Settings& s) {
       << "motion_filter=" << b(s.motion_filter) << "\n"
       << "tilt_keys=" << b(s.tilt_keys) << "\n"
       << "mouse_touch=" << b(s.mouse_touch) << "\n"
+      << "; display: empty, a number (1 = the first display) or a refresh rate such as 165hz\n"
+      << "display=" << OneLine(s.display) << "\n"
+      << "; windowed, borderless or fullscreen\n"
+      << "window_mode=" << OneLine(s.window_mode) << "\n"
+      << "volume=" << s.volume << "\n"
+      << "downmix=" << b(s.downmix) << "\n"
+      << "; empty = the dump's CUSA00473-DLC\n"
+      << "dlc_dir=" << OneLine(s.dlc_dir) << "\n"
       << "[online]\n"
       << "; off unless 1, and only with a server and a name\n"
       << "online=" << b(s.online) << "\n"
@@ -114,7 +122,11 @@ std::string ToIni(const Settings& s) {
       << "[tools]\n"
       << "; empty = pkg_extractor.exe in the game dump's folder\n"
       << "pkg_extractor=" << OneLine(s.pkg_extractor) << "\n"
-      << "update_remote=" << OneLine(s.update_remote) << "\n";
+      << "update_remote=" << OneLine(s.update_remote) << "\n"
+      << "update_on_start=" << b(s.update_on_start) << "\n"
+      << "tray_while_playing=" << b(s.tray_while_playing) << "\n"
+      << "tour_done=" << b(s.tour_done) << "\n"
+      << "confirm_quit=" << b(s.confirm_quit) << "\n";
     return o.str();
 }
 
@@ -170,6 +182,11 @@ Settings FromIni(const std::string& text) {
             else if (key == "motion_filter") ParseBool(v, s.motion_filter);
             else if (key == "tilt_keys") ParseBool(v, s.tilt_keys);
             else if (key == "mouse_touch") ParseBool(v, s.mouse_touch);
+            else if (key == "display" && ValidDisplay(v)) s.display = v;
+            else if (key == "window_mode" && ValidWindowMode(v)) s.window_mode = v;
+            else if (key == "volume" && ParseInt(v, 0, 100, n)) s.volume = n;
+            else if (key == "downmix") ParseBool(v, s.downmix);
+            else if (key == "dlc_dir") s.dlc_dir = v;
         } else if (section == "online") {
             if (key == "online") ParseBool(v, s.online);
             else if (key == "server") s.online_server = v;
@@ -188,6 +205,10 @@ Settings FromIni(const std::string& text) {
         } else if (section == "tools") {
             if (key == "pkg_extractor") s.pkg_extractor = v;
             else if (key == "update_remote" && !v.empty()) s.update_remote = v;
+            else if (key == "update_on_start") ParseBool(v, s.update_on_start);
+            else if (key == "tray_while_playing") ParseBool(v, s.tray_while_playing);
+            else if (key == "tour_done") ParseBool(v, s.tour_done);
+            else if (key == "confirm_quit") ParseBool(v, s.confirm_quit);
         }
     }
     return s;
@@ -203,6 +224,26 @@ std::string ShadnetServer(const Settings& s) {
     if (const size_t slash = host.find('/'); slash != std::string::npos) host.resize(slash);
     if (const size_t colon = host.rfind(':'); colon != std::string::npos) host.resize(colon);  // shadNet has its own port
     return host;
+}
+
+bool ValidWindowMode(const std::string& m) { return m == "windowed" || m == "borderless" || m == "fullscreen"; }
+
+bool ValidDisplay(const std::string& d) {
+    if (d.empty() || d.size() > 12) return false;
+    size_t i = 0, digits = 0;
+    bool dot = false;
+    for (; i < d.size() && (std::isdigit(static_cast<unsigned char>(d[i])) || (d[i] == '.' && !dot)); ++i) {
+        if (d[i] == '.') dot = true;
+        else ++digits;
+    }
+    if (!digits) return false;
+    const std::string rest = d.substr(i);
+    if (rest.empty()) {
+        if (dot) return false;
+        const int n = std::atoi(d.c_str());
+        return n >= 1 && n <= 16;
+    }
+    return rest == "hz" || rest == "Hz" || rest == "HZ";
 }
 
 bool ValidDiscordAppId(const std::string& id) {
@@ -233,6 +274,10 @@ LaunchPlan MapSettings(const Settings& s) {
     if (!s.motion_filter) set("LBP3_MOTION", "raw");
     if (!s.tilt_keys) set("LBP3_TILT_KEYS", "off");
     if (s.mouse_touch) set("LBP3_MOUSE_TOUCH", "1");
+    if (!s.display.empty() && ValidDisplay(s.display)) set("LBP3_DISPLAY", s.display);
+    if (s.window_mode == "borderless" || s.window_mode == "fullscreen") set("LBP3_WINDOW", s.window_mode);
+    if (s.volume >= 0 && s.volume < 100) set("LBP3_VOLUME", std::to_string(s.volume));
+    if (!s.downmix) set("LBP3_DOWNMIX", "sdl");
     if (s.online) {
         const std::string server = NormalizeServer(s.online_server);
         // Online needs both: without them the game would sign in to nothing.

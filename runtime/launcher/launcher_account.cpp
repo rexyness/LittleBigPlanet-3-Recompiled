@@ -37,7 +37,7 @@ std::string WinError(const std::string& what) {
 }  // namespace
 
 HttpReply HttpJson(const std::string& method, const std::string& url, const std::string& body,
-                   const std::string& authorization) {
+                   const std::string& authorization, size_t max_bytes) {
     HttpReply r;
     std::wstring wurl = W(url);
     URL_COMPONENTS uc{sizeof uc};
@@ -80,7 +80,11 @@ HttpReply HttpJson(const std::string& method, const std::string& url, const std:
         DWORD read = 0;
         if (!WinHttpReadData(request.h, chunk.data(), avail, &read) || read == 0) break;
         r.body.append(chunk.data(), read);
-        if (r.body.size() > (1u << 20)) break;  // an account reply is small
+        if (r.body.size() > max_bytes) {  // more than the caller wants (an API reply is small)
+            r.error = "the reply was too big";
+            r.status = 0;
+            break;
+        }
     }
     return r;
 }
@@ -213,15 +217,23 @@ AccountFile ParseAccountFile(const std::string& text) {
             a.password = value;
         else if (key == "server")
             a.server = value;
+        else if (key == "email" || key == "emailaddress" || key == "email_address")
+            a.email = value;
     }
     return a;
 }
 
 AccountResult CreateRefreshAccount(const std::string& server, const std::string& name) {
+    std::string email = name + "@lbppc.invalid";  // the servers send no mail; one address per name
+    for (char& c : email) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return CreateRefreshAccountWith(server, name, RandomPassword(), email);
+}
+
+AccountResult CreateRefreshAccountWith(const std::string& server, const std::string& name, const std::string& password,
+                                       const std::string& email) {
     AccountResult r;
     const std::string api = server + "/api/v3";
-    r.password = RandomPassword();
-    const std::string email = name + "@lbppc.invalid";  // the servers send no mail; one address per name
+    r.password = password;
     const std::string body = "{\"username\":\"" + JsonEscape(name) + "\",\"emailAddress\":\"" + JsonEscape(email) +
                              "\",\"passwordSha512\":\"" + Sha512Hex(r.password) + "\"}";
     const HttpReply reg = HttpJson("POST", api + "/register", body, "");
@@ -230,7 +242,8 @@ AccountResult CreateRefreshAccount(const std::string& server, const std::string&
         return r;
     }
     if (!JsonTrue(reg.body, "success")) {
-        const std::string why = JsonString(reg.body, "error");
+        std::string why = JsonString(reg.body, "message");  // Refresh: "error": {"name", "message", ...}
+        if (why.empty()) why = JsonString(reg.body, "error");
         r.message = "The server refused: " + (why.empty() ? "HTTP " + std::to_string(reg.status) : why);
         return r;
     }
@@ -242,7 +255,7 @@ AccountResult CreateRefreshAccount(const std::string& server, const std::string&
     const HttpReply allow = HttpJson("PATCH", api + "/users/me",
                                      "{\"psnAuthenticationAllowed\":true,\"rpcnAuthenticationAllowed\":true}", token);
     if (allow.status == 0 || !JsonTrue(allow.body, "success")) {
-        const std::string why = allow.status == 0 ? allow.error : JsonString(allow.body, "error");
+        const std::string why = allow.status == 0 ? allow.error : JsonString(allow.body, "message");
         r.ok = true;  // the account exists; the password is still needed
         r.message = "Account created, but game logins aren't allowed yet (" +
                     (why.empty() ? "HTTP " + std::to_string(allow.status) : why) +

@@ -7,6 +7,8 @@
 // temporary folders; nothing reaches the network.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <objbase.h>
 
@@ -18,7 +20,10 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <algorithm>
 #include <map>
+#include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -32,6 +37,16 @@
 #include "../launcher/launcher_stats.h"
 #include "../launcher/launcher_sys.h"
 #include "../launcher/launcher_update.h"
+#include "../launcher/launcher_accounts.h"
+#include "../launcher/launcher_friends.h"
+#include "../launcher/launcher_input.h"
+#include "../launcher/launcher_net.h"
+#include "../launcher/launcher_quitmenu.h"
+#include "../launcher/launcher_refresh.h"
+#include "../launcher/launcher_release.h"
+#include "input/action_table.h"
+#include "miniz.h"
+#include "shadnet.pb.h"
 
 using namespace launcher;
 namespace fs = std::filesystem;
@@ -798,7 +813,7 @@ static void TestOnlineSwitch() {
     e.online_name = "Typed_name";
     e.online_server = "127.0.0.1:10061";
     f = EffectiveOnline(e, p);
-    CHECK(f.online_name == "Typed_name" && f.online_server == "127.0.0.1:10061");
+    CHECK(f.online_name == "Sack_boy-1" && f.online_server == "play.lbppc.com");  // the account file decides
     e.online_name.clear();
     e.online_server.clear();
     std::map<std::string, std::string> env;
@@ -831,6 +846,9 @@ static void TestRealDump() {
     std::printf("  %d DLC packs; first: %s\n", static_cast<int>(packs.size()), packs.empty() ? "-" : packs[0].title.c_str());
 }
 
+#include "launchertest_v3.inc"
+#include "launchertest_net.inc"
+
 int main() {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     TestAccountAgainstMock();
@@ -851,6 +869,14 @@ int main() {
     TestShell();
     TestOnlineSwitch();
     TestRealDump();
+    TestV3Settings();
+    TestAccountsV3();
+    TestRefreshParse();
+    TestFriendsModel();
+    TestReleaseLogic();
+    TestInputConfig();
+    TestQuitMenuReal();
+    TestNetFake();
     std::printf("launchertest: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

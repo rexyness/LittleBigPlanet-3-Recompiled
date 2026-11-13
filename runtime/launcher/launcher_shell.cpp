@@ -89,6 +89,16 @@ Image LoadImageFile(const fs::path& path) {
     return img;
 }
 
+Image LoadImageMemory(const void* data, size_t size) {
+    Image img;
+    int n = 0;
+    stbi_uc* px = stbi_load_from_memory(static_cast<const stbi_uc*>(data), static_cast<int>(size), &img.w, &img.h, &n, 4);
+    if (!px) return Image{};
+    img.rgba.assign(px, px + static_cast<size_t>(img.w) * img.h * 4);
+    stbi_image_free(px);
+    return img;
+}
+
 Image Downscale(const Image& in, int max_w, int max_h) {
     if (!in.ok() || (in.w <= max_w && in.h <= max_h)) return in;
     const double s = std::min(double(max_w) / in.w, double(max_h) / in.h);
