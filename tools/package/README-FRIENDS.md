@@ -39,7 +39,7 @@ after a reboot can also take 20-40 seconds while Windows reads that cache.
 Online play uses the community servers at **play.lbppc.com** (made by the LBPPC project; Sony's servers are
 gone). You need your own account there: on the launcher's **Online** page, type an online name and press
 **Create account**, then switch **Online** on. Your password stays in `user\config\online_account.txt` on your
-PC. Community levels, Dive In and your friends list work. Add friends on the launcher's **Online** page.
+PC. Community levels, Dive In and your friends list work. Add friends by name on the launcher's **Friends** page.
 
 Joining a friend's game and inviting friends (from the game's own menus) are **new and experimental**: they
 haven't been tested between two PCs yet, so expect problems. Only your shadNet friends can join your game.
