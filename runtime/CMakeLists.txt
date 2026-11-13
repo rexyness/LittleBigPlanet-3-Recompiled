@@ -176,7 +176,23 @@ target_link_libraries(uxtest PRIVATE hle)
 add_executable(motiontest tests/motiontest.cpp)
 target_link_libraries(motiontest PRIVATE hle)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest unlocktest vkcachetest uxtest motiontest)
+# LBP3Launcher.exe: the settings window (launcher/). Our own code; it needs only ImGui, SDL3 and
+# Windows (not the runtime), so it builds next to lbp3.exe without linking the game.
+add_library(launcher_core STATIC
+    launcher/launcher_settings.cpp
+    launcher/launcher_sys.cpp
+    launcher/launcher_account.cpp
+)
+target_include_directories(launcher_core PUBLIC launcher)
+target_link_libraries(launcher_core PUBLIC winhttp bcrypt shell32 advapi32)
+add_executable(LBP3Launcher WIN32 launcher/launcher_main.cpp)
+target_link_libraries(LBP3Launcher PRIVATE launcher_core imgui SDL3::SDL3 ole32 uuid)
+# Its offline test: the ini, the settings -> LBP3_* mapping, names and addresses, JSON, SHA-512,
+# the zip, and saves backup/restore on a temporary folder.
+add_executable(launchertest tests/launchertest.cpp)
+target_link_libraries(launchertest PRIVATE launcher_core)
+
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest unlocktest vkcachetest uxtest motiontest LBP3Launcher)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()
