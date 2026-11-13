@@ -23,13 +23,13 @@ The first visit to each area can pause briefly while your graphics driver builds
 - **Online on the community servers at play.lbppc.com** (made by the LBPPC project; Sony's servers are gone):
   create an account from the launcher's Online page. Community levels, Dive In, your profile and your
   friends list work. Online co-op is **experimental**: inviting and joining a friend works, but the session
-  currently drops after a few minutes.
+  may drop after a few minutes.
 - A launcher with a setup wizard, a game file check, a DLC installer, save backups, a controller test, play
   stats and updates.
 
 ### Known issues
 - Some scenes are brighter than on a PS4.
-- Online co-op is experimental: inviting and joining a friend works, but the session currently drops after a few
+- Online co-op is experimental: inviting and joining a friend works, but the session may drop after a few
   minutes. A fix is in progress and will arrive through the launcher's updater (Tools > Check for updates). Only
   your shadNet friends can join you.
 - First-visit shader pauses; the very first start after a reboot can take 20-40 seconds.

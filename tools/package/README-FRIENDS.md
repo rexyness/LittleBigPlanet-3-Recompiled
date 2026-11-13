@@ -43,7 +43,7 @@ gone). You need your own account there: on the launcher's **Online** page, type 
 PC. Community levels, Dive In and your friends list work. Add friends by name on the launcher's **Friends** page.
 
 Online co-op is **experimental**: inviting and joining a friend works (from the game's own menus), but the
-session currently drops after a few minutes. A fix is in progress and will arrive through the launcher's
+session may drop after a few minutes. A fix is in progress and will arrive through the launcher's
 updater. Only your shadNet friends can join your game.
 
 If the game says *"A problem occurred when attempting to connect to the LittleBigPlanet servers (403)"*, the
@@ -67,7 +67,7 @@ controllers for local co-op. **Insert** on the keyboard, or **L3+R3** on the pad
 ## Known issues
 
 - Brightness in some scenes is higher than on a PS4.
-- Online co-op is experimental: inviting and joining a friend works, but the session currently drops after a
+- Online co-op is experimental: inviting and joining a friend works, but the session may drop after a
   few minutes. A fix is in progress and will arrive through the launcher's updater.
 - The first-visit shader pauses described above.
 
