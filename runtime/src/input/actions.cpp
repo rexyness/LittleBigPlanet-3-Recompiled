@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -44,6 +45,10 @@ constexpr ActionInfo kActions[] = {
     {Action::Confirm, "confirm", "Return", "menus: select"},
     {Action::Back, "back", "Escape, Backspace", "menus: back / close"},
     {Action::Pause, "pause", "Tab", "pause menu"},
+    {Action::TiltLeft, "tilt_left", "Keypad 4", "tilt the pad left (for pads without motion sensors, and the keyboard)"},
+    {Action::TiltRight, "tilt_right", "Keypad 6", "tilt the pad right"},
+    {Action::TiltForward, "tilt_forward", "Keypad 8", "tilt the pad forward (front down)"},
+    {Action::TiltBack, "tilt_back", "Keypad 2", "tilt the pad back (front up)"},
 };
 static_assert(std::size(kActions) == static_cast<size_t>(Action::Count));
 
@@ -168,6 +173,18 @@ void ApplyToFrame(ps4::PadData& frame, bool keys) {
     if (Held(Action::Confirm, keys)) frame.buttons |= ps4::PAD_CROSS;
     if (Held(Action::Back, keys)) frame.buttons |= ps4::PAD_CIRCLE;
     if (Held(Action::Pause, keys)) frame.buttons |= ps4::PAD_OPTIONS;
+}
+
+bool Tilt(float& roll, float& pitch, bool keys) {
+    static const bool enabled = [] {
+        const char* v = std::getenv("LBP3_TILT_KEYS");
+        return !(v && std::string(v) == "off");
+    }();
+    roll = pitch = 0.f;
+    if (!enabled) return false;
+    roll = static_cast<float>((Held(Action::TiltRight, keys) ? 1 : 0) - (Held(Action::TiltLeft, keys) ? 1 : 0));
+    pitch = static_cast<float>((Held(Action::TiltBack, keys) ? 1 : 0) - (Held(Action::TiltForward, keys) ? 1 : 0));
+    return roll != 0.f || pitch != 0.f;
 }
 
 void RunGameHooks() {

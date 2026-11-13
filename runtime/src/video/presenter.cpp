@@ -1,6 +1,7 @@
 #include "video/presenter.h"
 #include "ui/overlay.h"
 #include "video/live_stats.h"
+#include "input/mouse_touch.h"
 
 #include <SDL3/SDL.h>
 
@@ -243,7 +244,8 @@ void PresenterThread() {
     for (;;) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
-            const bool keyboardUsed = ui::overlay::HandleEvent(e);  // typing into the keyboard, answering a dialog
+            bool keyboardUsed = ui::overlay::HandleEvent(e);  // typing into the keyboard, answering a dialog
+            if (!keyboardUsed && input::mouse_touch::HandleEvent(e)) keyboardUsed = true;  // LBP3_MOUSE_TOUCH (F7)
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && !keyboardUsed) {
                 if (auto handler = g_hotkeyHandler.load()) handler(static_cast<int>(e.key.key));
             }
