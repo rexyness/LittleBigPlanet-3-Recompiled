@@ -376,15 +376,9 @@ int PS4_SYSV_ABI bind(int s, const void* addr, uint32_t) {
     BindSocket(s, addr);
     return 0;
 }
-int64_t PS4_SYSV_ABI recvfrom(int s, void* buf, size_t len, int flags, void* from, uint32_t* fromLen) {
+int64_t PS4_SYSV_ABI recvfrom(int s, void* buf, size_t len, int, void* from, uint32_t* fromLen) {
+    // The game reads its ping's echo replies here too (polling, as for its loopback datagrams).
     const int64_t n = RecvLocal(s, buf, len, from, fromLen);
-    // Online: how the game waits for its ping's reply (the first calls on a raw ICMP socket).
-    if (online::Enabled() && IsIcmpSocket(s, nullptr)) {
-        static std::atomic<int> logged{0};
-        if (n >= 0 || logged++ < 8)
-            IcmpLog("recvfrom(%d, %zu bytes, flags %#x) from %p -> %lld", s, len, flags, __builtin_return_address(0),
-                    static_cast<long long>(n));
-    }
     return n >= 0 ? n : PosixFail(kEWouldBlock);
 }
 int64_t PS4_SYSV_ABI recv(int s, void* buf, size_t len, int flags) { return recvfrom(s, buf, len, flags, nullptr, nullptr); }
