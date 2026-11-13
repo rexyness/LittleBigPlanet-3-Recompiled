@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "ui/boot_overlay.h"
 #include "ui/overlay_layers.h"
 
 namespace ui::overlay {
@@ -130,6 +131,7 @@ void Attach(SDL_Window* window, SDL_Renderer* renderer) {
         osk::layer::Reset();
         dialog::layer::Reset();
         menu::layer::Reset();
+        boot::layer::Reset();
         ShutdownImGui();
     }
     g_window = window;
@@ -171,22 +173,24 @@ void Draw() {
         menu::layer::PollHotkey(before.OthersUp());
     }
     const bool hud = menu::layer::Hud();
-    if (!Wanted() && !hud) return;
-    if (hud) detail::EnsureImGui();
+    const bool bootScreen = boot::layer::Wanted();  // the loading screen until the game's first picture
+    if (!Wanted() && !hud && !bootScreen) return;
+    if (hud || bootScreen) detail::EnsureImGui();
     Up up = SyncLayers();
-    if (!up.Any() && !hud) return;
+    if (!up.Any() && !hud && !bootScreen) return;
     // The pad: the top layer acts on it; the others only note that they aren't on top.
     const bool oskTop = up.OskTop(), menuTop = up.MenuTop();
     if (up.osk) osk::layer::Poll(oskTop);
     if (up.dialog) dialog::layer::Poll(!oskTop && !menuTop);
     if (up.menu) menu::layer::Poll(menuTop);
     up = SyncLayers();  // a layer may have answered
-    if ((!up.Any() && !hud) || !g_imgui) return;
+    if ((!up.Any() && !hud && !bootScreen) || !g_imgui) return;
 
     ImGui_ImplSDLRenderer3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
     const ImVec2 display = ImGui::GetIO().DisplaySize;
+    if (bootScreen) boot::layer::Frame(display);  // ImGui's background list: under everything else
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     if (up.Any()) {
         dl->AddRectFilled({0.f, 0.f}, display, detail::kDim);

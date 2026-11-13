@@ -92,6 +92,7 @@ add_library(hle STATIC
     src/video/live_stats.cpp
     src/ui/osk_model.cpp
     src/ui/overlay.cpp
+    src/ui/boot_overlay.cpp
     src/ui/osk_overlay.cpp
     src/ui/dialog_overlay.cpp
     src/ui/menu_model.cpp
