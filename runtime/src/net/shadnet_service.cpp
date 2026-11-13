@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <deque>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -73,6 +74,8 @@ struct State {
     std::chrono::steady_clock::time_point started{};
     bool stopping = false;
     std::deque<PushEvent> pushes;
+    // RequestSignalingInfos waiting for their reply, by packet id.
+    std::map<uint64_t, std::function<void(bool, const std::string&, uint16_t)>> resolves;
 };
 
 State& S() {
@@ -178,6 +181,22 @@ Config ParseConfig(const std::function<const char*(const char*)>& getenv, const 
     else if (!c.host.empty()) c.webApi = "http://" + c.host + ":31315";
     while (!c.webApi.empty() && c.webApi.back() == '/') c.webApi.pop_back();
 
+    // The UDP service (STUN, relay): on the server's own address, the TCP port + 1 (as LBPPC's
+    // shadPS4 does: np_matching2_mm.cpp SetMmShadNetClient).
+    const std::string udp = env("LBP3_SHADNET_UDP");
+    if (Lower(udp) == "off") {
+        c.udpHost.clear();
+    } else if (!udp.empty()) {
+        const size_t colon = udp.rfind(':');
+        c.udpHost = colon == std::string::npos ? udp : udp.substr(0, colon);
+        const int port = colon == std::string::npos ? 31314 : std::atoi(udp.c_str() + colon + 1);
+        c.udpPort = port > 0 && port < 65536 ? static_cast<uint16_t>(port) : 0;
+    } else if (!c.host.empty() && c.port != 0 && c.port < 65535) {
+        c.udpHost = c.host;
+        c.udpPort = static_cast<uint16_t>(c.port + 1);
+    }
+    if (c.udpPort == 0) c.udpHost.clear();
+
     if (c.host.empty() || c.port == 0) c.why = "LBP3_SHADNET_SERVER is not set to a server (\"host:port\", \"tls://host:port\" or \"play.lbppc.com\")";
     else if (!ValidName(c.name)) c.why = "no valid online name (LBP3_SHADNET_NAME / LBP3_ONLINE_NAME / user\\config\\online_account.txt; 3-16 letters, digits, - or _)";
     else if (c.password.empty()) c.why = "no password (LBP3_SHADNET_PASSWORD or user\\config\\online_account.txt)";
@@ -261,6 +280,25 @@ void Start(const Config& config) {
         SetStatus(Status::Failed, "the server rejected this client (reason " + std::to_string(n.reason) +
                                       ", version \"" + n.version + "\"): " + n.message);
     };
+    client->onAsyncReply = [](ShadNet::CommandType cmd, uint64_t id, ShadNet::ErrorType error,
+                              const std::vector<uint8_t>& body) {
+        if (cmd != ShadNet::CommandType::RequestSignalingInfos) return;
+        std::function<void(bool, const std::string&, uint16_t)> done;
+        {
+            std::lock_guard l(S().mutex);
+            auto it = S().resolves.find(id);
+            if (it == S().resolves.end()) return;
+            done = std::move(it->second);
+            S().resolves.erase(it);
+        }
+        std::string npid, ip;
+        uint16_t port = 0;
+        const bool ok = error == ShadNet::ErrorType::NoError && ShadNet::ShadNetClient::ParseSignalingInfos(body, npid, ip, port);
+        if (!ok)
+            std::fprintf(stderr, "[shadnet] the server doesn't know where that player is (error %d)\n",
+                         static_cast<int>(error));
+        done(ok, ip, port);
+    };
     client->onWebApiPushEvent = [](const ShadNet::NotifyWebApiPushEvent& n) {
         PushEvent e;
         e.service = n.npServiceName;
@@ -312,6 +350,7 @@ void Start(const Config& config) {
 void Stop() {
     std::unique_ptr<ShadNet::ShadNetClient> client;
     std::thread watcher;
+    std::map<uint64_t, std::function<void(bool, const std::string&, uint16_t)>> resolves;
     {
         std::lock_guard lock(S().mutex);
         S().stopping = true;
@@ -320,10 +359,12 @@ void Stop() {
         S().status = Status::Off;
         S().friends.clear();
         S().pushes.clear();
+        resolves.swap(S().resolves);
     }
     S().cv.notify_all();
     if (client) client->Stop();
     if (watcher.joinable()) watcher.join();
+    for (auto& [id, done] : resolves) done(false, {}, 0);
 }
 
 bool Active() {
@@ -380,6 +421,29 @@ std::vector<PushEvent> TakePushEvents() {
     std::vector<PushEvent> out(std::make_move_iterator(S().pushes.begin()), std::make_move_iterator(S().pushes.end()));
     S().pushes.clear();
     return out;
+}
+
+void ResolvePeer(const std::string& npid, std::function<void(bool, const std::string&, uint16_t)> done) {
+    {
+        std::lock_guard lock(S().mutex);
+        if (S().client && S().client->IsAuthenticated()) {
+            // The reply can't come before the id is filed: the client's reader thread takes this lock.
+            const uint64_t id = S().client->RequestSignalingInfos(npid);
+            S().resolves[id] = std::move(done);
+            return;
+        }
+    }
+    done(false, {}, 0);
+}
+
+std::string UdpHost() {
+    std::lock_guard lock(S().mutex);
+    return S().client ? S().config.udpHost : std::string();
+}
+
+uint16_t UdpPort() {
+    std::lock_guard lock(S().mutex);
+    return S().client ? S().config.udpPort : 0;
 }
 
 }  // namespace net::shadnet

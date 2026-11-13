@@ -71,6 +71,7 @@ add_library(hle STATIC
     src/hle/np_shadnet.cpp
     src/net/shadnet_service.cpp
     src/net/web_request.cpp
+    src/net/p2p_link.cpp
     src/hle/playgo.cpp
     src/hle/pm4.cpp
     src/hle/rtc.cpp
@@ -214,7 +215,12 @@ add_executable(shadnettest tests/shadnettest.cpp)
 target_link_libraries(shadnettest PRIVATE hle libprotobuf)
 target_include_directories(shadnettest PRIVATE ${SHADNET_PROTO_OUT})
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest unlocktest vkcachetest uxtest motiontest shadnettest LBP3Launcher)
+# Online co-op's peer connections (net/p2p_link, hle/net_remote.h): two players in-process with a
+# mock of shadNet's UDP service (STUN, relay), join protection, and the bridge to the game's sockets.
+add_executable(p2ptest tests/p2ptest.cpp)
+target_link_libraries(p2ptest PRIVATE hle)
+
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest unlocktest vkcachetest uxtest motiontest shadnettest p2ptest LBP3Launcher)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()

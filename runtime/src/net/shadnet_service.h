@@ -34,6 +34,10 @@ struct Config {
     std::string name;
     std::string password;
     std::string webApi;  // the Web API's base URL, no trailing slash ("" = answer locally)
+    // shadNet's UDP service (STUN pings, the relay; phase (c)): the server's host, its port + 1, or
+    // LBP3_SHADNET_UDP ("host:port", or "off"). Empty host = none.
+    std::string udpHost;
+    uint16_t udpPort = 0;
     std::string why;  // when not enabled although LBP3_SHADNET=1: what's missing (for the log)
 };
 
@@ -85,5 +89,13 @@ struct PushEvent {
 };
 // The push events received since the last call, oldest first (at most 256 are kept).
 std::vector<PushEvent> TakePushEvents();
+
+// Where the server says another player is (RequestSignalingInfos: the address it has seen their
+// STUN pings from): done(ok, "a.b.c.d", port) once, from the client's thread (it must not wait).
+// Not signed in: done(false) at once.
+void ResolvePeer(const std::string& npid, std::function<void(bool ok, const std::string& ip, uint16_t port)> done);
+// The running client's UDP service, as configured ("" when off).
+std::string UdpHost();
+uint16_t UdpPort();
 
 }  // namespace net::shadnet

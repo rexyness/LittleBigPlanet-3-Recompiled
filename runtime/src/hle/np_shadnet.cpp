@@ -8,16 +8,20 @@
 // real (positive) id. Signed in to shadNet, requests go to the server's Web API and its push events
 // reach the game's callbacks (phase (b)); otherwise they're answered locally as LBPPC does when there
 // is no PSN behind it (HTTP 200, the friend list from shadNet's friends, an empty block list, {} for
-// the rest). The NpUtility lookups and the signaling context give real ids too; peer connections
-// themselves are phase (c). Signed in, the in-game messages are accepted (and go nowhere, as with
-// LBPPC: LBP3 waits at "Connecting" when its messaging fails).
+// the rest). The NpUtility lookups give real ids too. With shadNet on, signaling connections are real
+// (phase (c): net/p2p_link.h, directly or through shadNet's relay, friends only; see the signaling
+// section), and invitations are received and sent through the game custom data dialog. Signed in,
+// the in-game messages are accepted (and go nowhere, as with LBPPC: LBP3 waits at "Connecting" when
+// its messaging fails).
 // With both off nothing here is registered and nothing starts.
 //
 // Adapted from LBPPC (emurphy04, https://github.com/emurphy04/LBPPC at aad6a91), all SPDX
 // GPL-2.0-or-later (Copyright 2024-2026 shadPS4 Emulator Project, with LBPPC's "lbppc:" changes):
 // the local answers from gpu/bbnet/vendor/shadps4/core/libraries/network/http.cpp AnswerLocalWebApi;
 // the id shapes, the push event layouts and matching from libraries/np/np_web_api/np_web_api.h,
-// np_web_api.cpp and np_web_api_internal.cpp; the path rule from include/core/emulator_settings.h.
+// np_web_api.cpp and np_web_api_internal.cpp; the path rule from include/core/emulator_settings.h;
+// the invitation event from invitation_dialog.h and np_handler_invitation.cpp; the signaling
+// constants and connection info from np_types2.h and np_signaling_state.cpp.
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -29,19 +33,24 @@
 #include <cstring>
 #include <deque>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
 
 #define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 
 #include "hle/common_dialog.h"
 #include "hle/kernel_errors.h"
+#include "hle/net_remote.h"
 #include "hle/online.h"
 #include "hle/register.h"
 #include "hle/users.h"
+#include "net/p2p_link.h"
 #include "net/shadnet_service.h"
 #include "net/web_request.h"
 
@@ -1065,48 +1074,357 @@ int PS4_SYSV_ABI sceNpLookupNpId(int32_t reqId, const void* onlineId, void* npId
     return 0;
 }
 
-// --- libSceNpSignaling: the peer connection (phase (c)) ---------------------------------------
+// --- libSceNpSignaling: peer connections (phase (c)) --------------------------------------------
+//
+// With shadNet on, a connection is net/p2p_link.h's: ActivateConnection asks it to connect to the
+// peer (the server says where they are; directly, else through shadNet's relay), the game's P2P
+// datagrams to the peer's address go through it (hle/net_remote.h), and its events reach the game's
+// signaling callback from sceNpCheckCallback, on the game's thread: ESTABLISHED for a connection the
+// game activated, PEER_ACTIVATED when another player connected to us (to every context: LBP3 has
+// one, and its host learns of a joining player only so; LBPPC's np_signaling_state.cpp found that),
+// MUTUAL_ACTIVATED when both did, DEAD when it's gone. Join protection (phase (d)): a player who isn't
+// a friend (or named in LBP3_JOIN_ALLOW) can't connect to us; we can still connect to anyone.
+// Online without shadNet, a connection gets an id and stays inactive.
+// Constants and the connection info layouts are shadPS4's (LBPPC aad6a91 np_types2.h and
+// np_signaling_state.cpp, GPL-2.0-or-later); the bandwidth isn't measured but must not be 0 (LBPPC:
+// 0 bits per second made LBP3 drop a working connection).
+
+namespace {
+
+using SignalingHandler = void(PS4_SYSV_ABI*)(uint32_t ctxId, uint32_t connId, int32_t event, int32_t error,
+                                             void* userArg);
+constexpr int32_t kSigEventDead = 0, kSigEventEstablished = 1, kSigEventPeerActivated = 10,
+                  kSigEventMutualActivated = 12;
+constexpr uint32_t kSigStatusInactive = 0, kSigStatusPending = 1, kSigStatusActive = 2;
+constexpr int32_t kSigInfoRtt = 1, kSigInfoBandwidth = 2, kSigInfoPeerNpId = 3, kSigInfoPeerAddr = 4,
+                  kSigInfoMappedAddr = 5, kSigInfoPacketLoss = 6;
+constexpr int kSigErrCtxNotFound = static_cast<int>(0x80552705), kSigErrConnNotFound = static_cast<int>(0x8055270E),
+              kSigErrPeerUnreachable = static_cast<int>(0x8055270F), kSigErrTerminatedByPeer = static_cast<int>(0x80552710),
+              kSigErrTimeout = static_cast<int>(0x80552711), kSigErrInProgress = static_cast<int>(0x80552714),
+              kSigErrOwnNpId = static_cast<int>(0x80552716);
+constexpr int kSigInvalidArgument = static_cast<int>(0x80552715);
+constexpr uint32_t kAssumedBandwidthBps = 10'000'000;
+
+struct SigContext {
+    SignalingHandler cb = nullptr;
+    void* arg = nullptr;
+};
+struct SigConn {
+    int32_t ctx = 0;
+    std::string peer;
+};
+
+std::mutex g_sigMutex;
+std::map<int32_t, SigContext> g_sigContexts;
+std::map<int32_t, SigConn> g_sigConns;
+std::atomic<int32_t> g_sigNextCtx{0}, g_sigNextConn{0};
+std::unique_ptr<net::p2p::Link> g_link;  // with shadNet on, from sceNpSignalingInitialize
+
+std::string PeerName(const void* npId) {
+    if (!Readable(npId, 16)) return {};
+    return std::string(static_cast<const char*>(npId), strnlen(static_cast<const char*>(npId), 16));
+}
+
+// Lock held: the game's connection to that peer in that context (0 = none).
+int32_t ConnFor(int32_t ctx, const std::string& peer) {
+    for (const auto& [id, c] : g_sigConns)
+        if (c.ctx == ctx && c.peer == peer) return id;
+    return 0;
+}
+
+// The join check (phase (d)): shadNet friends, and LBP3_JOIN_ALLOW (comma separated, for tests).
+bool MayConnect(const std::string& peer) {
+    for (const auto& f : net::shadnet::Friends())
+        if (f.npid == peer) return true;
+    if (const char* allow = std::getenv("LBP3_JOIN_ALLOW")) {
+        std::string list = allow;
+        size_t at = 0;
+        while (at <= list.size()) {
+            const size_t comma = list.find(',', at);
+            std::string name = list.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+            while (!name.empty() && name.front() == ' ') name.erase(name.begin());
+            while (!name.empty() && name.back() == ' ') name.pop_back();
+            if (name == peer) return true;
+            if (comma == std::string::npos) break;
+            at = comma + 1;
+        }
+    }
+    return false;
+}
+
+bool LinkSend(uint32_t ip, uint16_t port, uint16_t srcVport, uint16_t dstVport, const void* data, size_t len) {
+    net::p2p::Link* link = g_link.get();
+    return link && link->SendData(net::p2p::Endpoint{ip, port}, srcVport, dstVport, data, len);
+}
+
+// The link's UDP service endpoint: the configured host's IPv4 address.
+net::p2p::Endpoint UdpServer() {
+    const std::string host = net::shadnet::UdpHost();
+    const uint16_t port = net::shadnet::UdpPort();
+    net::p2p::Endpoint e;
+    if (host.empty() || !port) return e;
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    addrinfo* res = nullptr;
+    if (getaddrinfo(host.c_str(), nullptr, &hints, &res) == 0 && res) {
+        e.ip = reinterpret_cast<const sockaddr_in*>(res->ai_addr)->sin_addr.s_addr;
+        e.port = port;
+        freeaddrinfo(res);
+    } else {
+        std::fprintf(stderr, "[p2p] the server's UDP host %s wasn't found: no relay, no address from the server\n",
+                     host.c_str());
+    }
+    return e;
+}
+
+void StartLink() {
+    if (g_link || !net::shadnet::Settings().enabled) return;
+    net::p2p::Config c;
+    c.self = net::shadnet::Settings().name;
+    c.server = UdpServer();
+    if (const char* p = std::getenv("LBP3_P2P_PORT")) c.localPort = static_cast<uint16_t>(std::atoi(p));
+    c.mayConnect = &MayConnect;
+    c.resolve = [](const std::string& peer, std::function<void(bool, net::p2p::Endpoint)> done) {
+        net::shadnet::ResolvePeer(peer, [done](bool ok, const std::string& ip, uint16_t port) {
+            done(ok, ok ? net::p2p::MakeEndpoint(ip.c_str(), port) : net::p2p::Endpoint{});
+        });
+    };
+    auto link = std::make_unique<net::p2p::Link>();
+    link->SetDataSink([](const net::p2p::Endpoint& from, uint16_t srcVport, uint16_t dstVport, const uint8_t* data,
+                         size_t len) { p2pnet::DeliverRemote(from.ip, from.port, srcVport, dstVport, data, len); });
+    if (!link->Start(c)) {
+        std::fprintf(stderr, "[p2p] no UDP socket: online co-op is off\n");
+        return;
+    }
+    g_link = std::move(link);
+    p2pnet::SetRemoteSend(&LinkSend);
+}
+
+int SignalingError(int linkError) {
+    switch (linkError) {
+    case net::p2p::kErrorPeerGone: return kSigErrTerminatedByPeer;
+    case net::p2p::kErrorUnreachable: return kSigErrPeerUnreachable;
+    default: return kSigErrTimeout;
+    }
+}
+
+}  // namespace
+
+// The link's events, to the game's signaling callbacks (from sceNpCheckCallback).
+void DispatchSignalingEvents() {
+    net::p2p::Link* link = g_link.get();
+    if (!link) return;
+    const auto events = link->TakeEvents();
+    if (events.empty()) return;
+    struct Call {
+        SignalingHandler cb;
+        int32_t ctx, conn, event, error;
+        void* arg;
+    };
+    std::vector<Call> calls;
+    {
+        std::lock_guard lk(g_sigMutex);
+        for (const auto& e : events) {
+            switch (e.kind) {
+            case net::p2p::Event::PeerActivated: {
+                // Another player connected to us: a connection for them in every context.
+                for (const auto& [ctx, c] : g_sigContexts) {
+                    int32_t conn = ConnFor(ctx, e.peer);
+                    if (!conn) {
+                        conn = ++g_sigNextConn;
+                        g_sigConns[conn] = {ctx, e.peer};
+                    }
+                    calls.push_back({c.cb, ctx, conn, kSigEventPeerActivated, 0, c.arg});
+                }
+                break;
+            }
+            case net::p2p::Event::Established:
+            case net::p2p::Event::Mutual:
+                for (const auto& [conn, sc] : g_sigConns) {
+                    if (sc.peer != e.peer) continue;
+                    auto it = g_sigContexts.find(sc.ctx);
+                    if (it == g_sigContexts.end()) continue;
+                    calls.push_back({it->second.cb, sc.ctx, conn,
+                                     e.kind == net::p2p::Event::Mutual ? kSigEventMutualActivated : kSigEventEstablished,
+                                     0, it->second.arg});
+                }
+                break;
+            case net::p2p::Event::Dead:
+                for (auto it = g_sigConns.begin(); it != g_sigConns.end();) {
+                    if (it->second.peer != e.peer) {
+                        ++it;
+                        continue;
+                    }
+                    if (auto c = g_sigContexts.find(it->second.ctx); c != g_sigContexts.end())
+                        calls.push_back({c->second.cb, it->second.ctx, it->first, kSigEventDead,
+                                         SignalingError(e.error), c->second.arg});
+                    it = g_sigConns.erase(it);
+                }
+                break;
+            }
+        }
+    }
+    for (const Call& c : calls) {
+        std::fprintf(stderr, "[shadnet] signaling event %d (error %#x) on context %d, connection %d\n", c.event,
+                     static_cast<unsigned>(c.error), c.ctx, c.conn);
+        if (c.cb) c.cb(static_cast<uint32_t>(c.ctx), static_cast<uint32_t>(c.conn), c.event, c.error, c.arg);
+    }
+}
 
 int PS4_SYSV_ABI sceNpSignalingInitialize(int64_t memorySize, int32_t threadPriority, int32_t affinity,
                                           int64_t stackSize) {
     Log(__func__, "memory=%lld, priority=%d, affinity=%#x, stack=%lld", static_cast<long long>(memorySize),
         threadPriority, affinity, static_cast<long long>(stackSize));
+    StartLink();
     return 0;
 }
 // A context id from 1 (shadPS4's np_signaling.cpp signature: npId, callback, its argument, the id out).
 int PS4_SYSV_ABI sceNpSignalingCreateContext(const void* npId, void* cb, void* cbArg, int32_t* ctxId) {
-    if (!npId || !ctxId) return kSignalingInvalidArgument;
-    *ctxId = ++g_signalingCtx;
+    if (!npId || !ctxId) return kSigInvalidArgument;
+    *ctxId = ++g_sigNextCtx;
+    {
+        std::lock_guard lk(g_sigMutex);
+        g_sigContexts[*ctxId] = {reinterpret_cast<SignalingHandler>(cb), cbArg};
+    }
     Log(__func__, "npId=%s, cb=%p, arg=%p -> ctxId %d", Text(npId, 16).c_str(), cb, cbArg, *ctxId);
     return 0;
 }
 int PS4_SYSV_ABI sceNpSignalingDeleteContext(int32_t ctxId) {
     Log(__func__, "ctxId=%d", ctxId);
+    std::vector<std::string> peers;
+    {
+        std::lock_guard lk(g_sigMutex);
+        g_sigContexts.erase(ctxId);
+        for (auto it = g_sigConns.begin(); it != g_sigConns.end();) {
+            if (it->second.ctx == ctxId) {
+                peers.push_back(it->second.peer);
+                it = g_sigConns.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    if (g_link)
+        for (const auto& p : peers) g_link->Terminate(p);
     return 0;
 }
-// Peer connections are phase (c): a connection gets an id but stays inactive (no address).
 int PS4_SYSV_ABI sceNpSignalingActivateConnection(int32_t ctxId, const void* peerNpId, int32_t* connId) {
-    if (!peerNpId || !connId) return kSignalingInvalidArgument;
-    *connId = ++g_signalingConn;
-    Log(__func__, "ctxId=%d, peer=%s -> connId %d (stays inactive: no peer connections yet)", ctxId,
-        Text(peerNpId, 16).c_str(), *connId);
+    if (!peerNpId || !connId) return kSigInvalidArgument;
+    const std::string peer = PeerName(peerNpId);
+    if (!g_link) {
+        *connId = ++g_sigNextConn;
+        Log(__func__, "ctxId=%d, peer=%s -> connId %d (stays inactive: no shadNet)", ctxId, peer.c_str(), *connId);
+        return 0;
+    }
+    if (peer.empty()) return kSigInvalidArgument;
+    if (peer == net::shadnet::Settings().name) return kSigErrOwnNpId;
+    {
+        std::lock_guard lk(g_sigMutex);
+        if (!g_sigContexts.contains(ctxId)) return kSigErrCtxNotFound;
+        int32_t conn = ConnFor(ctxId, peer);
+        if (!conn) {
+            conn = ++g_sigNextConn;
+            g_sigConns[conn] = {ctxId, peer};
+        }
+        *connId = conn;
+    }
+    g_link->Activate(peer);
+    Log(__func__, "ctxId=%d, peer=%s -> connId %d", ctxId, peer.c_str(), *connId);
     return 0;
 }
 int PS4_SYSV_ABI sceNpSignalingTerminateConnection(int32_t ctxId, int32_t connId) {
     Log(__func__, "ctxId=%d, connId=%d", ctxId, connId);
+    std::string peer;
+    {
+        std::lock_guard lk(g_sigMutex);
+        auto it = g_sigConns.find(connId);
+        if (it == g_sigConns.end() || it->second.ctx != ctxId) return g_link ? kSigErrConnNotFound : 0;
+        peer = it->second.peer;
+        g_sigConns.erase(it);
+    }
+    if (g_link) g_link->Terminate(peer);
     return 0;
 }
+
+namespace {
+// Lock not held. The peer of the game's connection ("" = none).
+std::string ConnPeer(int32_t ctxId, int32_t connId) {
+    std::lock_guard lk(g_sigMutex);
+    auto it = g_sigConns.find(connId);
+    return it == g_sigConns.end() || it->second.ctx != ctxId ? std::string() : it->second.peer;
+}
+}  // namespace
+
 int PS4_SYSV_ABI sceNpSignalingGetConnectionStatus(int32_t ctxId, int32_t connId, uint32_t* status, uint32_t* addr,
                                                    uint16_t* port) {
-    Log(__func__, "ctxId=%d, connId=%d -> inactive", ctxId, connId);
-    if (status) *status = 0;  // ORBIS_NP_SIGNALING_CONN_STATUS_INACTIVE
+    if (!status) return kSigInvalidArgument;
+    *status = kSigStatusInactive;
     if (addr) *addr = 0;
     if (port) *port = 0;
+    const std::string peer = g_link ? ConnPeer(ctxId, connId) : std::string();
+    if (!peer.empty()) {
+        const net::p2p::PeerInfo info = g_link->Info(peer);
+        if (info.state == net::p2p::State::Active) {
+            *status = kSigStatusActive;
+            if (addr) *addr = info.gameAddr.ip;
+            if (port) *port = htons(info.gameAddr.port);
+        } else if (info.state == net::p2p::State::Pending) {
+            *status = kSigStatusPending;
+        }
+    }
+    Log(__func__, "ctxId=%d, connId=%d (%s) -> status %u", ctxId, connId, peer.c_str(), *status);
     return 0;
 }
 int PS4_SYSV_ABI sceNpSignalingGetConnectionInfo(int32_t ctxId, int32_t connId, int32_t code, void* info) {
     Log(__func__, "ctxId=%d, connId=%d, code=%d, info=%p", ctxId, connId, code, info);
-    return 0;
+    if (!info) return kSigInvalidArgument;
+    if (!g_link) return 0;
+    const std::string peer = ConnPeer(ctxId, connId);
+    if (peer.empty()) return kSigErrConnNotFound;
+    const net::p2p::PeerInfo p = g_link->Info(peer);
+    const bool active = p.state == net::p2p::State::Active;
+    auto* out = static_cast<uint8_t*>(info);
+    switch (code) {
+    case kSigInfoRtt: {
+        if (!active) return kSigErrInProgress;
+        const uint32_t rtt = static_cast<uint32_t>(std::max(p.rttUs, 1000));
+        std::memcpy(out, &rtt, 4);
+        return 0;
+    }
+    case kSigInfoBandwidth: {
+        if (!active) return kSigErrInProgress;
+        std::memcpy(out, &kAssumedBandwidthBps, 4);
+        return 0;
+    }
+    case kSigInfoPeerNpId: {
+        std::memset(out, 0, 36);  // SceNpId: the online ID (16), its terminator and padding, opt, reserved
+        std::memcpy(out, peer.data(), std::min<size_t>(peer.size(), 16));
+        return 0;
+    }
+    case kSigInfoPeerAddr:
+    case kSigInfoMappedAddr: {
+        if (!active) return kSigErrInProgress;
+        const net::p2p::Endpoint e = code == kSigInfoPeerAddr ? p.gameAddr : g_link->External();
+        const uint16_t port = htons(e.port);
+        std::memcpy(out, &e.ip, 4);
+        std::memcpy(out + 4, &port, 2);
+        return 0;
+    }
+    case kSigInfoPacketLoss: {
+        const uint32_t loss = 0;
+        std::memcpy(out, &loss, 4);
+        return 0;
+    }
+    default:
+        return kSigInvalidArgument;
+    }
+}
+
+// Everything that reaches the game from its sceNpCheckCallback calls.
+void OnCheckCallback() {
+    DispatchPushEvents();
+    DispatchSignalingEvents();
 }
 
 // --- In-game messages: accepted while signed in to shadNet, the offline answers otherwise ---------
@@ -1178,7 +1496,7 @@ void RegisterShadNet(core::Linker& linker) {
         });
         net::shadnet::Start();
         // The push events reach the game from its own sceNpCheckCallback calls.
-        np::SetCheckCallbackHook(&npsn::DispatchPushEvents);
+        np::SetCheckCallbackHook(&npsn::OnCheckCallback);
         // An invitation received is joined from the game custom data dialog (mode 2), which raises
         // SESSION_INVITATION through libSceSystemService.
         common_dialog::SetGameCustomDataHook(&npsn::kCustomDataHook);
