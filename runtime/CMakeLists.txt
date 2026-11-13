@@ -72,6 +72,8 @@ add_library(hle STATIC
     src/input/gamepad_sdl.cpp
     src/input/actions.cpp
     src/input/game_state.cpp
+    src/input/motion.cpp
+    src/input/mouse_touch.cpp
     src/core/native_trace.cpp
     src/video/presenter.cpp
     src/video/framegen.cpp
@@ -149,7 +151,12 @@ target_link_libraries(rescachetest PRIVATE hle)
 add_executable(unlocktest tests/unlocktest.cpp)
 target_link_libraries(unlocktest PRIVATE hle)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest unlocktest)
+# Motion and the mouse as the touch pad offline (input/motion, input/mouse_touch): the gyro offset
+# learning, the orientation filter's drift, the virtual tilt, and the mouse's touch gestures.
+add_executable(motiontest tests/motiontest.cpp)
+target_link_libraries(motiontest PRIVATE hle)
+
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest unlocktest motiontest)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()

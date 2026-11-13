@@ -5,6 +5,8 @@
 #include "hle/ime_dialog.h"
 #include "input/actions.h"
 #include "input/game_state.h"
+#include "input/motion.h"
+#include "input/mouse_touch.h"
 #include "video/framegen.h"
 #include "video/presenter.h"
 #include "gpu/renderer.h"
@@ -22,6 +24,7 @@
 #include <SDL3/SDL.h>
 
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -116,6 +119,78 @@ bool PinnedPlayer1(SDL_Gamepad* p) {
 bool PinSet() {
     const char* v = std::getenv("LBP3_PLAYER1_PAD");
     return v && *v;
+}
+
+// Motion (input/motion.h): a filter per slot, reset whenever the slot's occupant changes.
+// LBP3_MOTION=raw: the old pass-through (identity orientation, raw gyro, -1 G on Y at rest).
+bool MotionRaw() {
+    static const bool raw = [] {
+        const char* v = std::getenv("LBP3_MOTION");
+        return v && std::string(v) == "raw";
+    }();
+    return raw;
+}
+motion::Filter g_motion[kMaxPads];
+uint32_t g_motionGen[kMaxPads] = {};
+uint64_t g_motionNs[kMaxPads] = {};
+bool g_biasLogged[kMaxPads] = {};
+uint64_t g_motionLogNs[kMaxPads] = {};
+
+// Under g_slotMutex. Fills the motion fields of slot's frame from its pad's sensors (if any)
+// and, for player 1, the tilt actions (keyboard Keypad 4/6/8/2 by default).
+void ApplyMotion(int slot, ps4::PadData& out, SDL_Gamepad* p, bool keyboard) {
+    if (MotionRaw()) {
+        // The old behaviour: accel and gyro passed through, the orientation left at identity.
+        float v[3];
+        if (p && SDL_GetGamepadSensorData(p, SDL_SENSOR_ACCEL, v, 3))
+            out.acceleration = {v[0] / SDL_STANDARD_GRAVITY, v[1] / SDL_STANDARD_GRAVITY, v[2] / SDL_STANDARD_GRAVITY};
+        if (p && SDL_GetGamepadSensorData(p, SDL_SENSOR_GYRO, v, 3)) out.angularVelocity = {v[0], v[1], v[2]};
+        return;
+    }
+    motion::Filter& f = g_motion[slot];
+    if (g_motionGen[slot] != g_slotGen[slot]) {
+        f.Reset();
+        g_motionGen[slot] = g_slotGen[slot];
+        g_motionNs[slot] = 0;
+        g_biasLogged[slot] = false;
+    }
+    const uint64_t now = SDL_GetTicksNS();
+    const float dt = g_motionNs[slot] ? static_cast<float>(now - g_motionNs[slot]) / 1e9f : 0.f;
+    g_motionNs[slot] = now;
+    float a[3], w[3];
+    if (p && SDL_GamepadHasSensor(p, SDL_SENSOR_ACCEL) && SDL_GamepadHasSensor(p, SDL_SENSOR_GYRO) &&
+        SDL_GetGamepadSensorData(p, SDL_SENSOR_ACCEL, a, 3) && SDL_GetGamepadSensorData(p, SDL_SENSOR_GYRO, w, 3)) {
+        f.Sample({a[0] / SDL_STANDARD_GRAVITY, a[1] / SDL_STANDARD_GRAVITY, a[2] / SDL_STANDARD_GRAVITY},
+                 {w[0], w[1], w[2]}, dt);
+    }
+    if (slot == 0) {
+        float roll = 0.f, pitch = 0.f;
+        actions::Tilt(roll, pitch, keyboard);
+        f.VirtualTilt(roll, pitch, dt);
+    }
+    const motion::Quat q = f.Orientation();
+    const motion::Vec3 acc = f.Acceleration(), ang = f.AngularVelocity();
+    out.orientation = {q.x, q.y, q.z, q.w};
+    out.acceleration = {acc.x, acc.y, acc.z};
+    out.angularVelocity = {ang.x, ang.y, ang.z};
+
+    if (f.Still() && !g_biasLogged[slot] && f.HasSensors()) {
+        const motion::Vec3 b = f.GyroBias();
+        std::fprintf(stderr, "[motion] slot %d: gyro offset learned (%.4f %.4f %.4f rad/s)\n", slot, b.x, b.y, b.z);
+        g_biasLogged[slot] = true;
+    }
+    // LBP3_MOTION_LOG=1: the state every 5 s per slot (drift checks).
+    static const bool log = std::getenv("LBP3_MOTION_LOG") != nullptr;
+    if (log && keyboard && now - g_motionLogNs[slot] > 5'000'000'000ull) {
+        g_motionLogNs[slot] = now;
+        const motion::Vec3 b = f.GyroBias();
+        const float tiltDeg = std::acos(std::clamp(2.f * (q.w * q.w + q.y * q.y) - 1.f, -1.f, 1.f)) * 57.29578f;
+        std::fprintf(stderr,
+                     "[motion] slot %d: sensors %s, still %s, offset (%.4f %.4f %.4f), orientation (%.4f %.4f %.4f %.4f) "
+                     "%.2f deg from reset up, accel (%.3f %.3f %.3f), rate (%.4f %.4f %.4f)\n",
+                     slot, f.HasSensors() ? "yes" : "no", f.Still() ? "yes" : "no", b.x, b.y, b.z, q.x, q.y, q.z, q.w,
+                     tiltDeg, acc.x, acc.y, acc.z, ang.x, ang.y, ang.z);
+    }
 }
 
 void Place(int slot, SDL_Gamepad* p) {
@@ -317,6 +392,18 @@ void Parse(const std::string& line) {
         if (!actions::HoldForTest(name, ms)) std::fprintf(stderr, "[remote] unknown action '%s'\n", name.c_str());
         return;
     }
+    if (word == "touch") {  // LBP3_MOUSE_TOUCH test runs: "touch on|off|down|up", "touch move dx dy",
+                            // "touch wheel n", "touch twist n" (what the mouse does, without one)
+        std::string what;
+        in >> what;
+        float a = 0.f, b = 0.f;
+        if (what == "on" || what == "off") mouse_touch::RemoteCapture(what == "on");
+        else if (what == "down" || what == "up") mouse_touch::RemoteButton(what == "down");
+        else if (what == "move" && (in >> a >> b)) mouse_touch::RemoteMove(a, b);
+        else if ((what == "wheel" || what == "twist") && (in >> a)) mouse_touch::RemoteWheel(a, what == "twist");
+        else std::fprintf(stderr, "[remote] touch: unknown '%s'\n", what.c_str());
+        return;
+    }
     if (word == "fgstill") {  // "fgstill <name> [count]": write the next generated frames (LBP3_FRAMEGEN=1)
         std::string name;
         int count = 3;
@@ -435,11 +522,13 @@ bool Read(int slot, ps4::PadData& out, bool keyboard) {
             remote::Apply(0, out);
             AutoPressCross(0, out);
             actions::ApplyToFrame(out, keyboard);
+            if (keyboard) mouse_touch::Apply(out);
         } else if (g_virtual[slot]) {
             remote::Apply(slot, out);  // a virtual controller: neutral unless a script presses
         } else {
             return false;  // nobody in this slot: disconnected
         }
+        ApplyMotion(slot, out, nullptr, keyboard);
         out.connected = true;
         out.connectedCount = 1;
         return true;
@@ -457,13 +546,7 @@ bool Read(int slot, ps4::PadData& out, bool keyboard) {
     if (out.analogButtons.l2 > kTriggerDigitalThreshold) out.buttons |= ps4::PAD_L2;
     if (out.analogButtons.r2 > kTriggerDigitalThreshold) out.buttons |= ps4::PAD_R2;
 
-    // TODO: verify axis directions against the game (Sixaxis-controlled objects),
-    // and integrate the gyro into `orientation` if LBP3 reads it.
-    float v[3];
-    if (SDL_GetGamepadSensorData(p, SDL_SENSOR_ACCEL, v, 3))
-        out.acceleration = {v[0] / SDL_STANDARD_GRAVITY, v[1] / SDL_STANDARD_GRAVITY, v[2] / SDL_STANDARD_GRAVITY};
-    if (SDL_GetGamepadSensorData(p, SDL_SENSOR_GYRO, v, 3))
-        out.angularVelocity = {v[0], v[1], v[2]};
+    ApplyMotion(slot, out, p, keyboard);  // accelerometer, gyro, orientation (input/motion.h)
 
     if (SDL_GetNumGamepadTouchpads(p) > 0) {
         for (int f = 0; f < 2; ++f) {
@@ -480,6 +563,7 @@ bool Read(int slot, ps4::PadData& out, bool keyboard) {
     AutoPressCross(slot, out);
     remote::Apply(slot, out);
     if (slot == 0) actions::ApplyToFrame(out, keyboard);  // keyboard works alongside a pad
+    if (slot == 0 && keyboard) mouse_touch::Apply(out);   // LBP3_MOUSE_TOUCH: the mouse as the touch pad
     out.connected = true;
     out.connectedCount = 1;
     return true;

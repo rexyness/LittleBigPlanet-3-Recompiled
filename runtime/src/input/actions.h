@@ -32,6 +32,11 @@ enum class Action {
     Confirm,
     Back,
     Pause,
+    // Motion: tilt the pad without motion sensors (input/motion.h). Off with LBP3_TILT_KEYS=off.
+    TiltLeft,
+    TiltRight,
+    TiltForward,  // front of the pad down
+    TiltBack,     // front of the pad up
     Count,
 };
 
@@ -51,5 +56,9 @@ void ApplyToFrame(ps4::PadData& frame, bool keys = true);
 // computer). Game code: only from the game's own pad read, with no input lock held, and
 // not while a system dialog has the controller.
 void RunGameHooks();
+// The virtual tilt the tilt actions ask for: roll (+1 = right side down) and pitch (+1 = front
+// up), each -1, 0 or 1. Same keyboard rules as ApplyToFrame (keys = false: remote holds only).
+// Returns true while any tilt action is held. Always false with LBP3_TILT_KEYS=off.
+bool Tilt(float& roll, float& pitch, bool keys = true);
 
 }  // namespace input::actions
