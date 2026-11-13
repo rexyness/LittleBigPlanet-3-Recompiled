@@ -18,6 +18,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include "core/log_stamp.h"
 #include "core/module.h"
 #include "hle/abi.h"
 
@@ -59,7 +60,7 @@ void PS4_SYSV_ABI LogSent(uint64_t world, uint32_t hash, uint32_t frame) {
         std::fprintf(stderr, "[sync] the sync check runs with MXCSR %#x, x87 control %#x%s\n", mxcsr, fcw,
                      mxcsr == 0x9fc0 && fcw == 0x037f ? "" : " (NOT the PS4's 0x9fc0 / 0x37f)");
     }
-    std::fprintf(stderr, "[sync] sent frame %u hash %08x, %u player(s)\n", frame, hash, count);
+    std::fprintf(stderr, "[sync] %s sent frame %u hash %08x, %u player(s)\n", core::Stamp().text, frame, hash, count);
     for (uint32_t i = 0; i < count && i < 4; ++i) {
         uint64_t p = 0;
         if (!Read(players + 8 * i, p) || !Read(p + 8, p) || !Read(p + 0x40, p) || !Read(p + 0x10, p)) continue;
@@ -82,7 +83,8 @@ void PS4_SYSV_ABI LogReceived(uint64_t, uint64_t message) {
     if (Readable(reinterpret_cast<const void*>(message), 0x24)) std::memcpy(id, reinterpret_cast<const void*>(message), 0x24);
     for (char& c : id)
         if (c && (c < 0x20 || c > 0x7e)) c = '.';
-    std::fprintf(stderr, "[sync] received frame %u hash %08x from \"%s\" (session %u)\n", frame, hash, id, session);
+    std::fprintf(stderr, "[sync] %s received frame %u hash %08x from \"%s\" (session %u)\n", core::Stamp().text, frame,
+                 hash, id, session);
 }
 
 // Executable memory within reach of a rel32 call from the image.

@@ -44,6 +44,8 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 
+#include "core/log_stamp.h"
+#include "core/runner.h"
 #include "hle/common_dialog.h"
 #include "hle/kernel_errors.h"
 #include "hle/net_remote.h"
@@ -1184,6 +1186,19 @@ void StartLink() {
     c.self = net::shadnet::Settings().name;
     c.server = UdpServer();
     if (const char* p = std::getenv("LBP3_P2P_PORT")) c.localPort = static_cast<uint16_t>(std::atoi(p));
+    if (const char* p = std::getenv("LBP3_P2P_PATH")) {
+        const std::string v = p;
+        c.path = v == "lan"      ? net::p2p::Config::Path::Lan
+                 : v == "public" ? net::p2p::Config::Path::Public
+                 : v == "relay"  ? net::p2p::Config::Path::Relay
+                                 : net::p2p::Config::Path::Auto;
+        std::fprintf(stderr, "[p2p] LBP3_P2P_PATH=%s\n", p);
+    }
+    if (const char* p = std::getenv("LBP3_P2P_DIAG"); p && *p == '1') {
+        c.diag = true;
+        std::fprintf(stderr, "[p2p] LBP3_P2P_DIAG=1: sequence numbers and send times on game datagrams "
+                             "(the other player needs it too)\n");
+    }
     c.mayConnect = &MayConnect;
     c.resolve = [](const std::string& peer, std::function<void(bool, net::p2p::Endpoint)> done) {
         net::shadnet::ResolvePeer(peer, [done](bool ok, const std::string& ip, uint16_t port) {
@@ -1342,6 +1357,19 @@ int PS4_SYSV_ABI sceNpSignalingActivateConnection(int32_t ctxId, const void* pee
 }
 int PS4_SYSV_ABI sceNpSignalingTerminateConnection(int32_t ctxId, int32_t connId) {
     Log(__func__, "ctxId=%d, connId=%d", ctxId, connId);
+    {
+        // Who ended it: the caller, then the game's return addresses found on the stack.
+        std::fprintf(stderr, "[shadnet] %s the game ends connection %d, called from %s\n", core::Stamp().text, connId,
+                     core::DescribeAddress(reinterpret_cast<uint64_t>(__builtin_return_address(0))).c_str());
+        auto* sp = static_cast<uint64_t*>(__builtin_frame_address(0));
+        int shown = 0;
+        for (int k = 0; k < 1024 && shown < 16; ++k) {
+            const std::string d = core::DescribeAddress(sp[k]);
+            if (d.find(".prx+") == std::string::npos && d.find(".bin+") == std::string::npos) continue;
+            std::fprintf(stderr, "[shadnet]   [sp+0x%x] %s\n", k * 8, d.c_str());
+            ++shown;
+        }
+    }
     std::string peer;
     {
         std::lock_guard lk(g_sigMutex);

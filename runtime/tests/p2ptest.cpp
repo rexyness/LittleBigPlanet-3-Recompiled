@@ -381,6 +381,85 @@ int main() {
         hle::net::sceNetSocketClose(s);
     }
 
+    // --- 6. one network: both behind one public address; diagnostics on ------------------------
+    {
+        UdpMock mock;
+        mock.fakeAddresses = true;  // both "behind" 127.0.0.2, which reaches nobody: the LAN address must
+        CHECK(mock.Start());
+        Link a, b;
+        Received atA, atB;
+        Sink(a, atA);
+        Sink(b, atB);
+        Config ca = PlayerConfig("Alice_1", mock, {}), cb = PlayerConfig("Bob_2", mock, {"Alice_1"});
+        ca.diag = cb.diag = true;
+        CHECK(a.Start(ca));
+        CHECK(b.Start(cb));
+        CHECK(WaitFor([&] { return a.External().Valid() && b.External().Valid(); }));
+        a.Activate("Bob_2");
+        std::vector<Event> evA, evB;
+        CHECK(WaitFor([&] { return HasEvent(evA, a, Event::Established, "Bob_2"); }));
+        CHECK(WaitFor([&] { return HasEvent(evB, b, Event::PeerActivated, "Alice_1"); }));
+        CHECK(WaitFor([&] { return !a.Info("Bob_2").relayed && !b.Info("Alice_1").relayed; }));
+        // DATA2: the payload arrives without the sequence number and send time.
+        CHECK(a.SendData(mock.Ext("Bob_2"), 3658, 3658, "seq one", 7));
+        CHECK(a.SendData(mock.Ext("Bob_2"), 3658, 3658, "seq two", 7));
+        CHECK(WaitFor([&] { return atB.Count() == 2; }));
+        CHECK(atB.Count() == 2 && std::string(atB.data[1].begin(), atB.data[1].end()) == "seq two");
+        CHECK(atB.srcVport == 3658 && atB.dstVport == 3658 && atB.from == mock.Ext("Alice_1"));
+        a.DumpRecent("the end of test 6");
+        a.Stop();
+        b.Stop();
+        mock.Stop();
+    }
+
+    // --- 7. the relay forced (LBP3_P2P_PATH=relay) although direct works ------------------------
+    {
+        UdpMock mock;
+        CHECK(mock.Start());
+        Link a, b;
+        Received atA, atB;
+        Sink(a, atA);
+        Sink(b, atB);
+        Config ca = PlayerConfig("Alice_1", mock, {}), cb = PlayerConfig("Bob_2", mock, {"Alice_1"});
+        ca.path = cb.path = Config::Path::Relay;
+        CHECK(a.Start(ca));
+        CHECK(b.Start(cb));
+        CHECK(WaitFor([&] { return a.External().Valid() && b.External().Valid(); }));
+        a.Activate("Bob_2");
+        std::vector<Event> evA, evB;
+        CHECK(WaitFor([&] { return HasEvent(evA, a, Event::Established, "Bob_2"); }));
+        CHECK(WaitFor([&] { return HasEvent(evB, b, Event::PeerActivated, "Alice_1"); }));
+        CHECK(a.Info("Bob_2").relayed);
+        const uint64_t relayedBefore = a.GetStats().sentRelayed;
+        CHECK(a.SendData(b.External(), 3658, 3658, "relayed", 7));
+        CHECK(WaitFor([&] { return atB.Count() == 1; }));
+        CHECK(a.GetStats().sentRelayed > relayedBefore);
+        {
+            std::lock_guard lk(mock.m);
+            CHECK(mock.relayed > 0);
+        }
+        a.Stop();
+        b.Stop();
+        mock.Stop();
+    }
+
+    // --- 8. MSG_PEEK leaves the datagram queued -----------------------------------------------
+    {
+        const int s = hle::net::socket(2, 6, 0);
+        const auto bindAddr = PsAddr(Endpoint{0, 3659}, 3659);
+        CHECK(hle::net::bind(s, bindAddr.data(), 16) == 0);
+        const Endpoint peer = MakeEndpoint("203.0.113.8", 50124);
+        CHECK(hle::p2pnet::DeliverRemote(peer.ip, peer.port, 3659, 3659, reinterpret_cast<const uint8_t*>("peek"), 4));
+        uint8_t buf[16], from[16];
+        uint32_t fromLen = sizeof(from);
+        CHECK(hle::net::recvfrom(s, buf, sizeof(buf), 0x2, from, &fromLen) == 4);
+        fromLen = sizeof(from);
+        CHECK(hle::net::recvfrom(s, buf, sizeof(buf), 0, from, &fromLen) == 4 && std::memcmp(buf, "peek", 4) == 0);
+        fromLen = sizeof(from);
+        CHECK(hle::net::recvfrom(s, buf, sizeof(buf), 0, from, &fromLen) < 0);
+        hle::net::sceNetSocketClose(s);
+    }
+
     WSACleanup();
     std::printf("p2ptest: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;

@@ -14,6 +14,8 @@
 //            the sender's online ID, so it's recognised whatever address its packets come from)
 //   PING 4 / PONG 5: from[16] time[8]
 //   BYE 6:   from[16] to[16]
+//   DATA2 7: as DATA, then seq[4] send time[8] (QueryPerformanceCounter), then the payload: only with
+//            Config::diag (LBP3_P2P_DIAG=1 on both players; older builds drop it)
 // (all big-endian / network order).
 //
 // A connection: Activate(peer) asks the server where the peer is (the resolve callback), then sends
@@ -21,7 +23,8 @@
 // and after 4 s through the relay as well, until an ACK comes. A HELLO from a player we didn't
 // activate is answered only if the join check (mayConnect: friends) allows it; otherwise it's
 // dropped and logged. Traffic goes directly once a packet has come directly from the peer, else
-// through the relay. No packet for 15 s: the connection is dead.
+// through the relay. No packet for 15 s: the connection is dead. When both players are behind one
+// public address, the LAN address goes first (no hairpin through the router): Config::path.
 //
 // To the game, a peer is identified by its "game address": the address the server sees for it
 // (as the peer reports it in HELLO), or its LAN address when it has none.
@@ -57,6 +60,14 @@ struct Config {
     std::function<void(const std::string& peer, std::function<void(bool, Endpoint)> done)> resolve;
     int resendMs = 500, relayAfterMs = 4000, timeoutMs = 30000, keepaliveMs = 1000, deadAfterMs = 15000,
         stunMs = 5000;
+    // Which way to send directly. Auto: the peer's LAN address when it is behind our public address
+    // (same network), else wherever its packets come from. Lan / Public: that address only once it
+    // answers. Relay: always through the server (tests).
+    enum class Path { Auto, Lan, Public, Relay } path = Path::Auto;
+    // Diagnostics: DATA2 (a sequence number and the send time) instead of DATA; the receiver logs
+    // gaps, late packets, sender pauses and one-way delays, and the last 20 s of game datagrams are
+    // kept for DumpRecent. Both players need it (an older build drops DATA2).
+    bool diag = false;
 };
 
 enum class State { None, Pending, Active };
@@ -101,6 +112,8 @@ public:
     using DataSink = std::function<void(const Endpoint& gameAddr, uint16_t srcVport, uint16_t dstVport,
                                         const uint8_t* data, size_t len)>;
     void SetDataSink(DataSink sink);  // called on the link's thread
+    // Diagnostics: logs the game datagrams of the last 20 s (Config::diag), then forgets them.
+    void DumpRecent(const char* why);
 
     struct Stats {
         uint64_t sentDirect = 0, sentRelayed = 0, received = 0, refused = 0;

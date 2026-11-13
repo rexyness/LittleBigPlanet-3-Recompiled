@@ -15,6 +15,8 @@
 #include <set>
 #include <thread>
 
+#include "core/log_stamp.h"
+
 namespace net::p2p {
 namespace {
 
@@ -23,7 +25,7 @@ using Clock = std::chrono::steady_clock;
 constexpr uint8_t kStunHeader[6] = {0xFF, 0x83, 0xFF, 0xFF, 0xFF, 0xFF};
 constexpr uint8_t kRelayMagic[4] = {'S', 'M', 'R', 'L'};
 constexpr uint8_t kMagic[4] = {'L', '3', 'P', '1'};
-enum : uint8_t { kHello = 1, kAck = 2, kData = 3, kPing = 4, kPong = 5, kBye = 6 };
+enum : uint8_t { kHello = 1, kAck = 2, kData = 3, kPing = 4, kPong = 5, kBye = 6, kData2 = 7 };
 constexpr size_t kIdLen = 16;
 constexpr size_t kHelloLen = 5 + kIdLen * 2 + 6 + 6;
 constexpr auto kDirectFresh = std::chrono::seconds(5);  // a direct packet this recent: send directly
@@ -62,6 +64,27 @@ void Put32(std::vector<uint8_t>& b, uint32_t v) {
     for (int i = 3; i >= 0; --i) b.push_back(static_cast<uint8_t>(v >> (8 * i)));
 }
 uint32_t Get32(const uint8_t* p) { return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3]; }
+void Put64(std::vector<uint8_t>& b, uint64_t v) {
+    for (int i = 7; i >= 0; --i) b.push_back(static_cast<uint8_t>(v >> (8 * i)));
+}
+uint64_t Get64(const uint8_t* p) { return uint64_t(Get32(p)) << 32 | Get32(p + 4); }
+
+// QueryPerformanceCounter: one clock for every process on the PC, so two instances' send and
+// receive times compare directly.
+int64_t Qpc() {
+    LARGE_INTEGER v;
+    QueryPerformanceCounter(&v);
+    return v.QuadPart;
+}
+int64_t QpcFreq() {
+    static const int64_t f = [] {
+        LARGE_INTEGER v;
+        QueryPerformanceFrequency(&v);
+        return v.QuadPart;
+    }();
+    return f;
+}
+int64_t QpcUs(int64_t ticks) { return ticks * 1'000'000 / QpcFreq(); }
 
 std::vector<uint8_t> Header(uint8_t type) {
     std::vector<uint8_t> b(kMagic, kMagic + 4);
@@ -99,6 +122,25 @@ struct Link::Impl {
         Clock::time_point started{}, lastRx{}, lastHello{}, lastPing{}, lastResolve{};
         bool resolving = false;
         int rttUs = 0;
+        Endpoint ext, lan;   // as the peer reports them (HELLO / ACK)
+        Endpoint preferred;  // the direct address to keep while it answers (Config::path)
+        // Diagnostics (DATA2).
+        uint32_t txSeq = 0, rxNext = 0;
+        bool rxStarted = false;
+        int64_t peerLastTx = 0;  // the latest send time seen from the peer (QPC)
+    };
+    struct Rec {
+        int64_t qpc;
+        uint32_t seq;
+        uint32_t len;
+        int32_t delayUs;  // receive: one-way delay; -1 for sends
+        char dir, path;   // 't' / 'r'; 'L' LAN, 'P' public or other direct, 'R' relay
+    };
+    struct Diag {
+        uint64_t rx = 0, gaps = 0, late = 0, pauses = 0, slow = 0;
+        int64_t delaySum = 0, delayMin = INT64_MAX, delayMax = 0;
+        size_t maxTx = 0, maxRx = 0;
+        int logged = 0;
     };
 
     Config cfg;
@@ -116,6 +158,9 @@ struct Link::Impl {
     Clock::time_point lastStun{};
     bool stunAnswered = false;
     std::set<std::string> refusedLogged;
+    Diag diag;
+    std::deque<Rec> ring;  // Config::diag: game datagrams of the last 20 s
+    int pathLogs = 0;
     std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
 
     void SendRaw(const Endpoint& to, const std::vector<uint8_t>& b) {
@@ -138,9 +183,34 @@ struct Link::Impl {
     bool DirectFresh(const Peer& p, Clock::time_point now) const {
         return p.direct.Valid() && now - p.lastDirect < kDirectFresh;
     }
+    bool SendsRelayed(const Peer& p, Clock::time_point now) const {
+        return (cfg.path == Config::Path::Relay && cfg.server.Valid() && p.relayTo.Valid()) || !DirectFresh(p, now);
+    }
+    // 'L' the peer's LAN address, 'P' another direct one, 'R' the relay.
+    char PathOf(const Peer& p, Clock::time_point now) const {
+        if (SendsRelayed(p, now)) return 'R';
+        return p.lan.Valid() && p.direct == p.lan ? 'L' : 'P';
+    }
+    static const char* PathName(char c) { return c == 'L' ? "direct, LAN" : c == 'P' ? "direct" : "relayed"; }
+    // Lock held: which direct address to keep (Config::path).
+    void UpdatePreferred(Peer& p) const {
+        switch (cfg.path) {
+        case Config::Path::Lan: p.preferred = p.lan; break;
+        case Config::Path::Public: p.preferred = p.ext; break;
+        case Config::Path::Relay: p.preferred = {}; break;
+        case Config::Path::Auto:
+            // Behind our public address: the same network, so not through the router's hairpin.
+            p.preferred = p.lan.Valid() && p.ext.Valid() && external.Valid() && p.ext.ip == external.ip ? p.lan
+                                                                                                         : Endpoint{};
+            break;
+        }
+    }
     // Lock held. Directly when the peer's packets come directly, else through the relay.
     void SendToPeer(Peer& p, const std::vector<uint8_t>& b, Clock::time_point now) {
-        if (DirectFresh(p, now)) {
+        if (cfg.path == Config::Path::Relay && cfg.server.Valid() && p.relayTo.Valid()) {
+            SendRelayed(p.relayTo, b);
+            ++stats.sentRelayed;
+        } else if (DirectFresh(p, now)) {
             SendRaw(p.direct, b);
             ++stats.sentDirect;
         } else if (cfg.server.Valid() && p.relayTo.Valid()) {
@@ -195,10 +265,87 @@ struct Link::Impl {
         if (relayed) {
             p.relayTo = src;
         } else {
+            AddCandidate(p, src);
+            // While the preferred address answers, packets that come another way don't move us off it.
+            const bool keep = p.preferred.Valid() && p.direct == p.preferred && src != p.preferred &&
+                              now - p.lastDirect < kDirectFresh;
+            if (keep) return;
+            if (p.direct != src && p.direct.Valid() && pathLogs++ < 20)
+                std::fprintf(stderr, "[p2p] %s %s: its packets now come from %s%s\n", core::Stamp().text,
+                             p.name.c_str(), ToString(src).c_str(),
+                             src == p.lan ? " (its LAN address)" : src == p.ext ? " (its public address)" : "");
             p.direct = src;
             p.lastDirect = now;
-            AddCandidate(p, src);
         }
+    }
+
+    // Lock held: a DATA2's diagnostics (sequence, one-way delay, sender pauses).
+    void NoteDiag(Peer& p, uint32_t seq, int64_t txQpc, size_t len, bool relayed) {
+        const int64_t rxQpc = Qpc();
+        const int64_t delayUs = QpcUs(rxQpc - txQpc);
+        ++diag.rx;
+        diag.delaySum += delayUs;
+        diag.delayMin = std::min(diag.delayMin, delayUs);
+        diag.delayMax = std::max(diag.delayMax, delayUs);
+        diag.maxRx = std::max(diag.maxRx, len);
+        const bool log = diag.logged < 400;
+        if (!p.rxStarted) {
+            p.rxStarted = true;
+            p.rxNext = seq + 1;
+        } else {
+            const int32_t ahead = static_cast<int32_t>(seq - p.rxNext);
+            if (ahead == 0) {
+                ++p.rxNext;
+            } else if (ahead > 0) {
+                diag.gaps += static_cast<uint32_t>(ahead);
+                if (log && ++diag.logged)
+                    std::fprintf(stderr, "[p2p-diag] %s from %s: seq %u..%u missing (got %u)\n", core::Stamp().text,
+                                 p.name.c_str(), p.rxNext, seq - 1, seq);
+                p.rxNext = seq + 1;
+            } else {
+                ++diag.late;
+                if (log && ++diag.logged)
+                    std::fprintf(stderr, "[p2p-diag] %s from %s: seq %u late (expected %u), %.1f ms on the way\n",
+                                 core::Stamp().text, p.name.c_str(), seq, p.rxNext, delayUs / 1000.0);
+            }
+        }
+        if (p.peerLastTx && txQpc - p.peerLastTx > QpcFreq() / 10) {
+            ++diag.pauses;
+            if (log && ++diag.logged)
+                std::fprintf(stderr, "[p2p-diag] %s from %s: seq %u sent %.1f ms after its previous datagram\n",
+                             core::Stamp().text, p.name.c_str(), seq, QpcUs(txQpc - p.peerLastTx) / 1000.0);
+        }
+        p.peerLastTx = std::max(p.peerLastTx, txQpc);
+        if (delayUs > 30'000) {
+            ++diag.slow;
+            if (log && ++diag.logged)
+                std::fprintf(stderr, "[p2p-diag] %s from %s: seq %u took %.1f ms (%s)\n", core::Stamp().text,
+                             p.name.c_str(), seq, delayUs / 1000.0, relayed ? "relayed" : "direct");
+        }
+        Remember({rxQpc, seq, static_cast<uint32_t>(len), static_cast<int32_t>(std::min<int64_t>(delayUs, INT32_MAX)),
+                  'r', relayed ? 'R' : (p.lan.Valid() && p.direct == p.lan ? 'L' : 'P')});
+    }
+
+    // Lock held.
+    void Remember(const Rec& r) {
+        ring.push_back(r);
+        while (!ring.empty() && r.qpc - ring.front().qpc > 20 * QpcFreq()) ring.pop_front();
+    }
+    // Lock held.
+    void DumpRecentLocked(const char* why) {
+        if (!cfg.diag) return;
+        const int64_t now = Qpc();
+        std::fprintf(stderr, "[p2p-ring] %s: the game datagrams of the last 20 s before %s (%zu):\n", core::Stamp().text,
+                     why, ring.size());
+        for (const Rec& r : ring) {
+            if (r.dir == 't')
+                std::fprintf(stderr, "[p2p-ring] %8.3f s  sent seq %u, %u bytes, %c\n", -QpcUs(now - r.qpc) / 1e6, r.seq,
+                             r.len, r.path);
+            else
+                std::fprintf(stderr, "[p2p-ring] %8.3f s  got  seq %u, %u bytes, %c, %.1f ms on the way\n",
+                             -QpcUs(now - r.qpc) / 1e6, r.seq, r.len, r.path, r.delayUs / 1000.0);
+        }
+        ring.clear();
     }
 
     // Lock held: the connection is up (once).
@@ -243,6 +390,9 @@ struct Link::Impl {
             }
             Peer& p = it->second;
             p.gameAddr = ext.Valid() ? ext : lan.Valid() ? lan : src;
+            p.ext = ext;
+            p.lan = lan;
+            UpdatePreferred(p);
             AddCandidate(p, ext);
             AddCandidate(p, lan);
             Heard(p, src, relayed, now);
@@ -253,8 +403,10 @@ struct Link::Impl {
             SetActive(p);
             break;
         }
-        case kData: {
-            if (n < 13) return;
+        case kData:
+        case kData2: {
+            const size_t head = type == kData2 ? 25 : 13;
+            if (n < head) return;
             const uint32_t tag = Get32(d + 9);
             Peer* p = nullptr;
             for (auto& [name, peer] : peers)
@@ -268,9 +420,10 @@ struct Link::Impl {
             Heard(*p, src, relayed, now);
             if (++stats.dataReceived <= 5 || stats.dataReceived % 3000 == 0)
                 std::fprintf(stderr, "[p2p] game datagram %llu from %s (%zu bytes, %s)\n",
-                             static_cast<unsigned long long>(stats.dataReceived), p->name.c_str(), n - 13,
+                             static_cast<unsigned long long>(stats.dataReceived), p->name.c_str(), n - head,
                              relayed ? "relayed" : "direct");
-            if (sink) sink(p->gameAddr, Get16(d + 5), Get16(d + 7), d + 13, n - 13);
+            if (type == kData2) NoteDiag(*p, Get32(d + 13), static_cast<int64_t>(Get64(d + 17)), n - head, relayed);
+            if (sink) sink(p->gameAddr, Get16(d + 5), Get16(d + 7), d + head, n - head);
             break;
         }
         case kPing:
@@ -298,7 +451,8 @@ struct Link::Impl {
             if (GetId(d + 5 + kIdLen) != cfg.self) return;
             if (peers.erase(from)) {
                 events.push_back({Event::Dead, from, kErrorPeerGone});
-                std::fprintf(stderr, "[p2p] %s: left\n", from.c_str());
+                std::fprintf(stderr, "[p2p] %s %s: left\n", core::Stamp().text, from.c_str());
+                DumpRecentLocked("the peer left");
             }
             break;
         }
@@ -339,10 +493,22 @@ struct Link::Impl {
         if (!sent && !received) return;
         std::string who;
         for (const auto& [name, p] : peers)
-            who += " " + name + (p.state == State::Active ? (DirectFresh(p, now) ? " (direct" : " (relayed") : " (pending") +
+            who += " " + name + (p.state == State::Active ? std::string(" (") + PathName(PathOf(p, now)) : " (pending") +
                    ", rtt " + std::to_string(p.rttUs / 1000) + " ms)";
-        std::fprintf(stderr, "[p2p] last 5 s: %llu game datagrams sent, %llu received;%s\n",
+        std::fprintf(stderr, "[p2p] %s last 5 s: %llu game datagrams sent, %llu received;%s\n", core::Stamp().text,
                      static_cast<unsigned long long>(sent), static_cast<unsigned long long>(received), who.c_str());
+        if (cfg.diag && diag.rx) {
+            std::fprintf(stderr,
+                         "[p2p-diag] %s last 5 s: one-way delay %.1f / %.1f / %.1f ms (min / avg / max), %llu missing, "
+                         "%llu late, %llu sender pauses, %llu over 30 ms; largest sent %zu, received %zu bytes\n",
+                         core::Stamp().text, diag.delayMin / 1000.0, diag.delaySum / 1000.0 / diag.rx,
+                         diag.delayMax / 1000.0, static_cast<unsigned long long>(diag.gaps),
+                         static_cast<unsigned long long>(diag.late), static_cast<unsigned long long>(diag.pauses),
+                         static_cast<unsigned long long>(diag.slow), diag.maxTx, diag.maxRx);
+        }
+        const int logged = diag.logged;
+        diag = {};
+        diag.logged = logged;
     }
 
     void Tick(Clock::time_point now) {
@@ -385,8 +551,9 @@ struct Link::Impl {
                 } else if (p.state == State::Active) {
                     if (Ms(now - p.lastRx) > cfg.deadAfterMs) {
                         events.push_back({Event::Dead, p.name, kErrorTimeout});
-                        std::fprintf(stderr, "[p2p] %s: nothing heard for %d s, connection dead\n", p.name.c_str(),
-                                     cfg.deadAfterMs / 1000);
+                        std::fprintf(stderr, "[p2p] %s %s: nothing heard for %d s, connection dead\n",
+                                     core::Stamp().text, p.name.c_str(), cfg.deadAfterMs / 1000);
+                        DumpRecentLocked("the connection died");
                         it = peers.erase(it);
                         continue;
                     }
@@ -397,6 +564,10 @@ struct Link::Impl {
                         // Not direct yet: keep trying the direct addresses (a hole may open).
                         if (!DirectFresh(p, now))
                             for (const Endpoint& c : p.candidates) SendRaw(c, ping);
+                        // The preferred address (Config::path) isn't the one in use: try it.
+                        UpdatePreferred(p);
+                        if (p.preferred.Valid() && p.direct != p.preferred && cfg.path != Config::Path::Relay)
+                            SendRaw(p.preferred, ping);
                     }
                 }
                 ++it;
@@ -574,6 +745,12 @@ void Link::Terminate(const std::string& peer) {
         I.SendToPeer(it->second, b, Clock::now());
     }
     I.peers.erase(it);
+    I.DumpRecentLocked("our game ended the connection");
+}
+
+void Link::DumpRecent(const char* why) {
+    std::lock_guard lk(impl_->m);
+    impl_->DumpRecentLocked(why);
 }
 
 PeerInfo Link::Info(const std::string& peer) const {
@@ -585,7 +762,7 @@ PeerInfo Link::Info(const std::string& peer) const {
     const auto& p = it->second;
     info.state = p.state;
     info.gameAddr = p.gameAddr;
-    info.relayed = !I.DirectFresh(p, Clock::now());
+    info.relayed = I.SendsRelayed(p, Clock::now());
     info.rttUs = p.rttUs;
     info.locallyActivated = p.local;
     info.peerActivated = p.remote;
@@ -625,18 +802,29 @@ bool Link::SendData(const Endpoint& gameAddr, uint16_t srcVport, uint16_t dstVpo
                          ToString(gameAddr).c_str(), dstVport);
         return false;
     }
-    auto b = Header(kData);
+    Impl::Peer& peer = it->second;
+    auto b = Header(I.cfg.diag ? kData2 : kData);
     Put16(b, srcVport);
     Put16(b, dstVport);
     Put32(b, NameTag(I.cfg.self));
+    const uint32_t seq = peer.txSeq++;
+    const int64_t sentAt = Qpc();
+    if (I.cfg.diag) {
+        Put32(b, seq);
+        Put64(b, static_cast<uint64_t>(sentAt));
+    }
     const auto* p = static_cast<const uint8_t*>(data);
     b.insert(b.end(), p, p + len);
     const auto now = Clock::now();
     if (++I.stats.dataSent <= 5 || I.stats.dataSent % 3000 == 0)
         std::fprintf(stderr, "[p2p] game datagram %llu to %s (%zu bytes, %s)\n",
                      static_cast<unsigned long long>(I.stats.dataSent), name.c_str(), len,
-                     I.DirectFresh(it->second, now) ? "direct" : "relayed");
-    I.SendToPeer(it->second, b, now);
+                     Impl::PathName(I.PathOf(peer, now)));
+    if (I.cfg.diag) {
+        I.diag.maxTx = std::max(I.diag.maxTx, len);
+        I.Remember({sentAt, seq, static_cast<uint32_t>(len), -1, 't', I.PathOf(peer, now)});
+    }
+    I.SendToPeer(peer, b, now);
     return true;
 }
 
