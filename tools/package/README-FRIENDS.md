@@ -31,9 +31,18 @@ this download: you bring the game, and your DLC if you have any.
 A new profile starts with the game's brightness screen (press Cross), then the Pod. With online off, the game
 says *"There is a problem with your network connection"* once; press **Close**. That's expected offline.
 
+While the game starts, a loading screen shows your game's own art and how far the shader loading has got.
 The first time you visit each part of the game it can pause for a second or two while your graphics driver
-builds shaders. That happens once; they're kept in `user\shader_cache` for next time. The very first start
-after a reboot can also take 20-40 seconds while Windows reads that cache.
+builds shaders. That happens once; they're kept in `user\shader_cache` for next time. The first start after a
+reboot takes longer while that cache is read back from disk.
+
+## Picture
+
+The launcher's **Graphics & sound** page sets the **Resolution** the game draws at: 1280x720, 1920x1080 (the
+PS4's own), 2560x1440 (the default), 3840x2160 (4K), or an ultrawide size (2560x1080, 3440x1440, 3840x1600,
+3840x1080, 4480x1260). Ultrawide widens the view, as on a real ultrawide monitor; on a 16:9 screen it shows with
+black bars. 4K needs a strong graphics card: on an RTX 3090, heavy scenes drop below 30 frames a second.
+**60 frames a second on screen** (frame generation) is on by default.
 
 ## Playing online (optional)
 
@@ -78,6 +87,10 @@ controllers for local co-op. **Insert** on the keyboard, or **L3+R3** on the pad
   - a burst of lost game messages can cause a short hitch;
   - the joining player's game may be slightly less smooth than the host's.
 - Dive In doesn't match you with strangers on play.lbppc.com; play with friends through invites or Join.
+- Online co-op with an ultrawide player hasn't been tested with two players yet (the game's camera stays 16:9
+  for the simulation and only the picture is widened, which should keep both games in step). If a session drops
+  with "The game diverged", switch to a 16:9 size.
+- Ultrawide sizes take wider photos (stickers and level icons).
 - The first-visit shader pauses described above.
 
 See CREDITS.md for who made what, and SOURCE.md for the source code.
