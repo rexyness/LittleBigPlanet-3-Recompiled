@@ -1,21 +1,26 @@
-**v0.1.2: a loading screen, faster first starts, and more resolutions, from 720p to 4K and ultrawide.**
-If you have v0.1.1, open the launcher and go to **Tools > Check for updates**. It installs v0.1.2 and keeps
-your saves, settings and accounts. New here? Read on. **No game files are included:** you need your own copy
-of the game.
+**v0.1.3: online co-op between AMD and Intel PCs, and optional freeze-free first visits. Both co-op players need v0.1.3.**
+If you have v0.1.1 or v0.1.2, open the launcher and go to **Tools > Check for updates**. It installs v0.1.3 and
+keeps your saves, settings and accounts. New here? Read on. **No game files are included:** you need your own
+copy of the game.
 
-### What's in it (new in v0.1.2)
-- **A loading screen instead of a black window** while the game starts. It shows your game's own background art
-  and icon, and how far the shader loading has got ("Loading shaders 3,296 / 7,022"). It fades into the game.
-- **Faster first start after a PC restart.** When the shader cache is slow to read, the rest of it is now read on
-  many threads at once. In a test with "cold" files, reading went from 75.6 s to 11.8 s. Normal starts are unchanged.
-- **Nine resolutions** on the launcher's Graphics & sound page:
-  - 16:9: 1280x720, 1920x1080 (the PS4's own), 2560x1440 (the default) and 3840x2160 (4K);
-  - ultrawide: 2560x1080, 3440x1440, 3840x1600, 3840x1080 and 4480x1260.
+### What's in it (new in v0.1.3)
+- **Exact maths online, so AMD and Intel players stay in step.** Online co-op runs both players' worlds side by
+  side and compares them. A few of the game's maths instructions give slightly different answers on AMD and Intel
+  processors (no problem on a PS4, where every console is the same), so the worlds could drift apart and the
+  session drop ("The game diverged"). Online, all 3,373 of them now compute the exact result, the same on every
+  PC. This is LBPPC's fix, ported. **Both players need v0.1.3:** a player on an older version can't join (their
+  game would drift apart from yours).
+- **Build new shaders in the background** (launcher, Graphics & sound > Shaders; off by default). No freeze the
+  first time something new is drawn; instead it can appear a moment late. In a test from empty caches, the
+  worst freeze walking through a level went from 1.75 s to 0.14 s. Also from LBPPC.
+- The project's licence is now the GNU GPL version 3 or later (it was version 2 or later).
 
-  Ultrawide widens the view, menus included, as on a real ultrawide monitor; on a 16:9 screen it shows with
-  black bars. 4K needs a strong graphics card: on an RTX 3090, heavy scenes drop below 30 frames a second.
-  2560x1440 settings from earlier versions carry over, with your shader cache.
-- **Your in-game name is your online account's name** (it was your Windows user name).
+### New in v0.1.2
+- A loading screen instead of a black window while the game starts, and faster first starts after a PC restart.
+- Nine resolutions on the launcher's Graphics & sound page: 1280x720, 1920x1080, 2560x1440 (the default),
+  3840x2160 (4K), and ultrawide 2560x1080, 3440x1440, 3840x1600, 3840x1080 and 4480x1260. Ultrawide widens the
+  view; on a 16:9 screen it shows with black bars. 4K needs a strong graphics card.
+- Your in-game name is your online account's name.
 
 ### What you need
 - Windows 10 (1903 or later) or Windows 11, 64-bit.
@@ -25,7 +30,7 @@ of the game.
 - Optional: your own DLC `.pkg` files and a PS4 pkg extractor.
 
 ### Getting started
-1. Download `LBP3-Recompiled-v0.1.2-lbp3port.zip` and unzip it somewhere you can write to (not Program Files).
+1. Download `LBP3-Recompiled-v0.1.3-lbp3port.zip` and unzip it somewhere you can write to (not Program Files).
 2. Run `LBP3Launcher.exe`. The setup asks for the folder that contains `CUSA00473` (pick it, or type or paste its
    path) and checks it.
 3. Press **PLAY**.
@@ -60,12 +65,15 @@ The first visit to each area can pause briefly while your graphics driver builds
   with "The game diverged", switch to a 16:9 size.
 - Ultrawide sizes take wider photos (stickers and level icons).
 - Dive In doesn't match you with strangers on play.lbppc.com; play with friends through invites or Join.
-- First-visit shader pauses.
+- First-visit shader pauses (unless "Build new shaders in the background" is on; then new things can appear a
+  moment late instead).
+- Exact maths online costs about half a millisecond a frame (of the 33 ms the game has); it has been proven exact
+  in tests on one PC, but a real AMD-against-Intel co-op session hasn't been played yet.
 
 ### Credits and source
 Built on PurpleGitty's LittleBigPlanet 3 Recompiled and the shadPS4 graphics core, with several pieces from
-LBPPC by emurphy04 (credited in the code), including the shadNet sign-in code request from LBPPC 0.1.3 and the
-game addresses behind the ultrawide view. Their team also runs play.lbppc.com and allowed this port to use it.
+LBPPC by emurphy04 (credited in the code), including the shadNet sign-in code request from LBPPC 0.1.3, the
+game addresses behind the ultrawide view, the exact maths for online play and the background shader builds. Their team also runs play.lbppc.com and allowed this port to use it.
 Full credits are in `CREDITS.md`.
 
 This is free software under the GNU GPL. The source is this repository at the tagged commit, with its shadPS4

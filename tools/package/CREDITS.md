@@ -13,7 +13,8 @@
   online request signing and server answers, the shadNet client adaptations and the game server's sign-in
   codes (LBPPC 0.1.3), the pause-menu Quit Game script,
   the bloom and language patch addresses, the resolution list and the ultrawide view's patch addresses
-  (camera aspect, 2D canvas and layout centres, the online camera split), and the community-download check. The LBPPC team also runs the
+  (camera aspect, 2D canvas and layout centres, the online camera split), the exact maths for online play
+  (its stubs and list of the game's 3,373 sites), the background shader builds, and the community-download check. The LBPPC team also runs the
   play.lbppc.com servers and allowed this port to use them.
 - **Refresh** (LittleBigRefresh) and **shadNet** (shadps4-emu): the community game server and PSN stand-in
   that online play connects to.

@@ -34,7 +34,9 @@ says *"There is a problem with your network connection"* once; press **Close**. 
 While the game starts, a loading screen shows your game's own art and how far the shader loading has got.
 The first time you visit each part of the game it can pause for a second or two while your graphics driver
 builds shaders. That happens once; they're kept in `user\shader_cache` for next time. The first start after a
-reboot takes longer while that cache is read back from disk.
+reboot takes longer while that cache is read back from disk. To avoid those pauses, switch on **Build new
+shaders in the background** (launcher, **Graphics & sound** > Shaders): no freeze, but something new can appear
+a moment late the first time it's drawn.
 
 ## Picture
 
@@ -53,9 +55,10 @@ PC. Community levels, your profile and your friends list work. Dive In doesn't m
 server; play with friends through invites or Join. Add friends by name on the launcher's **Friends** page.
 
 Online co-op is new: invite a friend or join their game from the game's own menus. Only your shadNet friends
-can join your game. **Both of you need the latest version** (Tools > Check for updates): since v0.1.1 a lost
-game message no longer ends the session, but only when both players have it. Friends on the same network
-connect over it directly.
+can join your game. **Both of you need the same version, v0.1.3 or later** (Tools > Check for updates). Since
+v0.1.3 the game does its maths exactly online, so a PC with an AMD processor and one with an Intel processor
+stay in step; a player on an older version can't join (their game would drift apart from yours). Since v0.1.1
+a lost game message no longer ends the session. Friends on the same network connect over it directly.
 
 If the game says *"A problem occurred when attempting to connect to the LittleBigPlanet servers (403)"*, the
 sign-in failed. Usually the password in that file is wrong; the launcher's **Online** page can test it. The
