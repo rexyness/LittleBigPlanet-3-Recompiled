@@ -38,7 +38,6 @@ struct Settings {
     std::string res = "2560x1440";  // WxH, one of Resolutions() (older files: res=1440 or 1080)
     bool my_unlocks = false;
     // play_best.bat's
-    bool bloom_1440 = true;
     bool fg_text = true;
     int status_flips = 30;
     int pipeline_threads = 0;  // 0 = all cores but one (the default); 1 = one at a time

@@ -48,6 +48,8 @@ enum class Kind {
     H,       // a full-screen height (1080, 2160)
     SmallW,  // a smaller target's width: grows, never shrinks
     SmallH,
+    BloomW,  // a bloom/capture chain width: widens only with the aspect, a multiple of 16 (BloomWidth)
+    BloomH,  // a bloom/capture chain height: always the 1080p one
     Pitch,   // 1920 * 4 bytes
     Region,  // the MainRenderTargets block (0x2441400 bytes)
     FloatW,  // 1920.0f
@@ -159,15 +161,17 @@ const std::vector<Site>& Sites() {
         {"ui", 0xe9fdcc, {0x00, 0x00, 0x87, 0x44}, Kind::FloatH, 1080, 4, "float 1080 (FUN_006cd050 NDC to pixels y)"},
         // ---- bloom (6) ----
         // The bloom chain's three targets in the render-target table (1280x720, 640x360, 320x180 at
-        // 1080p). The sites are the ones LBPPC (emurphy04, aad6a91, src/probe.c targets[]) scales;
-        // only the addresses are taken from there, the table entries are ours. They only grow: the
-        // game cuts a centred 256x256 square from one of them (0x4014f0).
-        {"bloom", 0x427d1c, {0xbe, 0x00, 0x05, 0x00, 0x00}, Kind::SmallW, 1280, 4, "MOV ESI,0x500  (bloom target width)"},
-        {"bloom", 0x427d21, {0xba, 0xd0, 0x02, 0x00, 0x00}, Kind::SmallH, 720, 4, "MOV EDX,0x2d0  (bloom target height)"},
-        {"bloom", 0x427d3d, {0xbe, 0x80, 0x02, 0x00, 0x00}, Kind::SmallW, 640, 4, "MOV ESI,0x280  (bloom target width)"},
-        {"bloom", 0x427d42, {0xba, 0x68, 0x01, 0x00, 0x00}, Kind::SmallH, 360, 4, "MOV EDX,0x168  (bloom target height)"},
-        {"bloom", 0x427d61, {0xbe, 0x40, 0x01, 0x00, 0x00}, Kind::SmallW, 320, 4, "MOV ESI,0x140  (bloom target width)"},
-        {"bloom", 0x427d66, {0xba, 0xb4, 0x00, 0x00, 0x00}, Kind::SmallH, 180, 4, "MOV EDX,0xb4  (bloom target height)"},
+        // 1080p), which are also the capture chain (render-target indices 0x26/0x27/0x28): photos,
+        // costume and level icons and the profile picture are drawn into them and copied out by
+        // the CPU. Their sizes follow BloomWidth (below): the 1080p sizes at every 16:9 size, wider
+        // only on a wide screen. The sites are the ones LBPPC (emurphy04, aad6a91, src/probe.c
+        // targets[]) scales; only the addresses are taken from there, the table entries are ours.
+        {"bloom", 0x427d1c, {0xbe, 0x00, 0x05, 0x00, 0x00}, Kind::BloomW, 1280, 4, "MOV ESI,0x500  (bloom target width)"},
+        {"bloom", 0x427d21, {0xba, 0xd0, 0x02, 0x00, 0x00}, Kind::BloomH, 720, 4, "MOV EDX,0x2d0  (bloom target height)"},
+        {"bloom", 0x427d3d, {0xbe, 0x80, 0x02, 0x00, 0x00}, Kind::BloomW, 640, 4, "MOV ESI,0x280  (bloom target width)"},
+        {"bloom", 0x427d42, {0xba, 0x68, 0x01, 0x00, 0x00}, Kind::BloomH, 360, 4, "MOV EDX,0x168  (bloom target height)"},
+        {"bloom", 0x427d61, {0xbe, 0x40, 0x01, 0x00, 0x00}, Kind::BloomW, 320, 4, "MOV ESI,0x140  (bloom target width)"},
+        {"bloom", 0x427d66, {0xba, 0xb4, 0x00, 0x00, 0x00}, Kind::BloomH, 180, 4, "MOV EDX,0xb4  (bloom target height)"},
         // ---- aspect (8; only wider than 16:9) ----
         // The camera's constructor (0x3fdba0) stores its aspect, 16:9, beside its vertical field of
         // view: at the screen's aspect the view widens instead of stretching; the menus and HUD
@@ -205,8 +209,8 @@ uint32_t FloatBits(float f) {
 }
 
 // The MainRenderTargets block: 68 MB at 2560x1440 (as it always was there), else the 1080p
-// capacity grown with the pixel count plus 6% (the bloom chain grows faster than the area at the
-// smaller sizes), rounded up to 1 MB, never smaller than at 1080p.
+// capacity grown with the pixel count plus 6% (a margin from when the bloom chain grew with the
+// size too; it now grows less), rounded up to 1 MB, never smaller than at 1080p.
 uint32_t RegionBytes(Size s) {
     constexpr uint64_t k1080 = 0x2441400;
     if (s == Lbp3Res::k1440) return 0x4400000;
@@ -214,6 +218,25 @@ uint32_t RegionBytes(Size s) {
     if (area <= 1.0) return uint32_t(k1080);
     const uint64_t grown = (uint64_t(double(k1080) * area * 1.06) + 0xfffff) & ~uint64_t{0xfffff};
     return uint32_t(std::max<uint64_t>(grown, k1080));
+}
+
+// A bloom/capture chain width (1280, 640 or 320 at 1080p). The CPU copies captures out of the
+// chain four frames after drawing them (0x4014f0: a centred photo- or icon-sized cut, rows read
+// with a stride of the table's width * 4), which sets two rules:
+//  - Widths are multiples of 16 pixels. The GPU lays a linear 32-bit target out with its rows
+//    padded to 64 bytes, so the chain scaled to 1440p (1707x960, 853x480, 427x240; c3242e5) was
+//    read 853 pixels a row out of 864-pixel rows: every photo, costume icon and profile picture
+//    came out sheared into horizontal streaks.
+//  - Heights stay 720/360/180 and widths grow only with the aspect. The capture fills the whole
+//    target, so a bigger chain made the centred 640x360 photo cut the middle 3/4 of the frame. A
+//    wide screen's photos are wider (360 * the aspect, up to 1280x360), so there the chain widens.
+// At every 16:9 size that is the PS4's chain; the scaled one looked no different in game
+// (perf/best_gfx.md), and LBP3_RES_SKIP=bloom changes nothing at 16:9 now.
+uint32_t BloomWidth(uint32_t v1080, Size s) {
+    if (!Wide(s)) return v1080;
+    // v1080 * (w / h) / (16 / 9), rounded up, then up to a multiple of 16.
+    const uint64_t w = (uint64_t(v1080) * 9 * s.w + 16ull * s.h - 1) / (16ull * s.h);
+    return uint32_t(std::max<uint64_t>((w + 15) & ~uint64_t{15}, v1080));
 }
 
 }  // namespace
@@ -244,6 +267,8 @@ std::vector<Edit> Build(Size size, const Options& options) {
         case Kind::H: v = Lbp3Res::ScaleH(s.v1080, size); break;
         case Kind::SmallW: v = Lbp3Res::SmallW(s.v1080, size); break;
         case Kind::SmallH: v = Lbp3Res::SmallH(s.v1080, size); break;
+        case Kind::BloomW: v = BloomWidth(s.v1080, size); break;
+        case Kind::BloomH: v = s.v1080; break;
         case Kind::Pitch: v = size.w * 4; break;
         case Kind::Region: v = RegionBytes(size); break;
         case Kind::FloatW: v = FloatBits(float(Lbp3Res::ScaleW(s.v1080, size))); break;

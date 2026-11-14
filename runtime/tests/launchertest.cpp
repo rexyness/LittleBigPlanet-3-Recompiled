@@ -78,7 +78,6 @@ static void TestIni() {
     a.framegen = false;
     a.res = "1920x1080";
     a.my_unlocks = true;
-    a.bloom_1440 = false;
     a.fg_text = false;
     a.status_flips = 300;
     a.pipeline_threads = 4;
@@ -127,7 +126,6 @@ static void TestMapping() {
     Settings s;
     s.skip_intro = false;
     s.framegen = false;
-    s.bloom_1440 = false;
     s.my_unlocks = true;
     s.fg_text = false;
     s.status_flips = 300;
@@ -142,7 +140,7 @@ static void TestMapping() {
     s.language = "de";
     m = EnvMap(s);
     CHECK(!m.count("LBP3_FRAMEGEN") && !m.count("LBP3_FRAMEGEN_MODE"));
-    CHECK(m["LBP3_RES_SKIP"] == "bloom");
+    CHECK(!m.count("LBP3_RES_SKIP"));  // the bloom switch is retired (fix/capture-pitch)
     CHECK(m["LBP3_MY_UNLOCKS"] == "lbp1,lbp2");
     CHECK(m["LBP3_FRAMEGEN_TEXT"] == "off");
     CHECK(m["LBP3_STATUS_FLIPS"] == "300");
@@ -152,10 +150,9 @@ static void TestMapping() {
     CHECK(m["LBP3_MOTION"] == "raw" && m["LBP3_TILT_KEYS"] == "off" && m["LBP3_MOUSE_TOUCH"] == "1");
     CHECK(m["LBP3_STATS"] == "1" && m["LBP3_LANGUAGE"] == "de" && m["LBP3_LANGUAGES"] == "all");
     CHECK(MapSettings(s).args.size() == 1);
-    // 1080: no resolution variables at all, bloom irrelevant
+    // 1080: no resolution variables at all
     Settings r;
     r.res = "1920x1080";
-    r.bloom_1440 = false;
     m = EnvMap(r);
     CHECK(!m.count("LBP3_RES") && !m.count("LBP3_RES_SHADERS") && !m.count("LBP3_RES_SKIP"));
     // the other sizes (LBPPC's list): LBP3_RES=WxH; 2560x1440 keeps the original "1440"

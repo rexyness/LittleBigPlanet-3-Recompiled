@@ -1,7 +1,8 @@
 // LBP3_RES (core/res_patches.cpp, shadPS4 common/lbp3_res.h): the eboot edits for each render size
 // built from the one 1080p -> size mapping. 2560x1440 must stay byte for byte the original 1440p
 // table (main 330a1bc, restest_1440.inc), so the shared shader cache and every 1440p session behave
-// as before. Offline; no game, no GPU.
+// as before, except the bloom group: since fix/capture-pitch the bloom/capture chain keeps its 1080p
+// sizes at 16:9 (photos and icons were sheared and cropped). Offline; no game, no GPU.
 #include <cstdio>
 #include <cstring>
 #include <set>
@@ -100,8 +101,10 @@ int main() {
     for (size_t i = 0; i < kOldCount && i < e1440.size(); ++i) {
         const OldSite& o = kOld1440[i];
         const Edit& e = e1440[i];
+        // The bloom rows in the old table scale the chain (1707x960 ...); now it stays as it is.
+        const bool bloom = std::strcmp(o.group, "bloom") == 0;
         const bool same = std::strcmp(o.group, e.group) == 0 && o.offset == e.offset && o.expect == e.expect &&
-                          o.replace == e.replace;
+                          (bloom ? e.replace == e.expect : o.replace == e.replace);
         if (!same)
             std::printf("  1440p differs at eboot.bin+0x%llx (%s)\n", static_cast<unsigned long long>(o.offset),
                         o.group);
@@ -141,6 +144,20 @@ int main() {
         CHECK(Imm32(edits, 0x427a66) >= 480 && Imm32(edits, 0x427a6b) >= 270);
         CHECK(Imm32(edits, 0x427d1c) >= 1280 && Imm32(edits, 0x427d21) >= 720);
         CHECK(Imm32(edits, 0x427d61) >= 320 && Imm32(edits, 0x427d66) >= 180);
+        // The bloom/capture chain (read back by the CPU with a stride of width * 4): widths are
+        // multiples of 16 (the GPU pads rows to 64 bytes), heights are the 1080p ones, the three
+        // widths keep the 4:2:1 steps within one 16-pixel round-up, a 16:9 size keeps the 1080p
+        // chain, and the half-size target holds a photo of the screen's aspect (360 * w / h).
+        const uint32_t b0 = Imm32(edits, 0x427d1c), b1 = Imm32(edits, 0x427d3d), b2 = Imm32(edits, 0x427d61);
+        CHECK(b0 % 16 == 0 && b1 % 16 == 0 && b2 % 16 == 0);
+        CHECK(Imm32(edits, 0x427d21) == 720 && Imm32(edits, 0x427d42) == 360 && Imm32(edits, 0x427d66) == 180);
+        const auto half = [](uint32_t big, uint32_t small) {
+            const int d = int(big) - 2 * int(small);
+            return d >= -16 && d <= 16;
+        };
+        CHECK(half(b0, b1) && half(b1, b2));
+        if (!wide) CHECK(b0 == 1280 && b1 == 640 && b2 == 320 && !Changed(edits, 0x427d1c));
+        CHECK(uint64_t(b1) * l.h >= 360ull * l.w);
         // The region holds at least the 1080p block grown with the pixel count.
         const uint32_t region = Imm32(edits, 0x1517d);
         CHECK(region >= 0x2441400);
@@ -158,7 +175,7 @@ int main() {
     // ---- 3840x2160 ----
     const auto e4k = core::res::Build({3840, 2160});
     CHECK(Imm32(e4k, 0x427a66) == 960 && Imm32(e4k, 0x427a6b) == 540);
-    CHECK(Imm32(e4k, 0x427d1c) == 2560 && Imm32(e4k, 0x427d21) == 1440);
+    CHECK(Imm32(e4k, 0x427d1c) == 1280 && Imm32(e4k, 0x427d21) == 720);  // the 1080p capture chain
     CHECK(Imm32(e4k, 0x1517d) == ((uint32_t(double(0x2441400) * 4 * 1.06) + 0xfffff) & ~0xfffffu));
 
     // ---- wider than 16:9 ----
@@ -170,9 +187,17 @@ int main() {
     CHECK(ImmF(euw, 0xe675c0) == 860.0f && ImmF(euw, 0xe903b8) == 1720.0f);
     CHECK(Imm32(euw, 0x427a13) == 3440 && Imm32(euw, 0x427a18) == 1440);
     CHECK(Imm32(euw, 0x427a66) == 860 && Imm32(euw, 0x427a6b) == 360);
+    CHECK(Imm32(euw, 0x427d1c) == 1728 && Imm32(euw, 0x427d3d) == 864 && Imm32(euw, 0x427d61) == 432);
     // 2560x1080: the heights keep their values (no change), the widths grow.
     const auto e21 = core::res::Build({2560, 1080});
     CHECK(!Changed(e21, 0x427a18) && Changed(e21, 0x427a13) && core::res::CanvasWidth({2560, 1080}) == 1707);
+    CHECK(Imm32(e21, 0x427d1c) == 1712 && Imm32(e21, 0x427d3d) == 864 && Imm32(e21, 0x427d61) == 432);
+    CHECK(!Changed(e21, 0x427d21) && !Changed(e21, 0x427d42) && !Changed(e21, 0x427d66));
+    // 32:9 holds its 1280x360 photos; 2.4:1 its 864x360 ones.
+    const auto e329 = core::res::Build({3840, 1080});
+    CHECK(Imm32(e329, 0x427d1c) == 2560 && Imm32(e329, 0x427d3d) == 1280 && Imm32(e329, 0x427d61) == 640);
+    CHECK(Imm32(core::res::Build({4480, 1260}), 0x427d3d) == 1280);
+    CHECK(Imm32(core::res::Build({3840, 1600}), 0x427d3d) == 864);
     // 32:9 and 2.4:1.
     CHECK(core::res::CanvasWidth({3840, 1080}) == 2560 && core::res::CanvasWidth({4480, 1260}) == 2560);
     CHECK(core::res::CanvasWidth({3840, 1600}) == 1728);

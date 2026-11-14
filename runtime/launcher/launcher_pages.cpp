@@ -654,9 +654,6 @@ void PageGraphics(App& a) {
         ResolutionCombo("##res", s.res, S(320));
         Help("The size the game draws at. Above 1080p it's sharper and costs more GPU time; a size wider than "
              "16:9 widens the view, and shows with black bars on a 16:9 screen. Takes effect when the game starts.");
-        ImGui::BeginDisabled(CanonicalRes(s.res) == "1920x1080" || CanonicalRes(s.res) == "1280x720");
-        Toggle("Finer glow above 1080p", &s.bloom_1440, "The glow (bloom) is drawn at the higher resolution too.");
-        ImGui::EndDisabled();
         Toggle("60 frames a second on screen (the game itself stays at 30)", &s.framegen, "A generated frame between each pair of real ones. About 17 ms more input lag.");
         ImGui::BeginDisabled(!s.framegen);
         Toggle("Keep in-world text readable", &s.fg_text, "Generated frames keep thin bright text sharp (the map's \"Loading...\" ring).");
