@@ -76,8 +76,9 @@ controllers for local co-op. **Insert** on the keyboard, or **L3+R3** on the pad
 
 - `user\` - your settings, saves (`user\savedata\`) and shader cache. Back up `user\savedata\` to keep your
   progress. When updating by hand, keep `user\` (unzip the new version over this folder).
-- **Updates:** the launcher's **Tools** page checks for a new version and installs it (it checks the download
-  first, and never touches `user\` or `analysis\`).
+- **Updates:** the launcher checks for a new version each time it opens (since v0.1.4; Tools > Updates turns
+  that off) and says so under the title when one is out. Its **Tools** page installs it (it checks the download
+  first, and never touches `user\` or `analysis\`). Nothing is installed until you press the button.
 - `analysis\` - logs (`play_launcher_log.txt`) and save backups. **Make a report zip** in the launcher
   bundles the logs for whoever helps you.
 

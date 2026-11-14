@@ -1,9 +1,24 @@
-**v0.1.3: online co-op between AMD and Intel PCs, and optional freeze-free first visits. Both co-op players need v0.1.3.**
-If you have v0.1.1 or v0.1.2, open the launcher and go to **Tools > Check for updates**. It installs v0.1.3 and
-keeps your saves, settings and accounts. New here? Read on. **No game files are included:** you need your own
+**v0.1.4: photos and saved costumes look right again at 1440p and above, and the launcher tells you when there's an update.**
+If you have v0.1.1, v0.1.2 or v0.1.3, open the launcher and go to **Tools > Check for updates**. It installs v0.1.4
+and keeps your saves, settings and accounts. New here? Read on. **No game files are included:** you need your own
 copy of the game.
 
-### What's in it (new in v0.1.3)
+### What's in it (new in v0.1.4)
+- **Photos, saved costumes and your profile picture are no longer streaked.** Since v0.1.0, at the default 2560x1440
+  (and other sizes above 1080p), Popit photos, the pictures of costumes you save, level icons and your profile
+  picture came out as smeared horizontal streaks. The game captures them into the same small screen buffers its
+  glow uses, and those had been made bigger above 1080p, in a size the graphics card stores with padded rows, so
+  every row slid sideways. They're back at the PS4's sizes; photos also show the whole photo frame again instead of
+  its middle. **Pictures you already took or saved stay streaked** (they're stored that way): delete and retake
+  those photos, and save those costumes again.
+- **The launcher checks for updates when it opens** and says so under the title when a new version is out (Update
+  takes you to Tools, where you install it with one button). It's on for everyone, including after this update;
+  Tools > Updates turns it off.
+- The launcher's "Finer glow above 1080p" switch is gone (it was what made the buffers bigger; the glow looks the
+  same without it).
+- Nothing in online play changed: v0.1.3 and v0.1.4 players can play together.
+
+### New in v0.1.3
 - **Exact maths online, so AMD and Intel players stay in step.** Online co-op runs both players' worlds side by
   side and compares them. A few of the game's maths instructions give slightly different answers on AMD and Intel
   processors (no problem on a PS4, where every console is the same), so the worlds could drift apart and the
@@ -30,7 +45,7 @@ copy of the game.
 - Optional: your own DLC `.pkg` files and a PS4 pkg extractor.
 
 ### Getting started
-1. Download `LBP3-Recompiled-v0.1.3-lbp3port.zip` and unzip it somewhere you can write to (not Program Files).
+1. Download `LBP3-Recompiled-v0.1.4-lbp3port.zip` and unzip it somewhere you can write to (not Program Files).
 2. Run `LBP3Launcher.exe`. The setup asks for the folder that contains `CUSA00473` (pick it, or type or paste its
    path) and checks it.
 3. Press **PLAY**.
