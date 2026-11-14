@@ -71,7 +71,7 @@ static void TestV3Settings() {
     const Settings d;
     m = EnvMap(d);  // the defaults set none of them
     CHECK(!m.count("LBP3_DISPLAY") && !m.count("LBP3_WINDOW") && !m.count("LBP3_VOLUME") && !m.count("LBP3_DOWNMIX"));
-    CHECK(d.window_mode == "windowed" && d.volume == 100 && d.downmix && !d.update_on_start && d.confirm_quit);
+    CHECK(d.window_mode == "windowed" && d.volume == 100 && d.downmix && d.update_on_start && d.confirm_quit);  // the check on launch: on since v0.1.4
     CHECK(ValidDisplay("1") && ValidDisplay("16") && ValidDisplay("165hz") && ValidDisplay("59.94Hz"));
     CHECK(!ValidDisplay("") && !ValidDisplay("0") && !ValidDisplay("17") && !ValidDisplay("abc") && !ValidDisplay("1.5") && !ValidDisplay("hz"));
     CHECK(ValidWindowMode("fullscreen") && !ValidWindowMode("maximized"));

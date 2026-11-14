@@ -77,6 +77,8 @@ std::string ToIni(const Settings& s) {
       << "; shader cache: auto (own copy for builds other than the game folder's), own, shared\n"
       << "shader_cache=" << CacheKey(s.cache) << "\n"
       << "minimize_while_playing=" << b(s.minimize_while_playing) << "\n"
+      << "; the format of this file (the launcher keeps it up to date)\n"
+      << "settings_version=" << kSettingsVersion << "\n"
       << "[game]\n"
       << "skip_intro=" << b(s.skip_intro) << "\n"
       << "framegen=" << b(s.framegen) << "\n"
@@ -134,6 +136,7 @@ std::string ToIni(const Settings& s) {
 
 Settings FromIni(const std::string& text) {
     Settings s;
+    int version = 1;  // files without settings_version are from v0.1.3 or older
     std::istringstream in(text);
     std::string line, section;
     while (std::getline(in, line)) {
@@ -163,6 +166,7 @@ Settings FromIni(const std::string& text) {
                 else if (l == "own") s.cache = CacheChoice::Own;
                 else if (l == "shared") s.cache = CacheChoice::Shared;
             } else if (key == "minimize_while_playing") ParseBool(v, s.minimize_while_playing);
+            else if (key == "settings_version" && ParseInt(v, 1, 1000, n)) version = n;
         } else if (section == "game") {
             if (key == "skip_intro") ParseBool(v, s.skip_intro);
             else if (key == "framegen") ParseBool(v, s.framegen);
@@ -214,6 +218,10 @@ Settings FromIni(const std::string& text) {
             else if (key == "confirm_quit") ParseBool(v, s.confirm_quit);
         }
     }
+    // Version 2: the check on launch is on by default. Every older file says update_on_start=0
+    // (the launcher writes every key, and the default was off), which isn't a choice: switch it on
+    // once. From then on the file has settings_version=2, so turning it off sticks.
+    if (version < 2) s.update_on_start = true;
     return s;
 }
 

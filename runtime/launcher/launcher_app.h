@@ -215,6 +215,8 @@ struct App {
     Job release_check, release_install;
     ReleaseInfo release;
     std::mutex release_m;
+    bool release_check_on_start = false;  // the check the launcher started itself (update_on_start)
+    std::string update_notice;            // a newer release that check found: shown under PLAY
     Job stats_job;
     PlayStats stats;
     std::mutex stats_m;

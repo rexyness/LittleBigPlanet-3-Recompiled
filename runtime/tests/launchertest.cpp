@@ -103,6 +103,16 @@ static void TestIni() {
     CHECK(ToIni(d) == ToIni(Settings{}));
     const Settings e = FromIni("[game]\nres=999\nframegen=maybe\nstatus_flips=-3\n[launcher]\nbuild=weird\nnot a line\n");
     CHECK(e.res == "2560x1440" && e.framegen && e.status_flips == 30 && e.build == Build::This);
+    // the check for updates on launch: on by default; a v0.1.3-or-older file (no settings_version,
+    // always update_on_start=0) gets it switched on once; a current file's "off" sticks
+    CHECK(Settings{}.update_on_start);
+    CHECK(FromIni("[launcher]\nbuild=best\n[tools]\nupdate_on_start=0\n").update_on_start);
+    CHECK(!FromIni("[launcher]\nsettings_version=2\n[tools]\nupdate_on_start=0\n").update_on_start);
+    CHECK(FromIni("[launcher]\nsettings_version=2\n[tools]\nupdate_on_start=1\n").update_on_start);
+    Settings off;
+    off.update_on_start = false;
+    CHECK(!FromIni(ToIni(off)).update_on_start);
+    CHECK(ToIni(off).find("settings_version=2\n") != std::string::npos);
     // values with line breaks are flattened on write
     Settings f;
     f.online_name = "a\nb";

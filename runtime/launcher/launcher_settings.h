@@ -25,6 +25,9 @@ enum class CacheChoice {
     Shared,  // always the normal user\shader_cache (no LBP3_SHADER_CACHE_DIR)
 };
 
+// launcher.ini's format ([launcher] settings_version). 2 (v0.1.4): update_on_start defaults to on.
+inline constexpr int kSettingsVersion = 2;
+
 struct Settings {
     Build build = Build::This;
     std::string exe_path;      // Build::Custom
@@ -76,7 +79,10 @@ struct Settings {
     std::string discord_app_id;
     std::string pkg_extractor;       // empty = <game dump folder>\pkg_extractor.exe
     std::string update_remote = "fork";  // the git remote "Check for updates" reads (dev checkouts)
-    bool update_on_start = false;    // check for a new release (or new commits) when the launcher opens
+    // Check for a new release (or new commits) when the launcher opens. On by default since v0.1.4;
+    // files from before (no settings_version) all said 0, since it was never shown as a choice, so
+    // they get it switched on once (FromIni).
+    bool update_on_start = true;
     bool tray_while_playing = false; // hide to the notification area while the game runs
     bool tour_done = false;          // the short tour of the launcher was shown
     bool confirm_quit = true;        // ask before closing the launcher while the game runs

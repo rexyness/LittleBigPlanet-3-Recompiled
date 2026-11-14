@@ -521,7 +521,30 @@ void Header(App& a) {
     ImGui::SetCursorScreenPos(ImVec2(x, p0.y + S(112)));
     StatusPill(a, state, level);
 
-    // the status line (warnings only; everything else is the pill and toasts)
+    // The check the launcher ran on opening (update_on_start): a newer release is announced once
+    // with a toast and then stays on the status line until it's installed. Nothing is installed
+    // without the player pressing "Download and install" on the Tools page.
+    if (a.release_check_on_start) {
+        bool finished;
+        {
+            std::lock_guard lock(a.release_check.m);
+            finished = a.release_check.done && !a.release_check.running;
+        }
+        if (finished) {
+            a.release_check_on_start = false;
+            ReleaseInfo r;
+            {
+                std::lock_guard lock(a.release_m);
+                r = a.release;
+            }
+            if (r.ok && !a.version.empty() && CompareVersions(ParseVersion(r.tag), ParseVersion(a.version)) > 0) {
+                a.update_notice = r.tag;
+                ToastMsg(a, r.tag + " is out: Tools > Updates installs it.", kGood);
+            }
+        }
+    }
+
+    // the status line (warnings, then a newer release; everything else is the pill and toasts)
     const bool running_other = state != GameState::Running && state != GameState::Starting && a.game_running;
     const bool ok = EssentialsOk(a);
     // (a sign-in test holds the account for a moment: Play waits for it)
@@ -535,6 +558,10 @@ void Header(App& a) {
         ImGui::TextColored(kBad, "%s", error.empty() ? ("The game stopped with an error (code " + std::to_string(code) + ").").c_str() : error.c_str());
         ImGui::SameLine();
         if (ImGui::SmallButton("Open the log")) OpenPath(LatestLog(a.p));
+    } else if (!a.update_notice.empty() && state != GameState::Running && state != GameState::Starting) {
+        ImGui::TextColored(kGood, "%s is out (you have %s).", a.update_notice.c_str(), a.version.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Update")) a.page = Tools;
     }
 
     // PLAY
@@ -815,7 +842,10 @@ int main(int argc, char** argv) {
     if (!updated.empty()) ToastMsg(a, "Updated to " + updated + ".", kGood);
     if (a.s.update_on_start && !shot) {
         if (DevCheckout(a)) StartUpdateCheck(a);
-        else StartReleaseCheck(a);
+        else {
+            a.release_check_on_start = true;
+            StartReleaseCheck(a);
+        }
     }
 
     // --shot: each page, the setup's steps, the tour, then a few moments in motion
