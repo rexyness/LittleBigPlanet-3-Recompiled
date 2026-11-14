@@ -1,4 +1,5 @@
 #include "video/presenter.h"
+#include "ui/boot_overlay.h"
 #include "ui/overlay.h"
 #include "video/live_stats.h"
 #include "input/mouse_touch.h"
@@ -374,6 +375,8 @@ void PresenterThread() {
             }
             upload = fresh || !g_haveFrame;
         }
+        // The boot loading screen stays up until the game's first frame that isn't black.
+        if (upload && buf.address) ui::boot::NoteFrame(buf.address, buf.width, buf.height, buf.pitchPixels);
 
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);

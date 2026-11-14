@@ -23,6 +23,7 @@
 #include "core/tls.h"
 #include "core/vfs.h"
 #include "gpu/renderer.h"
+#include "ui/boot_overlay.h"
 #include "video/presenter.h"
 
 #include <SDL3/SDL_keycode.h>
@@ -143,6 +144,14 @@ int main(int argc, char** argv) {
         }
 
         if (run) {
+            // The loading screen's art (ui/boot_overlay.h): the game's own background and icon,
+            // the patch's copy first, as the PS4 shows them.
+            auto art = [&](const char* name) {
+                for (const auto& r : roots)
+                    if (fs::path p = r / "sce_sys" / name; fs::exists(p)) return p;
+                return fs::path{};
+            };
+            ui::boot::SetArt(art("pic1.png"), art("icon0.png"));
             // /app0 reads look in mods/ first, then the patch, then the base game.
             const fs::path root = fs::current_path();
             core::vfs::Init({root / "mods", roots[0], roots[1]}, root / "user");

@@ -28,6 +28,7 @@
 #include "gpu/frame_split.h"
 #include "gpu/renderer.h"
 #include "gpu/fg_live.h"
+#include "ui/boot_overlay.h"
 #include "video/framegen.h"
 #include "video/live_stats.h"
 #include "video/framegen_warp.h"
@@ -254,7 +255,10 @@ int PS4_SYSV_ABI sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index,
     video::StartPresenter();
     static const bool gpuReady = [] {
         try {
-            if (!gpu::Init()) return false;
+            ui::boot::NoteGpuInit(false);  // the loading screen's status (ui/boot_overlay.h)
+            const bool ok = gpu::Init();
+            ui::boot::NoteGpuInit(true);
+            if (!ok) return false;
             // Frame generation's warp runs on the GPU (perf/fg_gpu.md) unless
             // LBP3_FRAMEGEN_WARP_GPU=0 (then the CPU version, video/framegen_warp.cpp).
             if (video::framegen::Enabled()) {
