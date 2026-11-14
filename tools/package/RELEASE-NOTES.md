@@ -1,9 +1,19 @@
-**v0.1.4: photos and saved costumes look right again at 1440p and above, and the launcher tells you when there's an update.**
-If you have v0.1.1, v0.1.2 or v0.1.3, open the launcher and go to **Tools > Check for updates**. It installs v0.1.4
-and keeps your saves, settings and accounts. New here? Read on. **No game files are included:** you need your own
-copy of the game.
+**v0.1.5: the LBP1/LBP2 item import (the old "My Unlocks") is now in the in-game menu.**
+If you have v0.1.4, the launcher shows "v0.1.5 is out" when it opens: press **Update**. From v0.1.1 to v0.1.3, go to
+**Tools > Check for updates**. It installs v0.1.5 and keeps your saves, settings and accounts. New here? Read on.
+**No game files are included:** you need your own copy of the game.
 
-### What's in it (new in v0.1.4)
+### What's in it (new in v0.1.5)
+- **Import LBP1/LBP2 items from the in-game menu.** Press **L3+R3** (or **Insert**), choose **Import LBP1/LBP2
+  items**, then open the start menu with **Options**. The game's own import runs (about 2 minutes); press Cross on
+  "successfully imported". It adds the LittleBigPlanet and LittleBigPlanet 2 items that come with LBP3 to your
+  profile, which LBP3's My Unlocks page used to do before Sony's servers closed. It works in the Pod or in a level,
+  Circle can't cancel it by accident, and running it again on a profile that has the items adds nothing.
+- The launcher's "Import the LBP1/LBP2 items once" switch is gone; if you left it on, it no longer imports at every
+  start.
+- Nothing in online play changed: v0.1.3, v0.1.4 and v0.1.5 players can play together.
+
+### New in v0.1.4
 - **Photos, saved costumes and your profile picture are no longer streaked.** Since v0.1.0, at the default 2560x1440
   (and other sizes above 1080p), Popit photos, the pictures of costumes you save, level icons and your profile
   picture came out as smeared horizontal streaks. The game captures them into the same small screen buffers its
@@ -45,7 +55,7 @@ copy of the game.
 - Optional: your own DLC `.pkg` files and a PS4 pkg extractor.
 
 ### Getting started
-1. Download `LBP3-Recompiled-v0.1.4-lbp3port.zip` and unzip it somewhere you can write to (not Program Files).
+1. Download `LBP3-Recompiled-v0.1.5-lbp3port.zip` and unzip it somewhere you can write to (not Program Files).
 2. Run `LBP3Launcher.exe`. The setup asks for the folder that contains `CUSA00473` (pick it, or type or paste its
    path) and checks it.
 3. Press **PLAY**.
@@ -56,7 +66,8 @@ The first visit to each area can pause briefly while your graphics driver builds
 - Frame generation (60 on screen), and the PS4's 7.1 audio mixed properly for stereo.
 - Local co-op with up to four controllers; DualSense and DualShock 4 touchpad and motion.
 - The game's text entry, photos and system dialogs drawn in game; Create mode works.
-- Your DLC, from your own packs, and the old "My Unlocks" LBP1/LBP2 items.
+- Your DLC, from your own packs, and the old "My Unlocks" LBP1/LBP2 items (in-game menu, L3+R3).
+- An in-game menu on L3+R3 or Insert: frame rate and latency, frame generation on/off, volume, the item import, Quit.
 - **Online on the community servers at play.lbppc.com** (made by the LBPPC project; Sony's servers are gone).
   Create an account from the launcher's Online page. Community levels, your profile and your friends list work,
   and you can invite friends and join their games. Since v0.1.1 a lost game message no longer ends a co-op
