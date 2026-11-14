@@ -10,6 +10,7 @@
 #include <cstring>
 #include <vector>
 
+#include "core/exact_math.h"
 #include "core/module.h"
 #include "core/res_patches.h"
 #include "hle/online.h"
@@ -123,6 +124,7 @@ void ApplyOnlineKey(Module& m) {
 void ApplySyncProbe(Module& m);  // sync_probe.cpp: LBP3_SYNC_PROBE=1 only
 
 void ApplyPatches(Module& m) {
+    exactmath::Apply(m);  // first: it checks the sites' original bytes (eboot.bin and spu.prx)
     if (m.fileName == "eboot.bin") ApplySyncProbe(m);
     if (m.fileName == "eboot.bin") res::Apply(m);
     if (m.fileName == "eboot.bin") ApplyOnlineKey(m);

@@ -28,6 +28,7 @@ constexpr uint8_t kRelayMagic[4] = {'S', 'M', 'R', 'L'};
 constexpr uint8_t kMagic[4] = {'L', '3', 'P', '1'};
 enum : uint8_t { kHello = 1, kAck = 2, kData = 3, kPing = 4, kPong = 5, kBye = 6, kData2 = 7, kData3 = 8, kNack = 9 };
 constexpr uint8_t kCapData3 = 1;     // HELLO capability: DATA3 / NACK
+constexpr uint8_t kCapExactMath = 2;  // HELLO capability: the game runs the exact maths (Config::exactMath)
 constexpr size_t kHistory = 256;     // DATA3 payloads kept for a NACK
 constexpr int kCopies = 2;           // earlier payloads carried in each DATA3
 constexpr size_t kMaxDatagram = 1200;  // copies only while a DATA3 stays this small
@@ -180,6 +181,7 @@ struct Link::Impl {
     Clock::time_point lastStun{};
     bool stunAnswered = false;
     std::set<std::string> refusedLogged;
+    std::set<std::string> mathRefusedLogged;
     std::mt19937 rng{std::random_device{}()};  // connection epochs
     uint64_t testCounter = 0;    // the Config::test* settings (the link's thread only)
     struct Delayed {
@@ -268,7 +270,7 @@ struct Link::Impl {
         lan.ip = cfg.reportLan ? lanIp : 0;
         lan.port = localPort;
         PutEndpoint(b, lan);
-        b.push_back(cfg.data3 ? kCapData3 : 0);
+        b.push_back(uint8_t((cfg.data3 ? kCapData3 : 0) | (cfg.exactMath ? kCapExactMath : 0)));
         const auto it = peers.find(to);
         Put32(b, it != peers.end() ? it->second.myEpoch : 1);
         return b;
@@ -523,6 +525,18 @@ struct Link::Impl {
             const std::string from = GetId(d + 5), to = GetId(d + 5 + kIdLen);
             if (to != cfg.self || from.empty() || from == cfg.self) return;
             const Endpoint ext = GetEndpoint(d + 5 + 2 * kIdLen), lan = GetEndpoint(d + 5 + 2 * kIdLen + 6);
+            // Both games must run the same maths, or their worlds drift apart (Config::exactMath).
+            const bool peerExact = n >= kHelloLen + 5 && (d[kHelloLen] & kCapExactMath);
+            if (peerExact != cfg.exactMath) {
+                ++stats.refused;
+                if (mathRefusedLogged.insert(from).second)
+                    std::fprintf(stderr,
+                                 "[p2p] refused a connection with %s: its game %s the exact maths and this one %s, "
+                                 "so their worlds would drift apart. Both players need the same version (v0.1.3 or "
+                                 "later, with the same LBP3_EXACT_MATH).\n",
+                                 from.c_str(), peerExact ? "runs" : "doesn't run", cfg.exactMath ? "does" : "doesn't");
+                return;
+            }
             auto it = peers.find(from);
             if (it == peers.end()) {
                 if (type == kAck) return;

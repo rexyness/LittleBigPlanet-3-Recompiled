@@ -37,6 +37,7 @@ add_library(hle STATIC
     src/core/nid.cpp
     src/core/patches.cpp
     src/core/res_patches.cpp
+    src/core/exact_math.cpp
     src/core/sync_probe.cpp
     src/core/runner.cpp
     src/core/tls.cpp
@@ -169,6 +170,10 @@ target_link_libraries(rescachetest PRIVATE hle)
 add_executable(restest tests/restest.cpp)
 target_link_libraries(restest PRIVATE hle)
 
+# Exact math (core/exact_math.h): the stubs against the original code and the exact result; the checks.
+add_executable(exactmathtest tests/exactmathtest.cpp)
+target_link_libraries(exactmathtest PRIVATE hle)
+
 # LBP3_MY_UNLOCKS's import guard (ticket 19): the import's cancel button is held off while it runs.
 add_executable(unlocktest tests/unlocktest.cpp)
 target_link_libraries(unlocktest PRIVATE hle)
@@ -264,7 +269,7 @@ target_link_libraries(p2ptest PRIVATE hle)
 add_executable(clocktest tests/clocktest.cpp)
 target_link_libraries(clocktest PRIVATE hle)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest restest unlocktest vkcachetest uxtest motiontest shadnettest p2ptest clocktest LBP3Launcher)
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest restest exactmathtest unlocktest vkcachetest uxtest motiontest shadnettest p2ptest clocktest LBP3Launcher)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()

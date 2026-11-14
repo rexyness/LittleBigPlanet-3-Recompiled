@@ -10,7 +10,8 @@
 //     "SMRL" 03 [sender's IPv4][port] packet; only between endpoints that have sent STUN pings.
 // Between players (directly or relayed), our own packets: "L3P1", a type, then
 //   HELLO 1 / ACK 2: from[16] to[16] ext IPv4[4] ext port[2] LAN IPv4[4] LAN port[2], then (since
-//            v0.1.1; older links ignore it) capabilities[1] (1: DATA3) and the connection's epoch[4]
+//            v0.1.1; older links ignore it) capabilities[1] (1: DATA3, 2: exact maths, since v0.1.3)
+//            and the connection's epoch[4]
 //            (new each time the sender sets up the connection: a new one restarts DATA3's counting)
 //   DATA 3:  src vport[2] dst vport[2] sender[4] payload (the game's datagram; sender: a hash of
 //            the sender's online ID, so it's recognised whatever address its packets come from)
@@ -85,6 +86,10 @@ struct Config {
     bool diag = false;
     // Gap-free delivery (DATA3) with players whose links have it (LBP3_P2P_DATA3=0 turns it off).
     bool data3 = true;
+    // This game runs the exact maths (core/exact_math.h). HELLO and ACK say so (capability 2), and a
+    // connection with a player whose game differs is refused: their worlds would drift apart ("The
+    // game diverged"). A link from before v0.1.3 sends no such capability: its game has no exact maths.
+    bool exactMath = false;
     // Tests, on incoming game datagrams: drop `testLossBurst` out of every `testLossEvery`; hold every
     // `testLateEvery`th back 50 ms (its successors overtake it); handle every `testDupEvery`th twice.
     int testLossEvery = 0, testLossBurst = 1, testLateEvery = 0, testDupEvery = 0;

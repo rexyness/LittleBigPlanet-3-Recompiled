@@ -53,6 +53,7 @@
 #include "hle/online.h"
 #include "hle/register.h"
 #include "hle/users.h"
+#include "core/exact_math.h"
 #include "net/p2p_link.h"
 #include "net/shadnet_service.h"
 #include "net/web_request.h"
@@ -1196,6 +1197,8 @@ void StartLink() {
                                  : net::p2p::Config::Path::Auto;
         std::fprintf(stderr, "[p2p] LBP3_P2P_PATH=%s\n", p);
     }
+    c.exactMath = core::exactmath::Active();  // HELLO says so; a player whose game differs is refused
+    std::fprintf(stderr, "[p2p] exact maths: %s\n", c.exactMath ? "on" : "off");
     if (const char* p = std::getenv("LBP3_P2P_DATA3"); p && *p == '0') {
         c.data3 = false;
         std::fprintf(stderr, "[p2p] LBP3_P2P_DATA3=0: no gap-free delivery\n");

@@ -300,6 +300,34 @@ int main() {
         CHECK(!bobSawCarol);
         c.Stop();
 
+        // --- 2b. the same maths: Erin runs the exact maths (core/exact_math.h); Frank, her friend,
+        // doesn't (an older version) and refuses her; Gina, who runs them too, connects -------------
+        {
+            Config ec = PlayerConfig("Erin_5", mock, {});
+            ec.exactMath = true;
+            Config fc = PlayerConfig("Frank_6", mock, {"Erin_5"});
+            Config gc = PlayerConfig("Gina_7", mock, {"Erin_5"});
+            gc.exactMath = true;
+            Link e, f, g;
+            CHECK(e.Start(ec));
+            CHECK(f.Start(fc));
+            CHECK(g.Start(gc));
+            CHECK(WaitFor([&] { return e.External().Valid() && f.External().Valid() && g.External().Valid(); }));
+            e.Activate("Frank_6");
+            e.Activate("Gina_7");
+            std::vector<Event> evE;
+            CHECK(WaitFor([&] { return HasEvent(evE, e, Event::Established, "Gina_7"); }));
+            CHECK(WaitFor([&] { return HasEvent(evE, e, Event::Dead, "Frank_6"); }, 5000));
+            CHECK(f.Info("Erin_5").state == State::None);
+            CHECK(f.GetStats().refused > 0);
+            CHECK(g.Info("Erin_5").state == State::Active);
+            std::printf("  the same maths: an exact-maths player and an older one refused (%llu), two exact ones connect\n",
+                        static_cast<unsigned long long>(f.GetStats().refused));
+            e.Stop();
+            f.Stop();
+            g.Stop();
+        }
+
         // --- 4. leaving ------------------------------------------------------------------------
         a.Terminate("Bob_2");
         CHECK(a.Info("Bob_2").state == State::None);
