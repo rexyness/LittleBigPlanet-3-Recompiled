@@ -47,5 +47,9 @@ issues.
 
 ## License
 
-GPL-2.0-or-later (see `LICENSE`), the same as shadPS4. This covers the project's own code
-only; LittleBigPlanet 3 and its files belong to Sony Interactive Entertainment.
+GPL-3.0-or-later (see `LICENSE`). This covers the project's own code only; LittleBigPlanet 3
+and its files belong to Sony Interactive Entertainment.
+
+Up to v0.1.2 the project was GPL-2.0-or-later. PurpleGitty's original runtime and shadPS4 (the
+`third_party/shadPS4` submodule) are GPL-2.0-or-later and are used here under version 3. Code
+taken from LBPPC (emurphy04, GPL-3.0-or-later) keeps its notices and is credited where it's used.

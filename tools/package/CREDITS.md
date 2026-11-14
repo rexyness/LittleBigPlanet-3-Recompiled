@@ -6,7 +6,7 @@
   (GPL-2.0-or-later).
 - **This port's work** (the fork at github.com/rexyness/LittleBigPlanet-3-Recompiled): pacing and camera fixes,
   Create mode (on-screen keyboard, dialogs, photos), local co-op, performance work, frame generation, 1440p,
-  the audio fix, DLC and LBP1/LBP2 unlocks, the launcher, online support.
+  the audio fix, DLC and LBP1/LBP2 unlocks, the launcher, online support (GPL-3.0-or-later since v0.1.3).
 - **shadPS4** (shadps4-emu and contributors): the PS4 graphics core and shader recompiler (GPL-2.0-or-later).
 - **LBPPC** by emurphy04 (github.com/emurphy04/LBPPC): the other LittleBigPlanet 3 PC port. Several pieces
   here come from it, with credit in the code: the parallel shader preload and saved driver cache, the
