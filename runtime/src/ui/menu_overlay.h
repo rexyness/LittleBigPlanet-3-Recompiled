@@ -1,7 +1,8 @@
 // The in-game menu (best-of-both-worlds branch): a layer of the overlay host (ui/overlay.h) that
 // opens with Insert or L3+R3 (pressed together) and shows the live stats (frame rate, game work,
 // frame generation, display latency) with a few switches: the corner stats overlay, frame
-// generation on/off live, the volume, and Quit game (press twice). While it's open the game sees
+// generation on/off live, the volume, "Import LBP1/LBP2 items" (arms the game's own import for the
+// next start menu, hle/my_unlocks.h), and Quit game (press twice). While it's open the game sees
 // a neutral pad (hle/modal.h), as with the system dialogs; Circle, Options, Esc, Insert or
 // L3+R3 close it. LBP3_MENU=off turns the hotkeys off.
 //

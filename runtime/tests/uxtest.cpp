@@ -177,6 +177,30 @@ void Menu() {
     CHECK(q.Activate(13000) == Action::QuitArmed);  // timed out: arms again
     m.selected = static_cast<int>(Item::Close);
     CHECK(m.Activate(0) == Action::Close);
+    // "Import LBP1/LBP2 items": between Volume and Quit; skipped while unavailable (no hook) or
+    // importing; Cross arms it (idle or done) and disarms it before it starts.
+    Model u;
+    u.selected = static_cast<int>(Item::Volume);
+    CHECK(u.unlocks == Unlocks::Unavailable);
+    u.Move(1);
+    CHECK(u.Selected() == Item::Quit);
+    u.unlocks = Unlocks::Idle;
+    u.selected = static_cast<int>(Item::Volume);
+    u.Move(1);
+    CHECK(u.Selected() == Item::Unlocks);
+    CHECK(u.Adjust(1) == Action::None && u.Adjust(-1) == Action::None && u.unlocks == Unlocks::Idle);
+    CHECK(u.Activate(0) == Action::ArmUnlocks && u.unlocks == Unlocks::Armed);
+    CHECK(u.Activate(0) == Action::CancelUnlocks && u.unlocks == Unlocks::Idle);
+    u.unlocks = Unlocks::Running;
+    CHECK(!u.Enabled(Item::Unlocks) && u.Activate(0) == Action::None && u.unlocks == Unlocks::Running);
+    u.selected = static_cast<int>(Item::Volume);
+    u.Move(1);
+    CHECK(u.Selected() == Item::Quit);
+    u.unlocks = Unlocks::Done;
+    u.selected = static_cast<int>(Item::Unlocks);
+    CHECK(u.Enabled(Item::Unlocks) && u.Activate(0) == Action::ArmUnlocks && u.unlocks == Unlocks::Armed);
+    u.unlocks = Unlocks::Unavailable;
+    CHECK(u.Activate(0) == Action::None);
 }
 
 void Languages() {

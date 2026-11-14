@@ -15,6 +15,7 @@
 
 #include "hle/audio_downmix.h"
 #include "hle/modal.h"
+#include "hle/my_unlocks.h"
 #include "hle/pad_types.h"
 #include "hle/quit.h"
 #include "input/gamepad.h"
@@ -52,6 +53,11 @@ uint64_t NowMs() {
                                      .count());
 }
 
+Unlocks UnlocksState() {
+    static_assert(static_cast<int>(hle::my_unlocks::State::Done) == static_cast<int>(Unlocks::Done));
+    return static_cast<Unlocks>(hle::my_unlocks::GetState());
+}
+
 void InitModel() {
     if (!g_modelInit) {
         g_modelInit = true;
@@ -60,6 +66,7 @@ void InitModel() {
     g_model.frameGenOn = g_model.frameGenAvailable && !video::framegen::Paused();
     g_model.volume = static_cast<int>(std::lround(hle::audio::MasterVolumeLevel() * 100.0f));
     g_model.stats = g_hud;
+    g_model.unlocks = UnlocksState();
 }
 
 bool HudFromEnv() {
@@ -84,6 +91,10 @@ void Apply(Action a) {
         hle::audio::SetMasterVolumeLevel(g_model.volume / 100.0f);
         std::fprintf(stderr, "[menu] volume %d%%\n", g_model.volume);
         break;
+    case Action::ArmUnlocks:
+        if (!hle::my_unlocks::Request()) g_model.unlocks = UnlocksState();
+        break;
+    case Action::CancelUnlocks: hle::my_unlocks::Cancel(); break;
     case Action::Quit:
         hle::quit::RequestQuit("the in-game menu's Quit game");
         break;
@@ -130,6 +141,25 @@ std::string StatsLine(const video::live::Snapshot& s) {
     return line;
 }
 
+// The footer while "Import LBP1/LBP2 items" is selected.
+const char* UnlocksHelp(Unlocks u) {
+    switch (u) {
+    case Unlocks::Idle:
+        return "Adds the LBP1 and LBP2 items that come with LBP3 to your profile (the old My Unlocks, whose servers "
+               "are gone). Cross: arm it.";
+    case Unlocks::Armed:
+        return "Armed: open the start menu (Options) and it starts. It takes about 2 minutes; then press Cross on "
+               "\"successfully imported\". Cross here: cancel.";
+    case Unlocks::Running:
+        return "Importing: wait about 2 minutes, then press Cross on \"successfully imported\". Circle can't cancel "
+               "it.";
+    case Unlocks::Done:
+        return "Finished: the game's message said how it went. Cross runs it again (on a profile that has the items, "
+               "that adds nothing).";
+    default: return "Not available in this session (LBP3_MY_UNLOCKS=off).";
+    }
+}
+
 struct Row {
     ImVec2 min, max;
 };
@@ -142,7 +172,7 @@ void DrawMenu(ImVec2 display, bool top) {
     const float w = 640.f * s, rowH = 54.f * s, pad = 28.f * s;
     const float titleSize = 40.f * s, textSize = 28.f * s, smallSize = 22.f * s;
     const int n = static_cast<int>(Item::kCount);
-    const float h = pad * 2 + titleSize + 12.f * s + smallSize * 3.6f + 18.f * s + rowH * n + 10.f * s + smallSize;
+    const float h = pad * 2 + titleSize + 12.f * s + smallSize * 3.6f + 18.f * s + rowH * n + 10.f * s + smallSize * 3.6f;
     const ImVec2 p0{(display.x - w) * 0.5f, (display.y - h) * 0.5f}, p1{p0.x + w, p0.y + h};
     dl->AddRectFilled(p0, p1, kPanel, 18.f * s);
     dl->AddRect(p0, p1, kEdge, 18.f * s, 2.f * s);
@@ -165,6 +195,7 @@ void DrawMenu(ImVec2 display, bool top) {
     y += smallSize * 1.2f + 18.f * s;
 
     const uint64_t now = NowMs();
+    g_model.unlocks = UnlocksState();  // it moves on by itself (armed -> importing -> done)
     const ImVec2 mouse = ImGui::GetIO().MousePos;
     for (int i = 0; i < n; ++i) {
         const Item item = static_cast<Item>(i);
@@ -184,11 +215,25 @@ void DrawMenu(ImVec2 display, bool top) {
             value = g_model.frameGenAvailable ? (g_model.frameGenOn ? "On" : "Off") : "not started";
             break;
         case Item::Volume: label = "Volume"; value = std::to_string(g_model.volume) + "%"; break;
+        case Item::Unlocks:
+            label = "Import LBP1/LBP2 items";
+            switch (g_model.unlocks) {
+            case Unlocks::Unavailable: value = "off"; break;
+            case Unlocks::Armed: value = "armed"; break;
+            case Unlocks::Running: value = "importing..."; break;
+            case Unlocks::Done: value = "done"; break;
+            default: break;
+            }
+            break;
         case Item::Quit: label = g_model.QuitArmed(now) ? "Press again to quit" : "Quit game"; break;
         case Item::Close: label = "Back to the game"; break;
         default: break;
         }
-        const ImU32 col = !enabled ? kDimText : (item == Item::Quit && g_model.QuitArmed(now)) ? kWarn : kText;
+        const bool warn = (item == Item::Quit && g_model.QuitArmed(now)) ||
+                          (item == Item::Unlocks && g_model.unlocks == Unlocks::Armed);
+        const ImU32 col = !enabled && !(item == Item::Unlocks && g_model.unlocks == Unlocks::Running) ? kDimText
+                          : warn                                                                    ? kWarn
+                                                                                                    : kText;
         const float ty = r.min.y + (r.max.y - r.min.y - textSize) * 0.5f;
         dl->AddText(font, textSize, {r.min.x + 18.f * s, ty}, col, label.c_str());
         if (!value.empty()) {
@@ -199,8 +244,9 @@ void DrawMenu(ImVec2 display, bool top) {
         y += rowH;
     }
     y += 10.f * s;
-    dl->AddText(font, smallSize, {p0.x + pad, y}, kDimText,
-                "Cross / Enter: choose    Left / Right: change    Circle / Esc / L3+R3 / Insert: back");
+    const char* foot = "Cross / Enter: choose    Left / Right: change    Circle / Esc / L3+R3 / Insert: back";
+    if (g_model.Selected() == Item::Unlocks) foot = UnlocksHelp(g_model.unlocks);
+    dl->AddText(font, smallSize, {p0.x + pad, y}, kDimText, foot, nullptr, w - pad * 2);
 }
 
 void DrawHud(ImVec2 display) {

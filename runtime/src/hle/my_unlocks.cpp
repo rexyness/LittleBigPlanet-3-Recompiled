@@ -9,10 +9,11 @@
 // engine's front-end loop then shows the screen and adds the items to the local player's
 // profile one per frame (FUN_008bee30, the profile's own add-item function).
 //
-// LBP3_MY_UNLOCKS=lbp1,lbp2 (either or both) runs that import once per launch, on the game's
-// main thread, the first time the start menu opens (its IsOnline__ native) with a profile
-// loaded. The My Unlocks page itself stays as the game decides (greyed offline).
-// LBP3_MY_UNLOCKS_TRACE=1 logs the import screen natives too.
+// Arming it (the in-game menu's Request, or LBP3_MY_UNLOCKS=lbp1,lbp2 at launch) runs that
+// import once, on the game's main thread, at the next call of the start menu's IsOnline__
+// native with a profile loaded and no import screen up. The My Unlocks page itself stays as the
+// game decides (greyed offline). Unarmed, the hook costs one atomic load per call.
+// LBP3_MY_UNLOCKS_TRACE=1 logs the import screen natives and when IsOnline__ is called.
 //
 // The screen's handler (FUN_008bee30) checks every connected controller each frame and cancels
 // the import as soon as one holds the back button (internal bit 0x20 = Circle when the game's
@@ -25,6 +26,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -47,9 +49,12 @@ constexpr uint64_t kBackIsCircle = 0x1060a20;         // 1: the import's cancel 
 constexpr uint32_t kLbp1 = 0x1;
 constexpr uint32_t kLbp2Worlds = 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40;
 
-uint32_t g_flags = 0;
 bool g_guard = true;
-std::atomic<bool> g_done{false};
+bool g_trace = false;
+std::atomic<bool> g_hooked{false};
+std::atomic<uint32_t> g_armed{0};       // the flags of the import to start; 0 = nothing armed
+std::atomic<bool> g_started{false};     // an import this runtime started (this launch)
+std::atomic<bool> g_starting{false};    // inside ActivateImportScreen
 std::atomic<bool> g_heldLogged{false};
 core::ScriptNative g_isOnline = nullptr;
 
@@ -66,26 +71,47 @@ bool ImportScreenActive() {
     return base && *reinterpret_cast<volatile uint8_t*>(base + kImportScreenActive) != 0;
 }
 
-void RunImport() {
+void RunImport(uint32_t flags) {
     using Native = void(PS4_SYSV_ABI*)(void* self, void* ret, const unsigned long long* args);
     uint8_t* base = core::EbootBase();
-    const unsigned long long args[2] = {g_flags, 0};
+    const unsigned long long args[2] = {flags, 0};
     uint64_t ret = 0;
-    std::fprintf(stderr, "[unlocks] running the game's own import (ActivateImportScreen flags 0x%x:%s%s)\n", g_flags,
-                 g_flags & kLbp1 ? " LittleBigPlanet" : "",
-                 g_flags & kLbp2Worlds ? " LittleBigPlanet 2 (all six story worlds)" : "");
+    std::fprintf(stderr, "[unlocks] running the game's own import (ActivateImportScreen flags 0x%x:%s%s)\n", flags,
+                 flags & kLbp1 ? " LittleBigPlanet" : "",
+                 flags & kLbp2Worlds ? " LittleBigPlanet 2 (all six story worlds)" : "");
     std::fflush(stderr);
     reinterpret_cast<Native>(base + kActivateImportScreen)(nullptr, &ret, args);
     std::fprintf(stderr, "[unlocks] import started: the import screen is %s\n",
                  ImportScreenActive() ? "showing (the items are added one per frame)" : "NOT active");
 }
 
+// LBP3_MY_UNLOCKS_TRACE=1: when IsOnline__ is called (at most one line a second while it is).
+void TraceIsOnline() {
+    using Clock = std::chrono::steady_clock;
+    static const Clock::time_point t0 = Clock::now();
+    static long long lastSecond = -1;
+    static unsigned calls = 0;
+    ++calls;
+    const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count();
+    if (ms / 1000 == lastSecond) return;
+    lastSecond = ms / 1000;
+    std::fprintf(stderr, "[unlocks] trace IsOnline__ at %.1f s (%u calls since the last line)\n", ms / 1000.0, calls);
+    calls = 0;
+}
+
 // The start menu's IsOnline__ (main thread, modal overlay open): the trigger.
 void PS4_SYSV_ABI IsOnline(void* self, void* ret, const unsigned long long* args) {
     g_isOnline(self, ret, args);
-    if (g_done.load(std::memory_order_relaxed) || !ProfileLoaded()) return;
-    if (g_done.exchange(true)) return;
-    RunImport();
+    if (g_trace) TraceIsOnline();
+    if (g_armed.load(std::memory_order_relaxed) == 0) return;  // the normal case
+    if (!ProfileLoaded() || ImportScreenActive()) return;
+    g_starting.store(true);
+    const uint32_t flags = g_armed.exchange(0);  // a Cancel in between wins
+    if (flags) {
+        g_started.store(true);
+        RunImport(flags);
+    }
+    g_starting.store(false);
 }
 
 // LBP3_MY_UNLOCKS_TRACE=1: the import screen natives.
@@ -107,13 +133,39 @@ void PS4_SYSV_ABI Traced(void* self, void* ret, const unsigned long long* args) 
 
 }  // namespace
 
+State Decide(bool hooked, uint32_t armed, bool started, bool starting, bool screenActive) {
+    if (!hooked) return State::Unavailable;
+    if (starting || (started && screenActive)) return State::Running;
+    if (armed) return State::Armed;
+    return started ? State::Done : State::Idle;
+}
+
+State GetState() {
+    const bool hooked = g_hooked.load();
+    return Decide(hooked, g_armed.load(), g_started.load(), g_starting.load(), hooked && ImportScreenActive());
+}
+
+bool Request() {
+    const State s = GetState();
+    if (s == State::Unavailable || s == State::Running) return false;
+    if (g_armed.exchange(kLbp1 | kLbp2Worlds) == 0)
+        std::fprintf(stderr,
+                     "[unlocks] armed from the in-game menu: the game's own LBP1/LBP2 import starts the next time "
+                     "the start menu opens\n");
+    return true;
+}
+
+void Cancel() {
+    if (g_armed.exchange(0) != 0) std::fprintf(stderr, "[unlocks] disarmed from the in-game menu\n");
+}
+
 uint32_t FilterBack(uint32_t buttons, bool importRunning, bool backIsCircle) {
     if (!importRunning) return buttons;
     return buttons & ~static_cast<uint32_t>(backIsCircle ? ps4::PAD_CIRCLE : ps4::PAD_CROSS);
 }
 
 uint32_t GuardImport(uint32_t buttons) {
-    if (!g_flags || !g_guard || !g_done.load(std::memory_order_relaxed) || !buttons) return buttons;
+    if (!buttons || !g_guard || !g_started.load(std::memory_order_relaxed)) return buttons;
     if (!ImportScreenActive()) return buttons;
     uint8_t* base = core::EbootBase();
     const bool circle = *reinterpret_cast<volatile uint8_t*>(base + kBackIsCircle) != 0;
@@ -128,16 +180,18 @@ uint32_t GuardImport(uint32_t buttons) {
 
 void InstallHooks() {
     const char* v = std::getenv("LBP3_MY_UNLOCKS");
-    if (!v || !*v) return;
-    core::Module* m = core::EbootModule();
-    if (!m) return;
-    const std::string s(v);
-    if (s.find("lbp1") != std::string::npos || s == "all") g_flags |= kLbp1;
-    if (s.find("lbp2") != std::string::npos || s == "all") g_flags |= kLbp2Worlds;
-    if (!g_flags) {
-        std::fprintf(stderr, "[unlocks] LBP3_MY_UNLOCKS=%s: nothing recognised (use lbp1, lbp2 or both)\n", v);
+    const std::string s(v ? v : "");
+    if (s == "off" || s == "0") {
+        std::fprintf(stderr, "[unlocks] LBP3_MY_UNLOCKS=%s: no hook (the in-game menu can't import)\n", v);
         return;
     }
+    core::Module* m = core::EbootModule();
+    if (!m) return;
+    uint32_t flags = 0;
+    if (s.find("lbp1") != std::string::npos || s == "all") flags |= kLbp1;
+    if (s.find("lbp2") != std::string::npos || s == "all") flags |= kLbp2Worlds;
+    if (!s.empty() && !flags)
+        std::fprintf(stderr, "[unlocks] LBP3_MY_UNLOCKS=%s: nothing recognised (use lbp1, lbp2 or both)\n", v);
     g_isOnline = core::HookNative(*m, "IsOnline__", IsOnline);
     if (!g_isOnline) {
         std::fprintf(stderr, "[unlocks] IsOnline__ not found: no import\n");
@@ -145,14 +199,20 @@ void InstallHooks() {
     }
     if (const char* gd = std::getenv("LBP3_MY_UNLOCKS_GUARD"); gd && std::string(gd) == "off") g_guard = false;
     if (const char* t = std::getenv("LBP3_MY_UNLOCKS_TRACE"); t && *t && *t != '0') {
+        g_trace = true;
         g_traced[0] = core::HookNative(*m, kTraced[0], Traced<0>);
         g_traced[1] = core::HookNative(*m, kTraced[1], Traced<1>);
         g_traced[2] = core::HookNative(*m, kTraced[2], Traced<2>);
     }
-    std::fprintf(stderr,
-                 "[unlocks] LBP3_MY_UNLOCKS=%s: the game's own LBP1/LBP2 import (flags 0x%x) runs once, the first "
-                 "time the start menu opens with a profile loaded; the back button is %s while it runs\n",
-                 v, g_flags, g_guard ? "held off" : "left alone (LBP3_MY_UNLOCKS_GUARD=off: it cancels)");
+    g_armed.store(flags);
+    g_hooked.store(true);
+    if (flags)
+        std::fprintf(stderr,
+                     "[unlocks] LBP3_MY_UNLOCKS=%s: the game's own LBP1/LBP2 import (flags 0x%x) runs once, the first "
+                     "time the start menu opens with a profile loaded; the back button is %s while it runs\n",
+                     v, flags, g_guard ? "held off" : "left alone (LBP3_MY_UNLOCKS_GUARD=off: it cancels)");
+    else
+        std::fprintf(stderr, "[unlocks] ready: the in-game menu can arm the LBP1/LBP2 import\n");
 }
 
 }  // namespace hle::my_unlocks

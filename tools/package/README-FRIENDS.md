@@ -70,7 +70,9 @@ pauses sign-in for up to 15 minutes.
 
 A DualSense or DualShock 4 is best (touchpad and motion work); any controller SDL supports works. Up to four
 controllers for local co-op. **Insert** on the keyboard, or **L3+R3** on the pad, opens the port's own menu
-(performance stats, frame generation, volume, quit game).
+(performance stats, frame generation, volume, quit game, and **Import LBP1/LBP2 items**: the old "My Unlocks",
+whose servers are gone. Choose it, then open the start menu with Options; the game's own import runs for about
+2 minutes, then press Cross on "successfully imported").
 
 ## Where things are
 

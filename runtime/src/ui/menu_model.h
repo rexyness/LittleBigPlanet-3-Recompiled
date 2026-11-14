@@ -6,8 +6,10 @@
 
 namespace ui::menu {
 
-enum class Item : int { Stats, FrameGen, Volume, Quit, Close, kCount };
-enum class Action : int { None, ToggleStats, ToggleFrameGen, Volume, QuitArmed, Quit, Close };
+enum class Item : int { Stats, FrameGen, Volume, Unlocks, Quit, Close, kCount };
+enum class Action : int { None, ToggleStats, ToggleFrameGen, Volume, ArmUnlocks, CancelUnlocks, QuitArmed, Quit, Close };
+// "Import LBP1/LBP2 items" (hle/my_unlocks.h; the same order as its State).
+enum class Unlocks : int { Unavailable, Idle, Armed, Running, Done };
 
 struct Model {
     int selected = 0;
@@ -16,8 +18,13 @@ struct Model {
     bool frameGenOn = false;
     int volume = 100;          // percent, steps of 10
     uint64_t quitArmedUntil = 0;
+    Unlocks unlocks = Unlocks::Unavailable;
 
-    bool Enabled(Item i) const { return i != Item::FrameGen || frameGenAvailable; }
+    bool Enabled(Item i) const {
+        if (i == Item::FrameGen) return frameGenAvailable;
+        if (i == Item::Unlocks) return unlocks != Unlocks::Unavailable && unlocks != Unlocks::Running;
+        return true;
+    }
     Item Selected() const { return static_cast<Item>(selected); }
     bool QuitArmed(uint64_t nowMs) const { return quitArmedUntil > nowMs; }
 
@@ -25,7 +32,8 @@ struct Model {
     void Move(int delta);
     // Left/right on the selected item: volume +-10, toggles flip.
     Action Adjust(int delta);
-    // Cross/Enter on the selected item. "Quit game" needs a second press within 3 s.
+    // Cross/Enter on the selected item. "Quit game" needs a second press within 3 s. The import
+    // item arms the import (idle or done) or disarms it (armed, not started yet).
     Action Activate(uint64_t nowMs);
 };
 

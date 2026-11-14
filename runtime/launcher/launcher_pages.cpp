@@ -619,24 +619,15 @@ void PageGame(App& a) {
     EndCard();
     if (BeginCard("menus", ImVec2(0, 0), false)) {
         Heading("Menus");
-        Toggle("In-game menu (Insert, or L3+R3 together)", &s.menu, "Frame rate and latency, frame generation on/off, volume, a small stats corner, and Quit.");
+        Toggle("In-game menu (Insert, or L3+R3 together)", &s.menu,
+               "Frame rate and latency, frame generation on/off, volume, a small stats corner, the LBP1/LBP2 item import "
+               "(the old \"My Unlocks\") and Quit. Switched off, the import is gone too.");
         ImGui::BeginDisabled(!s.menu);
         Toggle("Show the stats corner from the start", &s.stats, "The in-game menu can turn it on and off too.");
         ImGui::EndDisabled();
         Toggle("\"Quit Game\" in the game's pause menu", &s.quit_menu,
                "Replaces the Good Grief! button, which is greyed out offline; press it twice. The launcher writes the edit "
                "itself before Play (a port of LBPPC's quit_menu.py); the game files are never changed.");
-    }
-    EndCard();
-    if (BeginCard("unlocks", ImVec2(0, 0), false)) {
-        Heading("LBP1 and LBP2 items");
-        Toggle("Import the LBP1/LBP2 items once (the old \"My Unlocks\")", &s.my_unlocks, "Runs the game's own import the first time you open the start menu (Options).");
-        if (s.my_unlocks) {
-            ImGui::PushStyleColor(ImGuiCol_Text, kWarn);
-            ImGui::TextWrapped("On the first Options press the import screen appears: wait about 2 minutes, then press Cross on "
-                               "\"successfully imported\". Then close the game and switch this off again. Back up your saves first.");
-            ImGui::PopStyleColor();
-        }
     }
     EndCard();
 }

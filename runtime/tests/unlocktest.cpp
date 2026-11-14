@@ -60,6 +60,23 @@ int main() {
     CHECK(GuardImport(0) == 0);
     _putenv_s("LBP3_MY_UNLOCKS", "");
 
+    // The in-game menu's state: unavailable without the hook, whatever else is set.
+    CHECK(Decide(false, 0x7f, true, true, true) == State::Unavailable);
+    CHECK(Decide(true, 0, false, false, false) == State::Idle);
+    CHECK(Decide(true, 0x7f, false, false, false) == State::Armed);
+    CHECK(Decide(true, 0, false, true, false) == State::Running);   // inside ActivateImportScreen
+    CHECK(Decide(true, 0, true, false, true) == State::Running);    // ours is on screen
+    CHECK(Decide(true, 0, true, false, false) == State::Done);
+    CHECK(Decide(true, 0x7f, true, false, false) == State::Armed);  // armed again after one ran
+    // The game's own import screen (not started here) doesn't count as ours.
+    CHECK(Decide(true, 0, false, false, true) == State::Idle);
+    // No eboot here, so no hook: the menu can't arm it.
+    CHECK(GetState() == State::Unavailable);
+    CHECK(!Request());
+    CHECK(GetState() == State::Unavailable);
+    Cancel();
+    CHECK(GuardImport(circle) == circle);
+
     std::printf("unlocktest: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

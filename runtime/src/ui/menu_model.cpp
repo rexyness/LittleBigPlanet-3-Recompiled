@@ -39,6 +39,16 @@ Action Model::Activate(uint64_t nowMs) {
     case Item::Stats:
     case Item::FrameGen: return Adjust(1);
     case Item::Volume: return Action::None;  // left/right change it
+    case Item::Unlocks:
+        if (unlocks == Unlocks::Idle || unlocks == Unlocks::Done) {
+            unlocks = Unlocks::Armed;
+            return Action::ArmUnlocks;
+        }
+        if (unlocks == Unlocks::Armed) {
+            unlocks = Unlocks::Idle;
+            return Action::CancelUnlocks;
+        }
+        return Action::None;
     case Item::Quit:
         if (QuitArmed(nowMs)) return Action::Quit;
         quitArmedUntil = nowMs + 3000;

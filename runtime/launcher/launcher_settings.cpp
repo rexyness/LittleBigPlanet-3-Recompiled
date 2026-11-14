@@ -84,7 +84,6 @@ std::string ToIni(const Settings& s) {
       << "framegen=" << b(s.framegen) << "\n"
       << "; render size: 1280x720, 1920x1080, 2560x1440, 3840x2160, 2560x1080, 3440x1440, 3840x1600, 3840x1080, 4480x1260\n"
       << "res=" << s.res << "\n"
-      << "my_unlocks=" << b(s.my_unlocks) << "\n"
       << "fg_text=" << b(s.fg_text) << "\n"
       << "status_flips=" << s.status_flips << "\n"
       << "; 0 = all CPU cores but one\n"
@@ -172,7 +171,9 @@ Settings FromIni(const std::string& text) {
             else if (key == "framegen") ParseBool(v, s.framegen);
             else if (key == "res") {
                 if (const std::string r = CanonicalRes(v); !r.empty()) s.res = r;
-            } else if (key == "my_unlocks") ParseBool(v, s.my_unlocks);
+            }
+            // my_unlocks (older files) is ignored: the in-game menu arms the LBP1/LBP2 import now, so
+            // a 1 left in an old file no longer imports on every launch.
             // bloom_1440 (older files) is ignored: the capture chain keeps its 1080p sizes at 16:9 now.
             else if (key == "fg_text") ParseBool(v, s.fg_text);
             else if (key == "status_flips") {
@@ -275,7 +276,6 @@ LaunchPlan MapSettings(const Settings& s) {
         set("LBP3_RES", r == "2560x1440" ? "1440" : r);  // "1440": the original switch, the same size
         set("LBP3_RES_SHADERS", "1");
     }
-    if (s.my_unlocks) set("LBP3_MY_UNLOCKS", "lbp1,lbp2");
     if (!s.fg_text) set("LBP3_FRAMEGEN_TEXT", "off");
     set("LBP3_STATUS_FLIPS", std::to_string(s.status_flips));
     if (s.pipeline_threads > 0) set("LBP3_PIPELINE_THREADS", std::to_string(s.pipeline_threads));

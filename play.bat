@@ -13,13 +13,13 @@ rem 1920x1080), 1080 = the original 1920x1080, stretched to the window. Or one o
 rem (LBPPC's list): 1280x720, 3840x2160 (4K), 2560x1080, 3440x1440 or 3840x1600 (21:9),
 rem 3840x1080 or 4480x1260 (32:9). Wider than 16:9 widens the view (black bars on a 16:9 screen).
 set RES=1440
-rem LBP1/LBP2 items (the old "My Unlocks", whose servers are gone): 1 = run the game's own
-rem import once, the first time the start menu opens; wait for "successfully imported",
-rem don't press Circle, then close the game and set this back to 0 (a session that ran the
-rem import crashed later when Options was pressed again). Back up your saves first.
+rem LBP1/LBP2 items (the old "My Unlocks", whose servers are gone): the in-game menu's
+rem "Import LBP1/LBP2 items" does it (no switch needed). 1 = arm it at launch instead: the
+rem game's own import runs the first time the start menu opens; wait for "successfully
+rem imported" (Circle can't cancel it) and set this back to 0. Back up your saves first.
 set MY_UNLOCKS=0
 rem In-game menu (Insert, or L3+R3 together): frame rate and latency, frame generation on/off,
-rem volume, a corner stats overlay, Quit game: 1 = on, 0 = off.
+rem volume, a corner stats overlay, the LBP1/LBP2 item import, Quit game: 1 = on, 0 = off.
 set MENU=1
 rem The corner stats overlay from the start (the menu can turn it on and off): 1 = on.
 set STATS=0

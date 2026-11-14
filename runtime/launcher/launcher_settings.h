@@ -39,7 +39,6 @@ struct Settings {
     bool skip_intro = true;
     bool framegen = true;
     std::string res = "2560x1440";  // WxH, one of Resolutions() (older files: res=1440 or 1080)
-    bool my_unlocks = false;
     // play_best.bat's
     bool fg_text = true;
     int status_flips = 30;

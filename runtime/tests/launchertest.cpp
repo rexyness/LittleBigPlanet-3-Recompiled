@@ -77,7 +77,6 @@ static void TestIni() {
     a.skip_intro = false;
     a.framegen = false;
     a.res = "1920x1080";
-    a.my_unlocks = true;
     a.fg_text = false;
     a.status_flips = 300;
     a.pipeline_threads = 4;
@@ -136,7 +135,6 @@ static void TestMapping() {
     Settings s;
     s.skip_intro = false;
     s.framegen = false;
-    s.my_unlocks = true;
     s.fg_text = false;
     s.status_flips = 300;
     s.pipeline_threads = 1;
@@ -151,7 +149,12 @@ static void TestMapping() {
     m = EnvMap(s);
     CHECK(!m.count("LBP3_FRAMEGEN") && !m.count("LBP3_FRAMEGEN_MODE"));
     CHECK(!m.count("LBP3_RES_SKIP"));  // the bloom switch is retired (fix/capture-pitch)
-    CHECK(m["LBP3_MY_UNLOCKS"] == "lbp1,lbp2");
+    // the LBP1/LBP2 import moved to the in-game menu: a my_unlocks=1 left in an older file starts
+    // nothing, and the key isn't written any more
+    CHECK(!m.count("LBP3_MY_UNLOCKS"));
+    const Settings old = FromIni("[game]\nmy_unlocks=1\nres=1920x1080\n");
+    CHECK(old.res == "1920x1080" && !EnvMap(old).count("LBP3_MY_UNLOCKS"));
+    CHECK(ToIni(old).find("my_unlocks") == std::string::npos);
     CHECK(m["LBP3_FRAMEGEN_TEXT"] == "off");
     CHECK(m["LBP3_STATUS_FLIPS"] == "300");
     CHECK(m["LBP3_PIPELINE_THREADS"] == "1");
