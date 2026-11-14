@@ -83,6 +83,7 @@ static void TestIni() {
     a.status_flips = 300;
     a.pipeline_threads = 4;
     a.vk_pipeline_cache = false;
+    a.async_shaders = true;
     a.menu = false;
     a.stats = true;
     a.quit_menu = false;
@@ -96,6 +97,7 @@ static void TestIni() {
     const Settings b = FromIni(ToIni(a));
     CHECK(ToIni(a) == ToIni(b));
     CHECK(b.build == Build::Best && b.cache == CacheChoice::Shared && b.res == "1920x1080" && b.pipeline_threads == 4);
+    CHECK(b.async_shaders && !Settings{}.async_shaders);
     CHECK(b.language == "pt-br" && b.online_name == "Sack_boy-1" && b.game_root == a.game_root);
     // defaults survive an empty or broken file
     const Settings d = FromIni("");
@@ -116,6 +118,7 @@ static void TestMapping() {
     CHECK(m["LBP3_STATUS_FLIPS"] == "30");
     CHECK(!m.count("LBP3_MY_UNLOCKS") && !m.count("LBP3_FRAMEGEN_TEXT") && !m.count("LBP3_PIPELINE_THREADS"));
     CHECK(!m.count("LBP3_VK_PIPELINE_CACHE") && !m.count("LBP3_MENU") && !m.count("LBP3_MOTION"));
+    CHECK(!m.count("LBP3_ASYNC_PIPELINES"));
     CHECK(!m.count("LBP3_TILT_KEYS") && !m.count("LBP3_MOUSE_TOUCH") && !m.count("LBP3_ONLINE"));
     CHECK(!m.count("LBP3_STATS") && !m.count("LBP3_LANGUAGE") && !m.count("LBP3_LANGUAGES"));
     const LaunchPlan plan = MapSettings(Settings{});
@@ -130,6 +133,7 @@ static void TestMapping() {
     s.status_flips = 300;
     s.pipeline_threads = 1;
     s.vk_pipeline_cache = false;
+    s.async_shaders = true;
     s.menu = false;
     s.motion_filter = false;
     s.tilt_keys = false;
@@ -144,6 +148,7 @@ static void TestMapping() {
     CHECK(m["LBP3_STATUS_FLIPS"] == "300");
     CHECK(m["LBP3_PIPELINE_THREADS"] == "1");
     CHECK(m["LBP3_VK_PIPELINE_CACHE"] == "off" && m["LBP3_MENU"] == "off");
+    CHECK(m["LBP3_ASYNC_PIPELINES"] == "1");
     CHECK(m["LBP3_MOTION"] == "raw" && m["LBP3_TILT_KEYS"] == "off" && m["LBP3_MOUSE_TOUCH"] == "1");
     CHECK(m["LBP3_STATS"] == "1" && m["LBP3_LANGUAGE"] == "de" && m["LBP3_LANGUAGES"] == "all");
     CHECK(MapSettings(s).args.size() == 1);

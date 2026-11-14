@@ -43,6 +43,7 @@ struct Settings {
     int status_flips = 30;
     int pipeline_threads = 0;  // 0 = all cores but one (the default); 1 = one at a time
     bool vk_pipeline_cache = true;
+    bool async_shaders = false;  // new shaders built in the background (LBP3_ASYNC_PIPELINES=1)
     bool menu = true;
     bool stats = false;
     bool quit_menu = true;

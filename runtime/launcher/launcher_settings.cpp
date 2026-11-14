@@ -89,6 +89,8 @@ std::string ToIni(const Settings& s) {
       << "; 0 = all CPU cores but one\n"
       << "pipeline_threads=" << s.pipeline_threads << "\n"
       << "vk_pipeline_cache=" << b(s.vk_pipeline_cache) << "\n"
+      << "; 1 = new shaders are built in the background: no freeze, but new things can appear a moment late\n"
+      << "async_shaders=" << b(s.async_shaders) << "\n"
       << "menu=" << b(s.menu) << "\n"
       << "stats=" << b(s.stats) << "\n"
       << "quit_menu=" << b(s.quit_menu) << "\n"
@@ -176,6 +178,7 @@ Settings FromIni(const std::string& text) {
                 if (v.empty()) s.pipeline_threads = 0;
                 else if (ParseInt(v, 0, 256, n)) s.pipeline_threads = n;
             } else if (key == "vk_pipeline_cache") ParseBool(v, s.vk_pipeline_cache);
+            else if (key == "async_shaders") ParseBool(v, s.async_shaders);
             else if (key == "menu") ParseBool(v, s.menu);
             else if (key == "stats") ParseBool(v, s.stats);
             else if (key == "quit_menu") ParseBool(v, s.quit_menu);
@@ -271,6 +274,7 @@ LaunchPlan MapSettings(const Settings& s) {
     set("LBP3_STATUS_FLIPS", std::to_string(s.status_flips));
     if (s.pipeline_threads > 0) set("LBP3_PIPELINE_THREADS", std::to_string(s.pipeline_threads));
     if (!s.vk_pipeline_cache) set("LBP3_VK_PIPELINE_CACHE", "off");
+    if (s.async_shaders) set("LBP3_ASYNC_PIPELINES", "1");
     if (!s.menu) set("LBP3_MENU", "off");
     if (!s.motion_filter) set("LBP3_MOTION", "raw");
     if (!s.tilt_keys) set("LBP3_TILT_KEYS", "off");
