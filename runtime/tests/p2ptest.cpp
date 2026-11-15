@@ -178,6 +178,7 @@ Config PlayerConfig(const std::string& name, UdpMock& mock, std::vector<std::str
     c.keepaliveMs = 100;
     c.deadAfterMs = 1500;
     c.stunMs = 200;
+    c.lingerMs = 800;
     return c;
 }
 
@@ -329,10 +330,27 @@ int main() {
         }
 
         // --- 4. leaving ------------------------------------------------------------------------
+        // Both sides close at once for the game (DEAD on Bob's), but the games' last datagrams still
+        // pass both ways for lingerMs (a PS4's P2P socket isn't tied to the connection); then it's gone.
+        const Endpoint toB = a.Info("Bob_2").gameAddr, toA = b.Info("Alice_1").gameAddr;
         a.Terminate("Bob_2");
-        CHECK(a.Info("Bob_2").state == State::None);
+        CHECK(a.Info("Bob_2").state == State::Closing);
         CHECK(WaitFor([&] { return HasEvent(evB, b, Event::Dead, "Alice_1"); }));
-        CHECK(b.Info("Alice_1").state == State::None);
+        CHECK(b.Info("Alice_1").state == State::Closing);
+        {
+            const size_t nA = atA.Count(), nB = atB.Count();
+            const std::string last = "last words";
+            CHECK(a.SendData(toB, 3658, 3658, last.data(), last.size()));
+            CHECK(b.SendData(toA, 3658, 3658, last.data(), last.size()));
+            CHECK(WaitFor([&] { return atB.Count() > nB && atA.Count() > nA; }, 2000));
+        }
+        CHECK(WaitFor([&] { return a.Info("Bob_2").state == State::None && b.Info("Alice_1").state == State::None; },
+                      3000));
+        {
+            const std::string late = "too late";
+            CHECK(!a.SendData(toB, 3658, 3658, late.data(), late.size()));
+        }
+        std::printf("  leaving: closing on both sides, the last datagrams passed both ways, then gone\n");
         a.Stop();
         b.Stop();
         mock.Stop();
@@ -613,9 +631,10 @@ int main() {
         a.Activate("Bob_2");
         CHECK(bothUp());
         CHECK(exchange(40));
-        // 16. Alice leaves (her BYE arrives) and connects again.
+        // 16. Alice leaves (her BYE arrives) and connects again while both sides are still closing
+        // (Activate and the new HELLO start afresh: new counts both ways).
         a.Terminate("Bob_2");
-        CHECK(WaitFor([&] { return b.Info("Alice_1").state == State::None; }));
+        CHECK(WaitFor([&] { return b.Info("Alice_1").state == State::Closing; }));
         a.Activate("Bob_2");
         CHECK(bothUp());
         CHECK(exchange(40));

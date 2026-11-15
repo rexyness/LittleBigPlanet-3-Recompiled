@@ -94,9 +94,15 @@ struct Config {
     // `testLateEvery`th back 50 ms (its successors overtake it); handle every `testDupEvery`th twice.
     int testLossEvery = 0, testLossBurst = 1, testLateEvery = 0, testDupEvery = 0;
     bool testNoBye = false;  // tests: leave without BYE (as if it were lost)
+    // After a connection ends (our game ended it, or the peer's BYE), the two games' datagrams still
+    // pass this long; the game has already heard DEAD. On a PS4 the P2P socket isn't tied to the
+    // signaling connection, and LBP3 sends its last session messages around the time it ends one.
+    // 0 = cut at once (as before).
+    int lingerMs = 10000;
 };
 
-enum class State { None, Pending, Active };
+// Closing: the connection is over for the game, but datagrams still pass (Config::lingerMs).
+enum class State { None, Pending, Active, Closing };
 
 struct Event {
     enum Kind { PeerActivated, Established, Mutual, Dead } kind;  // Mutual: both sides activated it

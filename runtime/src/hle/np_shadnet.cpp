@@ -1106,7 +1106,7 @@ constexpr int32_t kSigInfoRtt = 1, kSigInfoBandwidth = 2, kSigInfoPeerNpId = 3, 
 constexpr int kSigErrCtxNotFound = static_cast<int>(0x80552705), kSigErrConnNotFound = static_cast<int>(0x8055270E),
               kSigErrPeerUnreachable = static_cast<int>(0x8055270F), kSigErrTerminatedByPeer = static_cast<int>(0x80552710),
               kSigErrTimeout = static_cast<int>(0x80552711), kSigErrInProgress = static_cast<int>(0x80552714),
-              kSigErrOwnNpId = static_cast<int>(0x80552716);
+              kSigErrOwnNpId = static_cast<int>(0x80552716), kSigErrTerminatedByMyself = static_cast<int>(0x80552718);
 constexpr int kSigInvalidArgument = static_cast<int>(0x80552715);
 constexpr uint32_t kAssumedBandwidthBps = 10'000'000;
 
@@ -1119,9 +1119,18 @@ struct SigConn {
     std::string peer;
 };
 
+// A callback to make from sceNpCheckCallback (on the game's thread, never inside the call that
+// caused it).
+struct SigCall {
+    SignalingHandler cb;
+    int32_t ctx, conn, event, error;
+    void* arg;
+};
+
 std::mutex g_sigMutex;
 std::map<int32_t, SigContext> g_sigContexts;
 std::map<int32_t, SigConn> g_sigConns;
+std::vector<SigCall> g_sigPending;  // DEAD for connections the game ended itself
 std::atomic<int32_t> g_sigNextCtx{0}, g_sigNextConn{0};
 std::unique_ptr<net::p2p::Link> g_link;  // with shadNet on, from sceNpSignalingInitialize
 
@@ -1204,6 +1213,11 @@ void StartLink() {
         c.data3 = false;
         std::fprintf(stderr, "[p2p] LBP3_P2P_DATA3=0: no gap-free delivery\n");
     }
+    if (const char* p = std::getenv("LBP3_P2P_LINGER_MS"); p && *p) {
+        c.lingerMs = std::max(0, std::atoi(p));
+        std::fprintf(stderr, "[p2p] LBP3_P2P_LINGER_MS=%d: datagrams pass that long after a connection ends\n",
+                     c.lingerMs);
+    }
     if (const char* p = std::getenv("LBP3_P2P_TEST_LOSS"); p && *p) {
         // "N" or "N,burst": drop `burst` incoming game datagrams out of every N (tests).
         c.testLossEvery = std::atoi(p);
@@ -1278,15 +1292,12 @@ void DispatchSignalingEvents() {
     net::p2p::Link* link = g_link.get();
     if (!link) return;
     const auto events = link->TakeEvents();
-    if (events.empty()) return;
-    struct Call {
-        SignalingHandler cb;
-        int32_t ctx, conn, event, error;
-        void* arg;
-    };
+    using Call = SigCall;
     std::vector<Call> calls;
     {
         std::lock_guard lk(g_sigMutex);
+        if (events.empty() && g_sigPending.empty()) return;
+        calls.swap(g_sigPending);
         for (const auto& e : events) {
             switch (e.kind) {
             case net::p2p::Event::PeerActivated: {
@@ -1417,6 +1428,17 @@ int PS4_SYSV_ABI sceNpSignalingTerminateConnection(int32_t ctxId, int32_t connId
         if (it == g_sigConns.end() || it->second.ctx != ctxId) return g_link ? kSigErrConnNotFound : 0;
         peer = it->second.peer;
         g_sigConns.erase(it);
+        // The game hears DEAD (TERMINATED_BY_MYSELF) for a connection it ended, as LBPPC's shadPS4 does
+        // (signaling_handler.cpp TerminateSig1 -> CloseConnectionAndDispatchDead).
+        // LBP3_P2P_TEST_NO_SELF_DEAD=1 leaves it out (tests).
+        static const bool noSelfDead = [] {
+            const char* v = std::getenv("LBP3_P2P_TEST_NO_SELF_DEAD");
+            return v && *v == '1';
+        }();
+        if (g_link && !noSelfDead) {
+            if (auto c = g_sigContexts.find(ctxId); c != g_sigContexts.end())
+                g_sigPending.push_back({c->second.cb, ctxId, connId, kSigEventDead, kSigErrTerminatedByMyself, c->second.arg});
+        }
     }
     if (g_link) g_link->Terminate(peer);
     return 0;

@@ -121,6 +121,7 @@ struct Link::Impl {
     struct Peer {
         std::string name;
         State state = State::None;
+        Clock::time_point closingUntil{};  // State::Closing: when it's dropped
         bool local = false, remote = false, mutualFired = false;
         Endpoint gameAddr;
         std::vector<Endpoint> candidates;  // where to try directly
@@ -471,6 +472,15 @@ struct Link::Impl {
         ring.clear();
     }
 
+    // Lock held: game datagrams pass to and from this peer.
+    static bool Carries(const Peer& p) { return p.state == State::Active || p.state == State::Closing; }
+    // Lock held: the connection is over for the game; datagrams pass a while longer (Config::lingerMs).
+    void StartClosing(Peer& p, Clock::time_point now) {
+        p.state = State::Closing;
+        p.closingUntil = now + std::chrono::milliseconds(cfg.lingerMs);
+        p.local = p.remote = p.mutualFired = false;
+    }
+
     // Lock held: the connection is up (once).
     void SetActive(Peer& p) {
         if (p.state != State::Active) {
@@ -538,6 +548,12 @@ struct Link::Impl {
                 return;
             }
             auto it = peers.find(from);
+            if (it != peers.end() && it->second.state == State::Closing) {
+                // A new connection from a player whose last one is still closing: start afresh.
+                if (type == kAck) return;
+                peers.erase(it);
+                it = peers.end();
+            }
             if (it == peers.end()) {
                 if (type == kAck) return;
                 if (!cfg.mayConnect || !cfg.mayConnect(from)) {
@@ -583,7 +599,7 @@ struct Link::Impl {
             Peer* p = nullptr;
             for (auto& [name, peer] : peers)
                 if (NameTag(name) == tag) p = &peer;
-            if (!p || p->state != State::Active) {
+            if (!p || !Carries(*p)) {
                 if (++stats.dataUnknown <= 10)
                     std::fprintf(stderr, "[p2p] a game datagram from %s%s, from no connected player: dropped\n",
                                  ToString(src).c_str(), relayed ? " (relayed)" : "");
@@ -614,7 +630,7 @@ struct Link::Impl {
         case kNack: {
             if (n < 5 + kIdLen + 6) return;
             auto it = peers.find(GetId(d + 5));
-            if (it == peers.end() || it->second.state != State::Active) return;
+            if (it == peers.end() || !Carries(it->second)) return;
             Peer& p = it->second;
             Heard(p, src, relayed, now);
             const uint32_t first = Get32(d + 5 + kIdLen);
@@ -635,7 +651,7 @@ struct Link::Impl {
             Peer* p = nullptr;
             for (auto& [name, peer] : peers)
                 if (NameTag(name) == tag) p = &peer;
-            if (!p || p->state != State::Active) {
+            if (!p || !Carries(*p)) {
                 if (++stats.dataUnknown <= 10)
                     std::fprintf(stderr, "[p2p] a game datagram from %s%s, from no connected player: dropped\n",
                                  ToString(src).c_str(), relayed ? " (relayed)" : "");
@@ -673,10 +689,13 @@ struct Link::Impl {
             if (n < 5 + 2 * kIdLen) return;
             const std::string from = GetId(d + 5);
             if (GetId(d + 5 + kIdLen) != cfg.self) return;
-            if (peers.erase(from)) {
+            auto it = peers.find(from);
+            if (it != peers.end() && it->second.state != State::Closing) {
                 events.push_back({Event::Dead, from, kErrorPeerGone});
                 std::fprintf(stderr, "[p2p] %s %s: left\n", core::Stamp().text, from.c_str());
                 DumpRecentLocked("the peer left");
+                if (it->second.state == State::Active && cfg.lingerMs > 0) StartClosing(it->second, now);
+                else peers.erase(it);
             }
             break;
         }
@@ -717,7 +736,7 @@ struct Link::Impl {
         if (!sent && !received) return;
         std::string who;
         for (const auto& [name, p] : peers)
-            who += " " + name + (p.state == State::Active ? std::string(" (") + PathName(PathOf(p, now)) : " (pending") +
+            who += " " + name + (p.state == State::Active ? std::string(" (") + PathName(PathOf(p, now)) : std::string(p.state == State::Closing ? " (closing" : " (pending")) +
                    ", rtt " + std::to_string(p.rttUs / 1000) + " ms)";
         std::string gapFree;
         if (stats.recovered || stats.resent || stats.nacks || stats.skipped || stats.testDropped || stats.testLate ||
@@ -785,6 +804,12 @@ struct Link::Impl {
                         const auto hello = Hello(kHello, p.name);
                         for (const Endpoint& c : p.candidates) SendRaw(c, hello);
                         if (Ms(now - p.started) >= cfg.relayAfterMs && p.relayTo.Valid()) SendRelayed(p.relayTo, hello);
+                    }
+                } else if (p.state == State::Closing) {
+                    if (!p.hold.empty()) Deliver3(p, now);
+                    if (now >= p.closingUntil) {
+                        it = peers.erase(it);
+                        continue;
                     }
                 } else if (p.state == State::Active) {
                     if (!p.hold.empty()) Deliver3(p, now);
@@ -961,6 +986,10 @@ void Link::Activate(const std::string& peer) {
     Impl& I = *impl_;
     std::lock_guard lk(I.m);
     auto it = I.peers.find(peer);
+    if (it != I.peers.end() && it->second.state == State::Closing) {
+        I.peers.erase(it);  // the last connection is still closing: start afresh
+        it = I.peers.end();
+    }
     if (it == I.peers.end()) {
         I.NewPeer(peer, Clock::now()).state = State::Pending;
         it = I.peers.find(peer);
@@ -985,14 +1014,18 @@ void Link::Terminate(const std::string& peer) {
     Impl& I = *impl_;
     std::lock_guard lk(I.m);
     auto it = I.peers.find(peer);
-    if (it == I.peers.end()) return;
-    if (it->second.state == State::Active && !I.cfg.testNoBye) {
+    if (it == I.peers.end() || it->second.state == State::Closing) return;
+    const auto now = Clock::now();
+    const bool active = it->second.state == State::Active;
+    if (active && !I.cfg.testNoBye) {
         auto b = Header(kBye);
         PutId(b, I.cfg.self);
         PutId(b, peer);
-        I.SendToPeer(it->second, b, Clock::now());
+        I.SendToPeer(it->second, b, now);
     }
-    I.peers.erase(it);
+    // The game's last datagrams (and the peer's) still pass for a while (Config::lingerMs).
+    if (active && I.cfg.lingerMs > 0) I.StartClosing(it->second, now);
+    else I.peers.erase(it);
     I.DumpRecentLocked("our game ended the connection");
 }
 
@@ -1044,7 +1077,7 @@ bool Link::SendData(const Endpoint& gameAddr, uint16_t srcVport, uint16_t dstVpo
     Impl& I = *impl_;
     std::lock_guard lk(I.m);
     auto it = name.empty() ? I.peers.end() : I.peers.find(name);
-    if (it == I.peers.end() || it->second.state != State::Active) {
+    if (it == I.peers.end() || !Impl::Carries(it->second)) {
         if (++I.stats.dataNoPeer <= 10)
             std::fprintf(stderr, "[p2p] the game sent a datagram to %s (vport %u): no connected player there\n",
                          ToString(gameAddr).c_str(), dstVport);
