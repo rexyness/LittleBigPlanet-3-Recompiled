@@ -74,7 +74,9 @@ std::atomic<bool> g_vblankSourceOk{false};
 std::atomic<double> g_refreshHz{0.0};
 std::atomic<HWND> g_hwnd{nullptr};
 std::atomic<void (*)(int)> g_hotkeyHandler{nullptr};
-std::atomic<void (*)()> g_exitHook{nullptr};
+constexpr int kMaxExitHooks = 4;
+std::atomic<void (*)()> g_exitHooks[kMaxExitHooks]{};
+std::atomic<int> g_exitHookCount{0};
 std::atomic<uint64_t> g_presents{0};
 
 void CountVBlank() {
@@ -506,9 +508,14 @@ void SetDisplayBuffer(int index, const DisplayBuffer& buffer) {
 }
 
 void SetHotkeyHandler(void (*handler)(int key)) { g_hotkeyHandler = handler; }
-void SetExitHook(void (*hook)()) { g_exitHook = hook; }
+void AddExitHook(void (*hook)()) {
+    const int i = g_exitHookCount.fetch_add(1);
+    if (i < kMaxExitHooks) g_exitHooks[i] = hook;
+    else std::fprintf(stderr, "[video] too many exit hooks: one dropped\n");
+}
 void RunExitHook() {
-    if (auto hook = g_exitHook.exchange(nullptr)) hook();
+    for (int i = std::min(g_exitHookCount.load(), kMaxExitHooks) - 1; i >= 0; --i)
+        if (auto hook = g_exitHooks[i].exchange(nullptr)) hook();
 }
 
 void TriggerHotkey(int key) {

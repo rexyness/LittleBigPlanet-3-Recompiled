@@ -25,8 +25,18 @@ enum class CacheChoice {
     Shared,  // always the normal user\shader_cache (no LBP3_SHADER_CACHE_DIR)
 };
 
+// When new shaders are built in the background (LBP3_ASYNC_PIPELINES=1): no freeze the first time
+// something is drawn, but it can appear a moment late.
+enum class AsyncShaders {
+    Off,
+    Online,  // only when playing online (the default): a freeze there stops the game's updates to the
+             // other player, who sees this one stand still, shown away, with the death countdown
+    Always,
+};
+
 // launcher.ini's format ([launcher] settings_version). 2 (v0.1.4): update_on_start defaults to on.
-inline constexpr int kSettingsVersion = 2;
+// 3: async_shaders defaults to online.
+inline constexpr int kSettingsVersion = 3;
 
 struct Settings {
     Build build = Build::This;
@@ -44,7 +54,7 @@ struct Settings {
     int status_flips = 30;
     int pipeline_threads = 0;  // 0 = all cores but one (the default); 1 = one at a time
     bool vk_pipeline_cache = true;
-    bool async_shaders = false;  // new shaders built in the background (LBP3_ASYNC_PIPELINES=1)
+    AsyncShaders async_shaders = AsyncShaders::Online;  // LBP3_ASYNC_PIPELINES=1 when it applies
     bool menu = true;
     bool stats = false;
     bool quit_menu = true;
@@ -105,6 +115,7 @@ Settings FromIni(const std::string& text);
 
 const char* BuildKey(Build b);
 const char* CacheKey(CacheChoice c);
+const char* AsyncShadersKey(AsyncShaders a);  // launcher.ini's value: 0, online or 1
 
 using EnvList = std::vector<std::pair<std::string, std::string>>;
 

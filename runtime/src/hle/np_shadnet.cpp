@@ -56,6 +56,7 @@
 #include "core/exact_math.h"
 #include "net/p2p_link.h"
 #include "net/shadnet_service.h"
+#include "video/presenter.h"
 #include "net/web_request.h"
 
 namespace hle::np {
@@ -1238,6 +1239,19 @@ void StartLink() {
     }
     g_link = std::move(link);
     p2pnet::SetRemoteSend(&LinkSend);
+    // Closing the window and Quit Game end the process at once (ExitProcess), which never ran the
+    // link's Stop: the other players heard no BYE and waited for the game's own timeout (about 10 s)
+    // with this player frozen. Stop sends the BYEs.
+    static std::atomic<bool> exitHooked{false};
+    if (!exitHooked.exchange(true)) {
+        video::AddExitHook([] {
+            if (net::p2p::Link* l = g_link.get(); l && l->Running()) {
+                std::fprintf(stderr, "[p2p] the game is closing: telling the other players\n");
+                std::fflush(stderr);
+                l->Stop();
+            }
+        });
+    }
     // Tests only (the join protection, live): connect to this player although the game didn't ask.
     if (const char* p = std::getenv("LBP3_P2P_TEST_CONNECT"); p && *p) {
         const std::string peer = p;

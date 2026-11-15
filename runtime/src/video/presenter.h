@@ -20,9 +20,10 @@ struct DisplayBuffer {
 void StartPresenter();
 // Debug hotkeys (F9, F10...) pressed in the game window, as SDL keycodes.
 void SetHotkeyHandler(void (*handler)(int key));
-// Runs once, just before the process ends on a window close or a normal exit (ExitProcess:
-// no destructors run). The GPU side saves the driver pipeline cache here.
-void SetExitHook(void (*hook)());
+// Each runs once, just before the process ends on a window close, Quit Game or a normal exit
+// (ExitProcess: no destructors run), the last added first. The GPU side saves the driver pipeline
+// cache here; online co-op tells the other players we're leaving. Up to 4.
+void AddExitHook(void (*hook)());
 void RunExitHook();
 // Runs the hotkey handler as if `key` was pressed (remote-controlled test runs).
 void TriggerHotkey(int key);
