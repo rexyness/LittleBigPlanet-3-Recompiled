@@ -63,6 +63,14 @@ const char* CacheKey(CacheChoice c) {
     }
 }
 
+const char* AsyncShadersKey(AsyncShaders a) {
+    switch (a) {
+    case AsyncShaders::Off: return "0";
+    case AsyncShaders::Always: return "1";
+    default: return "online";
+    }
+}
+
 std::string ToIni(const Settings& s) {
     std::ostringstream o;
     auto b = [](bool v) { return v ? "1" : "0"; };
@@ -89,8 +97,9 @@ std::string ToIni(const Settings& s) {
       << "; 0 = all CPU cores but one\n"
       << "pipeline_threads=" << s.pipeline_threads << "\n"
       << "vk_pipeline_cache=" << b(s.vk_pipeline_cache) << "\n"
-      << "; 1 = new shaders are built in the background: no freeze, but new things can appear a moment late\n"
-      << "async_shaders=" << b(s.async_shaders) << "\n"
+      << "; new shaders built in the background (no freeze, but new things can appear a moment late):\n"
+      << "; online = only when playing online, 1 = always, 0 = never\n"
+      << "async_shaders=" << AsyncShadersKey(s.async_shaders) << "\n"
       << "menu=" << b(s.menu) << "\n"
       << "stats=" << b(s.stats) << "\n"
       << "quit_menu=" << b(s.quit_menu) << "\n"
@@ -182,7 +191,11 @@ Settings FromIni(const std::string& text) {
                 if (v.empty()) s.pipeline_threads = 0;
                 else if (ParseInt(v, 0, 256, n)) s.pipeline_threads = n;
             } else if (key == "vk_pipeline_cache") ParseBool(v, s.vk_pipeline_cache);
-            else if (key == "async_shaders") ParseBool(v, s.async_shaders);
+            else if (key == "async_shaders") {
+                bool on = false;
+                if (Lower(v) == "online") s.async_shaders = AsyncShaders::Online;
+                else if (ParseBool(v, on)) s.async_shaders = on ? AsyncShaders::Always : AsyncShaders::Off;
+            }
             else if (key == "menu") ParseBool(v, s.menu);
             else if (key == "stats") ParseBool(v, s.stats);
             else if (key == "quit_menu") ParseBool(v, s.quit_menu);
@@ -223,6 +236,9 @@ Settings FromIni(const std::string& text) {
     // (the launcher writes every key, and the default was off), which isn't a choice: switch it on
     // once. From then on the file has settings_version=2, so turning it off sticks.
     if (version < 2) s.update_on_start = true;
+    // Version 3: background shader builds default to online. Older files say async_shaders=0, the old
+    // default (the launcher writes every key): that becomes online once; a 1 stays always.
+    if (version < 3 && s.async_shaders == AsyncShaders::Off) s.async_shaders = AsyncShaders::Online;
     return s;
 }
 
@@ -280,7 +296,7 @@ LaunchPlan MapSettings(const Settings& s) {
     set("LBP3_STATUS_FLIPS", std::to_string(s.status_flips));
     if (s.pipeline_threads > 0) set("LBP3_PIPELINE_THREADS", std::to_string(s.pipeline_threads));
     if (!s.vk_pipeline_cache) set("LBP3_VK_PIPELINE_CACHE", "off");
-    if (s.async_shaders) set("LBP3_ASYNC_PIPELINES", "1");
+    if (s.async_shaders == AsyncShaders::Always) set("LBP3_ASYNC_PIPELINES", "1");
     if (!s.menu) set("LBP3_MENU", "off");
     if (!s.motion_filter) set("LBP3_MOTION", "raw");
     if (!s.tilt_keys) set("LBP3_TILT_KEYS", "off");
@@ -300,6 +316,9 @@ LaunchPlan MapSettings(const Settings& s) {
             // Builds without shadNet ignore these.
             set("LBP3_SHADNET", "1");
             set("LBP3_SHADNET_SERVER", ShadnetServer(s));
+            // Online, a shader freeze stops the game's updates to the other player, who sees this one
+            // stand still and shown away (with the death countdown), so build in the background.
+            if (s.async_shaders == AsyncShaders::Online) set("LBP3_ASYNC_PIPELINES", "1");
         }
     }
     if (s.stats) set("LBP3_STATS", "1");

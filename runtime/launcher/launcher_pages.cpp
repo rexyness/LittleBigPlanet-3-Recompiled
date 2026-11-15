@@ -716,9 +716,14 @@ void PageGraphics(App& a) {
         ImGui::SetNextItemWidth(S(200));
         ImGui::SliderInt("Startup threads (0 = all cores but one)", &s.pipeline_threads, 0, 32);
         Toggle("Save the graphics driver's own shader cache", &s.vk_pipeline_cache, "Later startups rebuild faster.");
-        Toggle("Build new shaders in the background", &s.async_shaders,
-               "No freeze the first time something new is drawn; instead it can appear a moment late. Takes "
-               "effect when the game starts.");
+        const char* asyncModes[] = {"Never", "When playing online", "Always"};
+        int am = static_cast<int>(s.async_shaders);
+        ImGui::SetNextItemWidth(S(260));
+        if (ImGui::Combo("Build new shaders in the background", &am, asyncModes, IM_ARRAYSIZE(asyncModes)))
+            s.async_shaders = static_cast<AsyncShaders>(am);
+        Help("No freeze the first time something new is drawn; instead it can appear a moment late. Online it "
+             "matters most: while the game freezes, your friend sees you stand still, shown away. Takes effect "
+             "when the game starts.");
         int flips = s.status_flips == 300 ? 1 : 0;
         if (ImGui::RadioButton("Status lines every second", &flips, 0)) s.status_flips = 30;
         ImGui::SameLine();

@@ -81,7 +81,7 @@ static void TestIni() {
     a.status_flips = 300;
     a.pipeline_threads = 4;
     a.vk_pipeline_cache = false;
-    a.async_shaders = true;
+    a.async_shaders = AsyncShaders::Always;
     a.menu = false;
     a.stats = true;
     a.quit_menu = false;
@@ -95,7 +95,20 @@ static void TestIni() {
     const Settings b = FromIni(ToIni(a));
     CHECK(ToIni(a) == ToIni(b));
     CHECK(b.build == Build::Best && b.cache == CacheChoice::Shared && b.res == "1920x1080" && b.pipeline_threads == 4);
-    CHECK(b.async_shaders && !Settings{}.async_shaders);
+    CHECK(b.async_shaders == AsyncShaders::Always && Settings{}.async_shaders == AsyncShaders::Online);
+    // background shader builds: each value survives the file; an older file's 0 (the old default,
+    // never a choice) becomes online once, its 1 stays always; a current file's 0 sticks
+    for (AsyncShaders v : {AsyncShaders::Off, AsyncShaders::Online, AsyncShaders::Always}) {
+        Settings t;
+        t.async_shaders = v;
+        CHECK(FromIni(ToIni(t)).async_shaders == v);
+    }
+    CHECK(FromIni("[launcher]\nsettings_version=2\n[game]\nasync_shaders=0\n").async_shaders == AsyncShaders::Online);
+    CHECK(FromIni("[game]\nasync_shaders=0\n").async_shaders == AsyncShaders::Online);
+    CHECK(FromIni("[launcher]\nsettings_version=2\n[game]\nasync_shaders=1\n").async_shaders == AsyncShaders::Always);
+    CHECK(FromIni("[launcher]\nsettings_version=3\n[game]\nasync_shaders=0\n").async_shaders == AsyncShaders::Off);
+    CHECK(FromIni("[launcher]\nsettings_version=3\n[game]\nasync_shaders=online\n").async_shaders == AsyncShaders::Online);
+    CHECK(ToIni(Settings{}).find("async_shaders=online\n") != std::string::npos);
     CHECK(b.language == "pt-br" && b.online_name == "Sack_boy-1" && b.game_root == a.game_root);
     // defaults survive an empty or broken file
     const Settings d = FromIni("");
@@ -111,7 +124,7 @@ static void TestIni() {
     Settings off;
     off.update_on_start = false;
     CHECK(!FromIni(ToIni(off)).update_on_start);
-    CHECK(ToIni(off).find("settings_version=2\n") != std::string::npos);
+    CHECK(ToIni(off).find("settings_version=3\n") != std::string::npos);
     // values with line breaks are flattened on write
     Settings f;
     f.online_name = "a\nb";
@@ -139,7 +152,7 @@ static void TestMapping() {
     s.status_flips = 300;
     s.pipeline_threads = 1;
     s.vk_pipeline_cache = false;
-    s.async_shaders = true;
+    s.async_shaders = AsyncShaders::Always;
     s.menu = false;
     s.motion_filter = false;
     s.tilt_keys = false;
@@ -200,7 +213,15 @@ static void TestMapping() {
     o.online_name = "Player_1";
     m = EnvMap(o);
     CHECK(m["LBP3_ONLINE"] == "1" && m["LBP3_ONLINE_SERVER"] == "https://play.example.org" && m["LBP3_ONLINE_NAME"] == "Player_1");
+    // background shader builds: the default (online) turns them on when playing online, never offline
+    CHECK(m["LBP3_ASYNC_PIPELINES"] == "1");
+    o.async_shaders = AsyncShaders::Off;
+    CHECK(!EnvMap(o).count("LBP3_ASYNC_PIPELINES"));
+    o.async_shaders = AsyncShaders::Always;
+    CHECK(EnvMap(o)["LBP3_ASYNC_PIPELINES"] == "1");
+    o.async_shaders = AsyncShaders::Online;
     o.online_server = "not a server";
+    CHECK(!EnvMap(o).count("LBP3_ASYNC_PIPELINES"));  // not online after all
     CHECK(!EnvMap(o).count("LBP3_ONLINE"));
     o.online_server = "127.0.0.1:10061";
     o.online = false;
