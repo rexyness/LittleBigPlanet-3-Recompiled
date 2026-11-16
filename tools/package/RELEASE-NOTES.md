@@ -1,9 +1,18 @@
-**v0.1.6: fixes from LBPPC 0.1.4 for Intel and Radeon PCs, and no shader freezes online.**
-If you have v0.1.4 or v0.1.5, the launcher shows "v0.1.6 is out" when it opens: press **Update**. From v0.1.1 to
-v0.1.3, go to **Tools > Check for updates**. It installs v0.1.6 and keeps your saves, settings and accounts. New here?
-Read on. **No game files are included:** you need your own copy of the game.
+**v0.1.7: the game's lighting reaches the picture again, so scenes are no longer washed out.**
+If you have v0.1.4, v0.1.5 or v0.1.6, the launcher shows "v0.1.7 is out" when it opens: press **Update**. From
+v0.1.1 to v0.1.3, go to **Tools > Check for updates**. It installs v0.1.7 and keeps your saves, settings and
+accounts. New here? Read on. **No game files are included:** you need your own copy of the game.
 
-### What's in it (new in v0.1.6)
+### What's in it (new in v0.1.7)
+- **Lighting fixed.** The game draws part of its lighting into 16 small pictures and then reads them back as one
+  tall one. On a PS4 that's the same memory; in this port the tall one never saw what had been drawn, so the
+  lighting it carries was lost. Scenes looked washed out and bright things clipped to white (Newton's head, bottles
+  and signs in Needlepoint Peaks). Now shadows and mid-tones have their depth back, and the picture is closer to
+  the PS4 (in Needlepoint Peaks the average brightness went from 136 to 108). This is LBPPC 0.1.4's "lights in
+  levels" fix, ported. `LBP3_STACKED_TARGETS=0` turns it off.
+- Nothing in online play changed: v0.1.3 to v0.1.7 players can play together.
+
+### New in v0.1.6
 - **The intro cutscene no longer gets stuck on Intel processors.** On an Intel CPU the story's first cutscene stopped
   for good after Newton's line (the game kept running, but the next scripted step never came). A few of the game's
   maths instructions give slightly different answers on Intel than on the PS4's AMD processor; on PCs with a CPU
@@ -73,7 +82,7 @@ Read on. **No game files are included:** you need your own copy of the game.
 - Optional: your own DLC `.pkg` files and a PS4 pkg extractor.
 
 ### Getting started
-1. Download `LBP3-Recompiled-v0.1.6-lbp3port.zip` and unzip it somewhere you can write to (not Program Files).
+1. Download `LBP3-Recompiled-v0.1.7-lbp3port.zip` and unzip it somewhere you can write to (not Program Files).
 2. Run `LBP3Launcher.exe`. The setup asks for the folder that contains `CUSA00473` (pick it, or type or paste its
    path) and checks it.
 3. Press **PLAY**.
@@ -97,7 +106,7 @@ The first visit to each area can pause briefly while your graphics driver builds
   - updates. It checks each download against its `.sha256` and never touches your `user\` folder.
 
 ### Known issues
-- Some scenes are brighter than on a PS4.
+- Some scenes are still brighter than on a PS4, though less than before v0.1.7.
 - Online co-op is still new:
   - it hasn't been tested yet between two PCs on different networks;
   - leaving and rejoining, and playing through real levels together, are only lightly tested;
@@ -120,7 +129,7 @@ The first visit to each area can pause briefly while your graphics driver builds
 Built on PurpleGitty's LittleBigPlanet 3 Recompiled and the shadPS4 graphics core, with several pieces from
 LBPPC by emurphy04 (credited in the code), including the shadNet sign-in code request from LBPPC 0.1.3, the
 game addresses behind the ultrawide view, the exact maths for online play, the background shader builds, and from
-LBPPC 0.1.4 the Intel intro fix and the Radeon start-up fixes. Their team also runs play.lbppc.com and allowed this port to use it.
+LBPPC 0.1.4 the Intel intro fix, the Radeon start-up fixes and the lighting fix. Their team also runs play.lbppc.com and allowed this port to use it.
 Full credits are in `CREDITS.md`.
 
 This is free software under the GNU GPL. The source is this repository at the tagged commit, with its shadPS4
