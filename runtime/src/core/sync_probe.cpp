@@ -238,6 +238,48 @@ void LogSlots() {
         room += conns;
         key += conns;
     }
+    // The transfer manager (eboot+0x12cc4e8; session messages 0x12 announce, 0x14 answer, 0x13 done):
+    // its outgoing records (+0x0, count +0x8; 0x30 bytes: id +0, state +0x20) and incoming objects
+    // (+0x10, count +0x18; online ID +0, id +0x24, done +0x200). A 0x12 whose player and id match an
+    // object already there is ignored (eboot+0x2281e0).
+    {
+        const uint64_t mgr = reinterpret_cast<uint64_t>(g_base + 0x12cc4e8);
+        uint64_t recs = 0, objs = 0;
+        uint32_t nrec = 0, nobj = 0;
+        Read(mgr, recs);
+        Read(mgr + 0x8, nrec);
+        Read(mgr + 0x10, objs);
+        Read(mgr + 0x18, nobj);
+        std::string x = "; xfer out n=" + std::to_string(nrec);
+        for (uint32_t j = 0; j < nrec && j < 8; ++j) {
+            int32_t id = 0, st = 0;
+            Read(recs + 0x30ull * j, id);
+            Read(recs + 0x30ull * j + 0x20, st);
+            x += " " + std::to_string(id) + ":st" + std::to_string(st);
+        }
+        x += " in n=" + std::to_string(nobj);
+        for (uint32_t j = 0; j < nobj && j < 8; ++j) {
+            uint64_t o = 0;
+            if (!Read(objs + 8ull * j, o) || !Readable(reinterpret_cast<const void*>(o), 0x202)) continue;
+            char name[17] = {};
+            std::memcpy(name, reinterpret_cast<const void*>(o), 16);
+            for (char& ch : name)
+                if (ch && (ch < 0x20 || ch > 0x7e)) ch = '.';
+            int32_t id = 0, kind = 0, a8 = 0, b8 = 0;
+            uint8_t done = 0, flags = 0;
+            Read(o + 0x24, id);
+            Read(o + 0x200, done);
+            Read(o + 0x38, kind);   // what is transferred (eboot+0x228a10 answers 10 for kind 9, else 0x14)
+            Read(o + 0x40, flags);  // its stream; bit 8 = failed (answered 0x14 with "no")
+            Read(o + 0xa8, a8);
+            Read(o + 0xb8, b8);
+            char b[96];
+            std::snprintf(b, sizeof(b), "#%d k%d f%02x a8=%d b8=%d", id, kind, flags, a8, b8);
+            x += std::string(" ") + name + b + (done ? ":done" : "");
+        }
+        room += x;
+        key += x;
+    }
     // The server's network settings (if any), which can replace the timeouts.
     uint64_t settings = 0;
     std::string net;
