@@ -595,9 +595,12 @@ int main() {
             int rttUsA = 0;      // A's RTT to B, once measured
             int firstMs = 0;     // from A's first send to B's first delivery
             int longestGapMs = 0;  // the longest time B's game got nothing while A was sending
+            PeerInfo ia, ib;       // the session log's counts: A's for B, B's for A
+            int serverRttUsA = 0;
         };
         // A sends `count` numbered datagrams 2 ms apart; B's deliveries are sampled every 2 ms.
-        auto slowRun = [&](const char* what, int delayA, int delayB, int jitterB, int holdB, int holdAfterB, int count) {
+        auto slowRun = [&](const char* what, int delayA, int delayB, int jitterB, int holdB, int holdAfterB, int count,
+                           int lossEveryB = 0, int lossBurstB = 1) {
             Slow out;
             UdpMock mock;
             CHECK(mock.Start());
@@ -611,6 +614,8 @@ int main() {
             cb.testJitterMs = jitterB;
             cb.testHoldMs = holdB;
             cb.testHoldAfterMs = holdAfterB;
+            cb.testLossEvery = lossEveryB;
+            cb.testLossBurst = lossBurstB;
             CHECK(a.Start(ca));
             CHECK(b.Start(cb));
             CHECK(WaitFor([&] { return a.External().Valid() && b.External().Valid(); }));
@@ -650,6 +655,9 @@ int main() {
             }
             out.a = a.GetStats();
             out.b = b.GetStats();
+            out.ia = a.Info("Bob_2");
+            out.ib = b.Info("Alice_1");
+            out.serverRttUsA = a.ServerRttUs();
             std::printf("  %s: %zu of %d arrived; rtt %d ms, first after %d ms, longest gap %d ms\n", what, out.gotB.size(),
                         count, out.rttUsA / 1000, out.firstMs, out.longestGapMs);
             a.Stop();
@@ -663,6 +671,16 @@ int main() {
         CHECK(r.rttUsA >= 115'000 && r.rttUsA < 300'000);
         CHECK(r.firstMs >= 55 && r.firstMs < 250);
         CHECK(r.a.testDelayed > 0 && r.b.testDelayed >= 100 && r.b.testHeld == 0);
+        // The session log's counts (PeerInfo): what the game got, the RTT's spread, packets and bytes.
+        CHECK(r.ib.delivered == 100 && r.ia.delivered == 0);
+        CHECK(r.ib.gapsOpened == 0 && r.ib.longestDeliverGapMs < 150);
+        CHECK(r.ia.pings > 0 && r.ia.pongs > 0 && r.ia.pongs <= r.ia.pings);
+        CHECK(r.ia.rttMinUs >= 115'000 && r.ia.rttMaxUs >= r.ia.rttMinUs && r.ia.rttMaxUs < 400'000);
+        CHECK(r.ia.txPackets >= 100 && r.ia.txBytes > 100 * 7 && r.ib.rxPackets >= 100 && r.ib.rxBytes > 100 * 7);
+        CHECK(r.ib.directHeard >= 100);
+        CHECK(r.serverRttUsA > 0 && r.serverRttUsA < 1'000'000);
+        // A steady delay is no "extra" delay: each direction stays near its own lowest.
+        CHECK(r.ia.maxExtraOutUs < 60'000 && r.ia.maxExtraBackUs < 60'000);
         // 15b. 20 ms and up to 40 ms of jitter, one direction only: still in the order sent, so the
         // gap-free link has nothing to repair.
         r = slowRun("20 ms + 40 ms jitter, one way", 0, 20, 40, 0, 0, 150);
@@ -677,6 +695,20 @@ int main() {
         CHECK(r.b.testHeld >= 200 && r.a.testHeld == 0);
         CHECK(r.longestGapMs >= 450 && r.longestGapMs < 1200);
         CHECK(r.b.skipped == 0);
+        // The session log saw it: the game's longest wait, and which direction was slow. A's PINGs
+        // reached B late (out), B's answers came back at once; B's own PONGs from A came late (back).
+        CHECK(r.ib.longestDeliverGapMs >= 450 && r.ib.longestDeliverGapMs < 1200);
+        CHECK(r.ia.maxExtraOutUs >= 250'000 && r.ia.maxExtraBackUs < 150'000);
+        CHECK(r.ib.maxExtraBackUs >= 250'000 && r.ib.maxExtraOutUs < 150'000);
+        CHECK(r.ib.gapsOpened == 0);
+        // 15d. Four in a row lost every 25: the gaps are counted, with how each closed.
+        r = slowRun("4 in a row lost every 25, counted", 0, 0, 0, 0, 0, 200, 25, 4);
+        CHECK(inOrder(r.gotB, 200));
+        CHECK(r.ib.delivered == 200);
+        CHECK(r.ib.gapsOpened > 0 && r.ib.gapsAsked > 0 && r.ib.gapsGivenUp == 0);
+        CHECK(r.ib.gapsFilled + r.ib.gapsAsked == r.ib.gapsOpened);
+        CHECK(r.ib.longestGapMs < 2000);  // on loopback a gap closes within a millisecond
+        CHECK(r.ia.gapsOpened == 0);
         // Off: none of it counts anything (the path with the settings off is the one before them).
         Link::Stats sa, sb;
         run("settings off", false, true, {}, 50, &sa, &sb);

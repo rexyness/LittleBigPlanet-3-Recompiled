@@ -152,6 +152,33 @@ struct Link::Impl {
         uint32_t txSeq = 0, rxNext = 0;
         bool rxStarted = false;
         int64_t peerLastTx = 0;  // the latest send time seen from the peer (QPC)
+        // The session log ([p2p-win] lines): this window's counts, and the session's.
+        struct Counts {
+            uint64_t delivered = 0, deliveredBytes = 0;
+            int longestDeliverGapMs = 0;
+            uint32_t gapsOpened = 0, gapsFilled = 0, gapsAsked = 0, gapsGivenUp = 0;
+            int longestGapMs = 0;
+            uint32_t pings = 0, pongs = 0;
+            int rttMinUs = 0, rttMaxUs = 0;
+            int extraOutUs = 0, extraBackUs = 0;
+            uint32_t tx[10] = {}, rx[10] = {};  // by packet type (kHello..kNack)
+            uint64_t txBytes = 0, rxBytes = 0;
+            uint32_t directHeard = 0, relayedHeard = 0;
+        };
+        Counts win, tot;
+        std::vector<int> winRtt;            // this window's RTT samples
+        Clock::time_point lastDeliver{};    // the last datagram given to the game
+        int deliverWarned = 0;              // 1 past 2 s without one, 2 past 5 s
+        Clock::time_point gapOpened{};      // the DATA3 gap being waited behind
+        uint32_t gapAt = 0;                 // its first missing number
+        bool gapAsked = false;              // a NACK went out for it
+        // PING there and PONG back, each as the difference of the two PCs' clocks; the lowest of the
+        // last minute is the baseline (the clocks drift apart slowly).
+        int64_t winOutMin = INT64_MAX, winBackMin = INT64_MAX;
+        std::deque<std::pair<int64_t, int64_t>> clockMins;
+        std::vector<uint32_t> probes, heardAt;  // per candidate: PINGs sent to it, packets heard from it
+        bool firstDirectLogged = false;
+        int pathLines = 0, windows = 0;
     };
     struct Rec {
         int64_t qpc;
@@ -180,6 +207,9 @@ struct Link::Impl {
     DataSink sink;
     Stats stats;
     Clock::time_point lastStun{};
+    Clock::time_point stunSent{};  // the request the next answer belongs to
+    bool stunPending = false;
+    int serverRttUs = 0;
     bool stunAnswered = false;
     std::set<std::string> refusedLogged;
     std::set<std::string> mathRefusedLogged;
@@ -247,6 +277,8 @@ struct Link::Impl {
     }
     // Lock held. Directly when the peer's packets come directly, else through the relay.
     void SendToPeer(Peer& p, const std::vector<uint8_t>& b, Clock::time_point now) {
+        if (b.size() >= 5 && b[4] < 10) ++p.win.tx[b[4]];
+        p.win.txBytes += b.size();
         if (cfg.path == Config::Path::Relay && cfg.server.Valid() && p.relayTo.Valid()) {
             SendRelayed(p.relayTo, b);
             ++stats.sentRelayed;
@@ -337,9 +369,18 @@ struct Link::Impl {
     void Deliver3(Peer& p, Clock::time_point now) {
         while (!p.hold.empty() && p.hold.begin()->first == p.next3) {
             const Peer::Item& it = p.hold.begin()->second;
+            NoteDelivered(p, it.data.size(), now);
             if (sink) sink(p.gameAddr, it.srcVport, it.dstVport, it.data.data(), it.data.size());
             p.hold.erase(p.hold.begin());
             ++p.next3;
+        }
+        // The session log: the gap that was waited behind is over once its first number has passed.
+        if (p.gapOpened != Clock::time_point{} && (p.hold.empty() || p.next3 != p.gapAt)) CloseGap(p, now, false);
+        if (!p.hold.empty() && p.gapOpened == Clock::time_point{}) {
+            p.gapOpened = now;
+            p.gapAt = p.next3;
+            p.gapAsked = false;
+            ++p.win.gapsOpened;
         }
         if (p.hold.empty()) {
             p.gapSince = {};
@@ -349,6 +390,7 @@ struct Link::Impl {
         if (p.hold.size() > kHoldMax || now - p.gapSince > std::chrono::milliseconds(kGiveUpMs)) {
             const uint32_t to = p.hold.begin()->first;
             stats.skipped += to - p.next3;
+            CloseGap(p, now, true);
             std::fprintf(stderr, "[p2p] %s %s: game datagrams %u..%u never came: going on without them\n",
                          core::Stamp().text, p.name.c_str(), p.next3, to - 1);
             p.next3 = to;
@@ -364,12 +406,44 @@ struct Link::Impl {
             Put16(b, static_cast<uint16_t>(std::min<uint32_t>(p.hold.begin()->first - p.next3, 64)));
             SendToPeer(p, b, now);
             ++stats.nacks;
+            p.gapAsked = true;
         }
     }
-    std::vector<uint8_t> Ping(uint8_t type, uint64_t t) const {
+    // Lock held: a game datagram goes to the game now (the session log's deliveries and waits).
+    void NoteDelivered(Peer& p, size_t len, Clock::time_point now) {
+        ++p.win.delivered;
+        p.win.deliveredBytes += len;
+        if (p.lastDeliver != Clock::time_point{}) {
+            const int ms = static_cast<int>(Ms(now - p.lastDeliver));
+            p.win.longestDeliverGapMs = std::max(p.win.longestDeliverGapMs, ms);
+            if (p.deliverWarned)
+                std::fprintf(stderr, "[p2p] %s %s: the game gets datagrams again, after %d ms with none\n",
+                             core::Stamp().text, p.name.c_str(), ms);
+        }
+        p.lastDeliver = now;
+        p.deliverWarned = 0;
+    }
+    // Lock held: the gap that held datagrams back is over (filled, or given up on).
+    void CloseGap(Peer& p, Clock::time_point now, bool givenUp) {
+        const int ms = static_cast<int>(Ms(now - p.gapOpened));
+        if (givenUp) ++p.win.gapsGivenUp;
+        else if (p.gapAsked) ++p.win.gapsAsked;
+        else ++p.win.gapsFilled;
+        p.win.longestGapMs = std::max(p.win.longestGapMs, ms);
+        if (ms >= 250 || givenUp)
+            std::fprintf(stderr, "[p2p] %s %s: a gap at game datagram %u held the ones after it back for %d ms; %s\n",
+                         core::Stamp().text, p.name.c_str(), p.gapAt, ms,
+                         givenUp ? "given up" : p.gapAsked ? "filled after asking again" : "filled without asking");
+        p.gapOpened = {};
+        p.gapAsked = false;
+    }
+    // A PONG also carries the answerer's clock, for the session log's delay in each direction.
+    std::vector<uint8_t> Ping(uint8_t type, uint64_t t, uint64_t mine = 0) const {
         auto b = Header(type);
         PutId(b, cfg.self);
         for (int i = 7; i >= 0; --i) b.push_back(static_cast<uint8_t>(t >> (8 * i)));
+        if (type == kPong)
+            for (int i = 7; i >= 0; --i) b.push_back(static_cast<uint8_t>(mine >> (8 * i)));
         return b;
     }
 
@@ -388,12 +462,26 @@ struct Link::Impl {
     }
 
     // Lock held: a packet from the peer arrived (`src` as it came: direct, or the relay's sender).
-    void Heard(Peer& p, const Endpoint& src, bool relayed, Clock::time_point now) {
+    void Heard(Peer& p, const Endpoint& src, bool relayed, Clock::time_point now, uint8_t type, size_t len) {
         p.lastRx = now;
+        if (type < 10) ++p.win.rx[type];
+        p.win.rxBytes += len;
         if (relayed) {
+            ++p.win.relayedHeard;
             p.relayTo = src;
         } else {
             AddCandidate(p, src);
+            ++p.win.directHeard;
+            const size_t at = static_cast<size_t>(std::find(p.candidates.begin(), p.candidates.end(), src) - p.candidates.begin());
+            if (p.heardAt.size() <= at) p.heardAt.resize(at + 1);
+            ++p.heardAt[at];
+            if (!p.firstDirectLogged) {
+                p.firstDirectLogged = true;
+                std::fprintf(stderr, "[p2p] %s %s: its first direct packet, from %s%s, %lld ms after the connection began\n",
+                             core::Stamp().text, p.name.c_str(), ToString(src).c_str(),
+                             src == p.lan ? " (its LAN address)" : src == p.ext ? " (its public address)" : "",
+                             static_cast<long long>(Ms(now - p.started)));
+            }
             // While the preferred address answers, packets that come another way don't move us off it.
             const bool keep = p.preferred.Valid() && p.direct == p.preferred && src != p.preferred &&
                               now - p.lastDirect < kDirectFresh;
@@ -492,8 +580,9 @@ struct Link::Impl {
             p.state = State::Active;
             if (p.local) events.push_back({Event::Established, p.name, 0});
             else events.push_back({Event::PeerActivated, p.name, 0});
-            std::fprintf(stderr, "[p2p] %s: connected (%s, game address %s)\n", p.name.c_str(),
-                         p.direct.Valid() ? "direct" : "relayed", ToString(p.gameAddr).c_str());
+            std::fprintf(stderr, "[p2p] %s: connected (%s, game address %s) at %s, %lld ms after it began\n", p.name.c_str(),
+                         p.direct.Valid() ? "direct" : "relayed", ToString(p.gameAddr).c_str(), core::Stamp().text,
+                         static_cast<long long>(Ms(Clock::now() - p.started)));
         }
         if (p.local && p.remote && !p.mutualFired) {
             p.mutualFired = true;
@@ -622,7 +711,7 @@ struct Link::Impl {
             UpdatePreferred(p);
             AddCandidate(p, ext);
             AddCandidate(p, lan);
-            Heard(p, src, relayed, now);
+            Heard(p, src, relayed, now, type, n);
             if (type == kHello) {
                 p.remote = true;
                 Reply(src, relayed, Hello(kAck, from));
@@ -643,7 +732,7 @@ struct Link::Impl {
                                  ToString(src).c_str(), relayed ? " (relayed)" : "");
                 return;
             }
-            Heard(*p, src, relayed, now);
+            Heard(*p, src, relayed, now, type, n);
             size_t at = 14;
             for (int i = 0; i < count; ++i) {
                 if (at + 6 > n) return;
@@ -670,7 +759,7 @@ struct Link::Impl {
             auto it = peers.find(GetId(d + 5));
             if (it == peers.end() || !Carries(it->second)) return;
             Peer& p = it->second;
-            Heard(p, src, relayed, now);
+            Heard(p, src, relayed, now, type, n);
             const uint32_t first = Get32(d + 5 + kIdLen);
             const uint16_t count = std::min<uint16_t>(Get16(d + 5 + kIdLen + 4), 64);
             for (uint32_t s = first; s != first + count; ++s) {
@@ -695,12 +784,13 @@ struct Link::Impl {
                                  ToString(src).c_str(), relayed ? " (relayed)" : "");
                 return;
             }
-            Heard(*p, src, relayed, now);
+            Heard(*p, src, relayed, now, type, n);
             if (++stats.dataReceived <= 5 || stats.dataReceived % 3000 == 0)
                 std::fprintf(stderr, "[p2p] game datagram %llu from %s (%zu bytes, %s)\n",
                              static_cast<unsigned long long>(stats.dataReceived), p->name.c_str(), n - head,
                              relayed ? "relayed" : "direct");
             if (type == kData2) NoteDiag(*p, Get32(d + 13), static_cast<int64_t>(Get64(d + 17)), n - head, relayed);
+            NoteDelivered(*p, n - head, now);
             if (sink) sink(p->gameAddr, Get16(d + 5), Get16(d + 7), d + head, n - head);
             break;
         }
@@ -711,15 +801,38 @@ struct Link::Impl {
             auto it = peers.find(from);
             if (it == peers.end()) return;
             Peer& p = it->second;
-            Heard(p, src, relayed, now);
+            Heard(p, src, relayed, now, type, n);
             uint64_t t = 0;
             for (int i = 0; i < 8; ++i) t = t << 8 | d[5 + kIdLen + i];
+            const uint64_t nowUs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count());
             if (type == kPing) {
-                Reply(src, relayed, Ping(kPong, t));
+                const auto pong = Ping(kPong, t, nowUs);
+                if (pong.size() >= 5) ++p.win.tx[kPong];
+                p.win.txBytes += pong.size();
+                Reply(src, relayed, pong);
             } else {
-                const uint64_t nowUs = static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count());
-                if (nowUs >= t) p.rttUs = static_cast<int>(std::min<uint64_t>(nowUs - t, 10'000'000));
+                if (nowUs >= t) {
+                    p.rttUs = static_cast<int>(std::min<uint64_t>(nowUs - t, 10'000'000));
+                    p.winRtt.push_back(p.rttUs);
+                    ++p.win.pongs;
+                }
+                if (n >= 5 + kIdLen + 16) {
+                    // The answerer's clock when it took the PING: out and back, each off by the two
+                    // clocks' difference, so only how far above its lowest each one is means anything.
+                    uint64_t theirs = 0;
+                    for (int i = 0; i < 8; ++i) theirs = theirs << 8 | d[5 + kIdLen + 8 + i];
+                    const int64_t out = static_cast<int64_t>(theirs - t), back = static_cast<int64_t>(nowUs - theirs);
+                    p.winOutMin = std::min(p.winOutMin, out);
+                    p.winBackMin = std::min(p.winBackMin, back);
+                    int64_t outMin = p.winOutMin, backMin = p.winBackMin;
+                    for (const auto& [o, b] : p.clockMins) {
+                        outMin = std::min(outMin, o);
+                        backMin = std::min(backMin, b);
+                    }
+                    p.win.extraOutUs = std::max(p.win.extraOutUs, static_cast<int>(std::min<int64_t>(out - outMin, 60'000'000)));
+                    p.win.extraBackUs = std::max(p.win.extraBackUs, static_cast<int>(std::min<int64_t>(back - backMin, 60'000'000)));
+                }
             }
             break;
         }
@@ -750,6 +863,10 @@ struct Link::Impl {
                 if (e != external) std::fprintf(stderr, "[p2p] the server sees us at %s\n", ToString(e).c_str());
                 external = e;
                 stunAnswered = true;
+                if (stunPending) {
+                    stunPending = false;
+                    serverRttUs = static_cast<int>(std::chrono::duration_cast<std::chrono::microseconds>(now - stunSent).count());
+                }
                 return;
             }
             if (n > 11 && std::memcmp(d, kRelayMagic, 4) == 0 && d[4] == 0x03) {
@@ -771,7 +888,10 @@ struct Link::Impl {
         const uint64_t sent = stats.dataSent - summarySent, received = stats.dataReceived - summaryReceived;
         summarySent = stats.dataSent;
         summaryReceived = stats.dataReceived;
-        if (!sent && !received) return;
+        if (!sent && !received) {
+            for (auto& [name, p] : peers) WindowLine(p, now);
+            return;
+        }
         std::string who;
         for (const auto& [name, p] : peers)
             who += " " + name + (p.state == State::Active ? std::string(" (") + PathName(PathOf(p, now)) : std::string(p.state == State::Closing ? " (closing" : " (pending")) +
@@ -804,6 +924,84 @@ struct Link::Impl {
         const int logged = diag.logged;
         diag = {};
         diag.logged = logged;
+        for (auto& [name, p] : peers) WindowLine(p, now);
+    }
+
+    // Lock held: the session log's line for one connection, every 5 s while it is up, and the path
+    // line while it isn't direct. Then the window's counts go into the session's.
+    void WindowLine(Peer& p, Clock::time_point now) {
+        Peer::Counts& w = p.win;
+        if (!p.winRtt.empty()) {
+            std::sort(p.winRtt.begin(), p.winRtt.end());
+            w.rttMinUs = p.winRtt.front();
+            w.rttMaxUs = p.winRtt.back();
+        }
+        if (p.state == State::Active || p.state == State::Closing) {
+            const int median = p.winRtt.empty() ? 0 : p.winRtt[p.winRtt.size() / 2];
+            // A wait still running counts for this window too.
+            int waiting = w.longestDeliverGapMs;
+            if (p.lastDeliver != Clock::time_point{}) waiting = std::max(waiting, static_cast<int>(std::min<long long>(Ms(now - p.lastDeliver), 5000)));
+            const uint32_t txData = w.tx[kData] + w.tx[kData2] + w.tx[kData3], rxData = w.rx[kData] + w.rx[kData2] + w.rx[kData3];
+            std::fprintf(stderr,
+                         "[p2p-win] %s %s (%s): to the game %llu (%llu B), longest wait %d ms; gaps %u (filled %u, after asking "
+                         "%u, given up %u, longest %d ms); rtt %d/%d/%d ms (min/median/max), pings %u sent %u answered; extra "
+                         "delay out %d ms, back %d ms; sent data %u nack %u ping %u pong %u hello %u (%llu B); got data %u nack "
+                         "%u ping %u pong %u hello %u (%llu B), %u direct %u relayed; server rtt %d ms\n",
+                         core::Stamp().text, p.name.c_str(), p.state == State::Closing ? "closing" : PathName(PathOf(p, now)),
+                         static_cast<unsigned long long>(w.delivered), static_cast<unsigned long long>(w.deliveredBytes), waiting,
+                         w.gapsOpened, w.gapsFilled, w.gapsAsked, w.gapsGivenUp, w.longestGapMs, w.rttMinUs / 1000, median / 1000,
+                         w.rttMaxUs / 1000, w.pings, w.pongs, w.extraOutUs / 1000, w.extraBackUs / 1000, txData, w.tx[kNack],
+                         w.tx[kPing], w.tx[kPong], w.tx[kHello] + w.tx[kAck], static_cast<unsigned long long>(w.txBytes), rxData,
+                         w.rx[kNack], w.rx[kPing], w.rx[kPong], w.rx[kHello] + w.rx[kAck],
+                         static_cast<unsigned long long>(w.rxBytes), w.directHeard, w.relayedHeard, serverRttUs / 1000);
+            // The path: while it isn't direct, where the link has tried (the first minute, then every minute).
+            ++p.windows;
+            if (p.state == State::Active && !DirectFresh(p, now) && (p.pathLines < 12 || p.windows % 12 == 0)) {
+                ++p.pathLines;
+                std::string tried;
+                for (size_t i = 0; i < p.candidates.size(); ++i) {
+                    char buf[96];
+                    std::snprintf(buf, sizeof(buf), "%s %s (%u probes, %u heard)", i ? "," : "", ToString(p.candidates[i]).c_str(),
+                                  i < p.probes.size() ? p.probes[i] : 0, i < p.heardAt.size() ? p.heardAt[i] : 0);
+                    tried += buf;
+                }
+                std::fprintf(stderr, "[p2p-path] %s %s: not direct; it says public %s, LAN %s; we are %s; tried%s\n",
+                             core::Stamp().text, p.name.c_str(), ToString(p.ext).c_str(), ToString(p.lan).c_str(),
+                             ToString(external).c_str(), tried.empty() ? " nothing" : tried.c_str());
+            }
+        }
+        Peer::Counts& t = p.tot;
+        t.delivered += w.delivered;
+        t.deliveredBytes += w.deliveredBytes;
+        t.longestDeliverGapMs = std::max(t.longestDeliverGapMs, w.longestDeliverGapMs);
+        t.gapsOpened += w.gapsOpened;
+        t.gapsFilled += w.gapsFilled;
+        t.gapsAsked += w.gapsAsked;
+        t.gapsGivenUp += w.gapsGivenUp;
+        t.longestGapMs = std::max(t.longestGapMs, w.longestGapMs);
+        t.pings += w.pings;
+        t.pongs += w.pongs;
+        if (w.rttMaxUs) {
+            t.rttMinUs = t.rttMinUs ? std::min(t.rttMinUs, w.rttMinUs) : w.rttMinUs;
+            t.rttMaxUs = std::max(t.rttMaxUs, w.rttMaxUs);
+        }
+        t.extraOutUs = std::max(t.extraOutUs, w.extraOutUs);
+        t.extraBackUs = std::max(t.extraBackUs, w.extraBackUs);
+        for (int i = 0; i < 10; ++i) {
+            t.tx[i] += w.tx[i];
+            t.rx[i] += w.rx[i];
+        }
+        t.txBytes += w.txBytes;
+        t.rxBytes += w.rxBytes;
+        t.directHeard += w.directHeard;
+        t.relayedHeard += w.relayedHeard;
+        if (p.winOutMin != INT64_MAX) {
+            p.clockMins.emplace_back(p.winOutMin, p.winBackMin);
+            if (p.clockMins.size() > 12) p.clockMins.pop_front();
+        }
+        p.winOutMin = p.winBackMin = INT64_MAX;
+        p.winRtt.clear();
+        w = {};
     }
 
     void Tick(Clock::time_point now) {
@@ -813,6 +1011,8 @@ struct Link::Impl {
             Summary(now);
             if (cfg.server.Valid() && now - lastStun >= std::chrono::milliseconds(stunAnswered ? cfg.stunMs : 1000)) {
                 lastStun = now;
+                stunSent = now;
+                stunPending = true;
                 std::vector<uint8_t> b(kStunHeader, kStunHeader + 6);
                 b.push_back(0x01);
                 PutId(b, cfg.self);
@@ -864,13 +1064,32 @@ struct Link::Impl {
                         it = peers.erase(it);
                         continue;
                     }
+                    if (p.lastDeliver != Clock::time_point{} && p.deliverWarned < 2) {
+                        // The session log: the game has had nothing from this player for 2 s, for 5 s.
+                        const long long quiet = Ms(now - p.lastDeliver);
+                        const int level = quiet > 5000 ? 2 : quiet > 2000 ? 1 : 0;
+                        if (level > p.deliverWarned) {
+                            p.deliverWarned = level;
+                            std::fprintf(stderr,
+                                         "[p2p] %s %s: no game datagram for the game in %d s (last packet of any kind %lld ms "
+                                         "ago, %zu held behind a gap)\n",
+                                         core::Stamp().text, p.name.c_str(), level == 2 ? 5 : 2,
+                                         static_cast<long long>(Ms(now - p.lastRx)), p.hold.size());
+                        }
+                    }
                     if (now - p.lastPing >= std::chrono::milliseconds(cfg.keepaliveMs)) {
                         p.lastPing = now;
                         const auto ping = Ping(kPing, nowUs);
                         SendToPeer(p, ping, now);
+                        ++p.win.pings;
                         // Not direct yet: keep trying the direct addresses (a hole may open).
-                        if (!DirectFresh(p, now))
-                            for (const Endpoint& c : p.candidates) SendRaw(c, ping);
+                        if (!DirectFresh(p, now)) {
+                            if (p.probes.size() < p.candidates.size()) p.probes.resize(p.candidates.size());
+                            for (size_t i = 0; i < p.candidates.size(); ++i) {
+                                SendRaw(p.candidates[i], ping);
+                                ++p.probes[i];
+                            }
+                        }
                         // The preferred address (Config::path) isn't the one in use: try it.
                         UpdatePreferred(p);
                         if (p.preferred.Valid() && p.direct != p.preferred && cfg.path != Config::Path::Relay)
@@ -1098,7 +1317,39 @@ PeerInfo Link::Info(const std::string& peer) const {
     info.rttUs = p.rttUs;
     info.locallyActivated = p.local;
     info.peerActivated = p.remote;
+    // The session's counts: the finished windows and the one running.
+    const auto& t = p.tot;
+    const auto& w = p.win;
+    info.delivered = t.delivered + w.delivered;
+    info.longestDeliverGapMs = std::max(t.longestDeliverGapMs, w.longestDeliverGapMs);
+    info.gapsOpened = t.gapsOpened + w.gapsOpened;
+    info.gapsFilled = t.gapsFilled + w.gapsFilled;
+    info.gapsAsked = t.gapsAsked + w.gapsAsked;
+    info.gapsGivenUp = t.gapsGivenUp + w.gapsGivenUp;
+    info.longestGapMs = std::max(t.longestGapMs, w.longestGapMs);
+    info.pings = t.pings + w.pings;
+    info.pongs = t.pongs + w.pongs;
+    info.rttMinUs = t.rttMinUs;
+    info.rttMaxUs = t.rttMaxUs;
+    for (int us : p.winRtt) {
+        info.rttMinUs = info.rttMinUs ? std::min(info.rttMinUs, us) : us;
+        info.rttMaxUs = std::max(info.rttMaxUs, us);
+    }
+    info.maxExtraOutUs = std::max(t.extraOutUs, w.extraOutUs);
+    info.maxExtraBackUs = std::max(t.extraBackUs, w.extraBackUs);
+    for (int i = 0; i < 10; ++i) {
+        info.txPackets += t.tx[i] + w.tx[i];
+        info.rxPackets += t.rx[i] + w.rx[i];
+    }
+    info.txBytes = t.txBytes + w.txBytes;
+    info.rxBytes = t.rxBytes + w.rxBytes;
+    info.directHeard = t.directHeard + w.directHeard;
     return info;
+}
+
+int Link::ServerRttUs() const {
+    std::lock_guard lk(impl_->m);
+    return impl_->serverRttUs;
 }
 
 std::string Link::PeerAt(const Endpoint& gameAddr) const {

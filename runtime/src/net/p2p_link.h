@@ -123,6 +123,18 @@ struct PeerInfo {
     bool relayed = false;
     int rttUs = 0;
     bool locallyActivated = false, peerActivated = false;
+    // The session log's counts for this connection so far (the [p2p-win] lines print them per 5 s).
+    uint64_t delivered = 0;          // game datagrams given to the game
+    int longestDeliverGapMs = 0;     // the longest time the game got nothing between two of them
+    uint32_t gapsOpened = 0, gapsFilled = 0, gapsAsked = 0, gapsGivenUp = 0;  // DATA3 gaps, and how they closed
+    int longestGapMs = 0;            // the longest a gap held datagrams back
+    uint32_t pings = 0, pongs = 0;   // PINGs sent and answered
+    int rttMinUs = 0, rttMaxUs = 0;
+    // How much later than its best a PING arrived there (out) and its PONG here (back): which
+    // direction got slow. The two clocks differ, so only the change is known, not the delay itself.
+    int maxExtraOutUs = 0, maxExtraBackUs = 0;
+    uint64_t txPackets = 0, rxPackets = 0, txBytes = 0, rxBytes = 0;
+    uint32_t directHeard = 0;        // packets that came directly (not through the relay)
 };
 
 class Link {
@@ -137,6 +149,7 @@ public:
     bool Running() const;
     uint16_t LocalPort() const;
     Endpoint External() const;  // our address as the server sees it (invalid until a STUN reply)
+    int ServerRttUs() const;    // the round trip of our last request to the server (0 = none yet)
 
     void Activate(const std::string& peer);
     void Terminate(const std::string& peer);
