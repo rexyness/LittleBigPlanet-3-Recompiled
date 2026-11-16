@@ -58,9 +58,40 @@ fs::path GameDir() {
     return fs::current_path().parent_path() / "LBP3 Game Files";
 }
 
+// Other programs' Vulkan layers that Windows loads into every Vulkan game, set before the Vulkan
+// loader starts (it reads them when the instance is made). A value the player set is kept.
+// - Overwolf's (overlay and its OBS hook, made for Vulkan 1.2), Epic Online Services' and Rockstar's
+//   overlays: a Radeon PC with them had every swapchain refused ("Game exited with 0x00000017").
+//   Steam's overlay, OBS's game capture and the GPU makers' own layers stay.
+// - Steam's shader pre-caching (Fossilize), when the game is started from Steam: it can't record
+//   this port's pipelines ("Cannot copy unknown pNext sType") and was followed by crashes in AMD's
+//   driver. The game keeps its own pipeline cache.
+// From LBPPC 0.1.4 (emurphy04, GPL-3.0-or-later, c333f27: run.py). The loader ignores
+// VK_LOADER_LAYERS_DISABLE in a process run as administrator, so the layers' own switches are set as
+// well where known (Epic's and Steam's, from their layer manifests).
+void KeepForeignVulkanLayersOut() {
+    struct Default {
+        const char* name;
+        const char* value;
+    };
+    static const Default kDefaults[] = {
+        {"VK_LOADER_LAYERS_DISABLE", "VK_LAYER_OW_*,VK_LAYER_EOS_Overlay,VK_LAYER_ROCKSTAR_GAMES_*"},
+        {"EOS_OVERLAY_DISABLE_VULKAN_WIN64", "1"},
+        {"DISABLE_VK_LAYER_VALVE_steam_fossilize_1", "1"},
+    };
+    for (const Default& d : kDefaults) {
+        if (const char* v = std::getenv(d.name); v && *v) {
+            std::fprintf(stderr, "[vulkan] %s=%s (set by the player)\n", d.name, v);
+            continue;
+        }
+        _putenv_s(d.name, d.value);
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    KeepForeignVulkanLayersOut();
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--gpu-test") return gpu::Init() ? 0 : 1;  // device bring-up only
     }
