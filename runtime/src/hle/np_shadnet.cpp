@@ -1226,6 +1226,25 @@ void StartLink() {
     }
     if (const char* p = std::getenv("LBP3_P2P_TEST_LATE"); p && *p) c.testLateEvery = std::atoi(p);
     if (const char* p = std::getenv("LBP3_P2P_TEST_DUP"); p && *p) c.testDupEvery = std::atoi(p);
+    if (const char* p = std::getenv("LBP3_P2P_TEST_DELAY"); p && *p) {
+        // "ms" or "ms,jitter": every packet from another player is handled that late (tests). Set on
+        // both players, the link's RTT is twice the delay plus the jitter's mean.
+        c.testDelayMs = std::max(0, std::atoi(p));
+        if (const char* comma = std::strchr(p, ',')) c.testJitterMs = std::max(0, std::atoi(comma + 1));
+        std::fprintf(stderr, "[p2p] LBP3_P2P_TEST_DELAY=%s: incoming packets %d ms late, jitter up to %d ms (a test)\n", p,
+                     c.testDelayMs, c.testJitterMs);
+    }
+    if (const char* p = std::getenv("LBP3_P2P_TEST_HOLD"); p && *p) {
+        // "seconds,after": once, `after` seconds after the first game datagram arrives, everything
+        // that comes in during `seconds` is held and passed together at the end (tests).
+        c.testHoldMs = std::max(0, static_cast<int>(std::atof(p) * 1000));
+        if (const char* comma = std::strchr(p, ','))
+            c.testHoldAfterMs = std::max(0, static_cast<int>(std::atof(comma + 1) * 1000));
+        std::fprintf(stderr,
+                     "[p2p] LBP3_P2P_TEST_HOLD=%s: incoming packets held for %d ms, %d ms after the first game datagram "
+                     "(a test)\n",
+                     p, c.testHoldMs, c.testHoldAfterMs);
+    }
     if (const char* p = std::getenv("LBP3_P2P_DIAG"); p && *p == '1') {
         c.diag = true;
         std::fprintf(stderr, "[p2p] LBP3_P2P_DIAG=1: sequence numbers and send times on game datagrams "

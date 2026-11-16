@@ -93,6 +93,12 @@ struct Config {
     // Tests, on incoming game datagrams: drop `testLossBurst` out of every `testLossEvery`; hold every
     // `testLateEvery`th back 50 ms (its successors overtake it); handle every `testDupEvery`th twice.
     int testLossEvery = 0, testLossBurst = 1, testLateEvery = 0, testDupEvery = 0;
+    // Tests, on every incoming packet of a player (the link's own PINGs too, so its RTT shows the
+    // delay): each is handled `testDelayMs` late plus up to `testJitterMs` more, in the order it came.
+    // And once, `testHoldAfterMs` after the first game datagram, everything that arrives during
+    // `testHoldMs` is handled together at the end of that time (a stall, then a burst; nothing lost).
+    // Set on one player they slow one direction; the faults above apply after them.
+    int testDelayMs = 0, testJitterMs = 0, testHoldMs = 0, testHoldAfterMs = 0;
     bool testNoBye = false;  // tests: leave without BYE (as if it were lost)
     // After a connection ends (our game ended it, or the peer's BYE), the two games' datagrams still
     // pass this long; the game has already heard DEAD. On a PS4 the P2P socket isn't tied to the
@@ -153,6 +159,7 @@ public:
         // DATA3: datagrams filled in from a later one's copies, sent again on request, requests sent,
         // given up on; and incoming ones dropped by the test setting.
         uint64_t recovered = 0, resent = 0, nacks = 0, skipped = 0, testDropped = 0, testLate = 0, testDuplicated = 0;
+        uint64_t testDelayed = 0, testHeld = 0;  // Config::testDelayMs / testJitterMs, Config::testHoldMs
     };
     Stats GetStats() const;
 

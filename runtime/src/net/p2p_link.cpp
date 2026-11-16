@@ -192,6 +192,11 @@ struct Link::Impl {
         bool relayed;
     };
     std::deque<Delayed> delayed;  // Config::testLateEvery (the link's thread only)
+    // Config::testDelayMs, testJitterMs and testHoldMs (the link's thread only): in arrival order.
+    std::deque<Delayed> slow;
+    Clock::time_point slowLast{}, holdFrom{}, holdTo{};
+    bool holdArmed = false, holdLogged = false, holdEndLogged = false;
+    std::mt19937 testRng{20261116};
     Diag diag;
     std::deque<Rec> ring;  // Config::diag: game datagrams of the last 20 s
     int pathLogs = 0;
@@ -496,8 +501,41 @@ struct Link::Impl {
         }
     }
 
-    // The link's thread: the Config::test* faults on incoming game datagrams, then the packet.
+    // The link's thread: Config::testDelayMs, testJitterMs and testHoldMs on every packet of a player,
+    // then the other test faults and the packet. With none of the three set, nothing here runs.
     void HandlePeerPacket(const uint8_t* d, size_t n, const Endpoint& src, bool relayed, Clock::time_point now) {
+        if (cfg.testDelayMs <= 0 && cfg.testJitterMs <= 0 && cfg.testHoldMs <= 0) {
+            HandlePeerPacketFaults(d, n, src, relayed, now);
+            return;
+        }
+        const bool game = n >= 5 && std::memcmp(d, kMagic, 4) == 0 && (d[4] == kData || d[4] == kData2 || d[4] == kData3);
+        if (cfg.testHoldMs > 0 && !holdArmed && game) {
+            holdArmed = true;
+            holdFrom = now + std::chrono::milliseconds(std::max(0, cfg.testHoldAfterMs));
+            holdTo = holdFrom + std::chrono::milliseconds(cfg.testHoldMs);
+        }
+        Clock::time_point at = now + std::chrono::milliseconds(std::max(0, cfg.testDelayMs));
+        if (cfg.testJitterMs > 0)
+            at += std::chrono::microseconds(std::uniform_int_distribution<int>(0, cfg.testJitterMs * 1000)(testRng));
+        const bool held = holdArmed && now >= holdFrom && now < holdTo;
+        if (held) {
+            at = std::max(at, holdTo);
+            if (!holdLogged) {
+                holdLogged = true;
+                std::fprintf(stderr, "[p2p-test] %s holding every incoming packet back for %d ms (LBP3_P2P_TEST_HOLD)\n",
+                             core::Stamp().text, cfg.testHoldMs);
+            }
+        }
+        if (at < slowLast) at = slowLast;  // in the order they came
+        slowLast = at;
+        slow.push_back({at, std::vector<uint8_t>(d, d + n), src, relayed});
+        std::lock_guard lk(m);
+        ++stats.testDelayed;
+        if (held) ++stats.testHeld;
+    }
+
+    // The link's thread: the Config::test* faults on incoming game datagrams, then the packet.
+    void HandlePeerPacketFaults(const uint8_t* d, size_t n, const Endpoint& src, bool relayed, Clock::time_point now) {
         const bool game = n >= 5 && std::memcmp(d, kMagic, 4) == 0 && (d[4] == kData || d[4] == kData2 || d[4] == kData3);
         if (game && (cfg.testLossEvery > 0 || cfg.testLateEvery > 0 || cfg.testDupEvery > 0)) {
             const uint64_t c = testCounter++;
@@ -868,6 +906,10 @@ struct Link::Impl {
             FD_ZERO(&rd);
             FD_SET(sock, &rd);
             timeval tv{0, 20000};
+            if (!slow.empty()) {  // Config::testDelayMs: wake when the next packet is due
+                const auto us = std::chrono::duration_cast<std::chrono::microseconds>(slow.front().at - Clock::now()).count();
+                tv.tv_usec = static_cast<long>(std::clamp<long long>(us, 0, 20000));
+            }
             const int r = select(0, &rd, nullptr, nullptr, &tv);
             const auto now = Clock::now();
             if (r > 0) {
@@ -888,6 +930,15 @@ struct Link::Impl {
                 }
             }
             Tick(Clock::now());
+            while (!slow.empty() && slow.front().at <= Clock::now()) {
+                const Delayed e = std::move(slow.front());
+                slow.pop_front();
+                if (holdLogged && !holdEndLogged && e.at >= holdTo) {
+                    holdEndLogged = true;
+                    std::fprintf(stderr, "[p2p-test] %s the held packets pass now\n", core::Stamp().text);
+                }
+                HandlePeerPacketFaults(e.packet.data(), e.packet.size(), e.src, e.relayed, Clock::now());
+            }
             while (!delayed.empty() && delayed.front().at <= Clock::now()) {
                 const Delayed e = std::move(delayed.front());
                 delayed.pop_front();

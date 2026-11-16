@@ -587,6 +587,102 @@ int main() {
         CHECK(sb.skipped == 0 && sa.skipped == 0);
     }
 
+    // --- 15a..15c. the test delay, jitter and hold (Config::testDelayMs, testJitterMs, testHoldMs) ---
+    {
+        struct Slow {
+            std::vector<std::string> gotB;  // what B's game got from A, in arrival order
+            Link::Stats a, b;
+            int rttUsA = 0;      // A's RTT to B, once measured
+            int firstMs = 0;     // from A's first send to B's first delivery
+            int longestGapMs = 0;  // the longest time B's game got nothing while A was sending
+        };
+        // A sends `count` numbered datagrams 2 ms apart; B's deliveries are sampled every 2 ms.
+        auto slowRun = [&](const char* what, int delayA, int delayB, int jitterB, int holdB, int holdAfterB, int count) {
+            Slow out;
+            UdpMock mock;
+            CHECK(mock.Start());
+            Link a, b;
+            Received atA, atB;
+            Sink(a, atA);
+            Sink(b, atB);
+            Config ca = PlayerConfig("Alice_1", mock, {}), cb = PlayerConfig("Bob_2", mock, {"Alice_1"});
+            ca.testDelayMs = delayA;
+            cb.testDelayMs = delayB;
+            cb.testJitterMs = jitterB;
+            cb.testHoldMs = holdB;
+            cb.testHoldAfterMs = holdAfterB;
+            CHECK(a.Start(ca));
+            CHECK(b.Start(cb));
+            CHECK(WaitFor([&] { return a.External().Valid() && b.External().Valid(); }));
+            a.Activate("Bob_2");
+            std::vector<Event> evA, evB;
+            CHECK(WaitFor([&] { return HasEvent(evA, a, Event::Established, "Bob_2"); }));
+            CHECK(WaitFor([&] { return HasEvent(evB, b, Event::PeerActivated, "Alice_1"); }));
+            CHECK(WaitFor([&] { return a.Info("Bob_2").rttUs > 0; }, 6000));
+            out.rttUsA = a.Info("Bob_2").rttUs;
+            const Endpoint toB = a.Info("Bob_2").gameAddr;
+            using SteadyClock = std::chrono::steady_clock;
+            const auto start = SteadyClock::now();
+            auto lastChange = start;
+            size_t seen = 0;
+            auto sample = [&] {
+                const auto now = SteadyClock::now();
+                const size_t c = atB.Count();
+                if (c != seen) {
+                    const int gap = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - lastChange).count());
+                    if (seen == 0) out.firstMs = gap;
+                    else out.longestGapMs = std::max(out.longestGapMs, gap);
+                    seen = c;
+                    lastChange = now;
+                }
+            };
+            for (int i = 0; i < count; ++i) {
+                const std::string msg = "frame " + std::to_string(i);
+                a.SendData(toB, 3658, 3658, msg.data(), msg.size());
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                sample();
+            }
+            WaitFor([&] { sample(); return atB.Count() >= static_cast<size_t>(count); }, 6000);
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));  // nothing more may come
+            {
+                std::lock_guard lk(atB.m);
+                for (const auto& d : atB.data) out.gotB.emplace_back(d.begin(), d.end());
+            }
+            out.a = a.GetStats();
+            out.b = b.GetStats();
+            std::printf("  %s: %zu of %d arrived; rtt %d ms, first after %d ms, longest gap %d ms\n", what, out.gotB.size(),
+                        count, out.rttUsA / 1000, out.firstMs, out.longestGapMs);
+            a.Stop();
+            b.Stop();
+            mock.Stop();
+            return out;
+        };
+        // 15a. 60 ms each way: the link's own RTT shows both, and a datagram takes the one-way delay.
+        Slow r = slowRun("60 ms each way", 60, 60, 0, 0, 0, 100);
+        CHECK(inOrder(r.gotB, 100));
+        CHECK(r.rttUsA >= 115'000 && r.rttUsA < 300'000);
+        CHECK(r.firstMs >= 55 && r.firstMs < 250);
+        CHECK(r.a.testDelayed > 0 && r.b.testDelayed >= 100 && r.b.testHeld == 0);
+        // 15b. 20 ms and up to 40 ms of jitter, one direction only: still in the order sent, so the
+        // gap-free link has nothing to repair.
+        r = slowRun("20 ms + 40 ms jitter, one way", 0, 20, 40, 0, 0, 150);
+        CHECK(inOrder(r.gotB, 150));
+        CHECK(r.a.testDelayed == 0 && r.b.testDelayed >= 150);
+        CHECK(r.b.nacks == 0 && r.b.skipped == 0 && r.b.recovered == 0);
+        CHECK(r.rttUsA >= 15'000);
+        // 15c. One direction held for 600 ms, 100 ms after the first datagram: B's game gets nothing
+        // that long, then all of it, in order, with none lost and none asked for again.
+        r = slowRun("held 600 ms, one way", 0, 0, 0, 600, 100, 500);
+        CHECK(inOrder(r.gotB, 500));
+        CHECK(r.b.testHeld >= 200 && r.a.testHeld == 0);
+        CHECK(r.longestGapMs >= 450 && r.longestGapMs < 1200);
+        CHECK(r.b.skipped == 0);
+        // Off: none of it counts anything (the path with the settings off is the one before them).
+        Link::Stats sa, sb;
+        run("settings off", false, true, {}, 50, &sa, &sb);
+        CHECK(sa.testDelayed == 0 && sb.testDelayed == 0 && sa.testHeld == 0 && sb.testHeld == 0);
+    }
+
     // --- 16..18. leaving and joining again: DATA3 counts from 0 again on both sides ---------------
     {
         UdpMock mock;
