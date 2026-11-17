@@ -702,26 +702,38 @@ std::string SesExchange() {
     if (Read(hostObj + 0xa10 + 0x2e0, head) && head && Read(head + 8, root)) {
         // The tree, from its root, 16 nodes at most. It is read from another thread: every step is
         // checked, and a torn read only costs this line.
-        uint64_t stack[16];
-        int depth = 0, seen = 0;
+        // Two kinds of entry share the map (docs/research/netcode-awaited-entries-after-join.md): those of
+        // a game state exchange, and those of a data labels message (key type 0x42 at +0x38). A labels
+        // message without labels has an all-zero hash (+0x24, 16 bytes); nobody ever reports those
+        // loaded and the game keeps them for the session, so they are left out here. 512 nodes are
+        // looked at, which is over a hundred level loads with four players.
+        uint64_t stack[64];
+        int depth = 0, seen = 0, active = 0;
         std::string waiting, loaded;
         if (root != head) stack[depth++] = root;
-        while (depth > 0 && seen < 16) {
+        while (depth > 0 && seen < 512) {
             const uint64_t n = stack[--depth];
             uint8_t isHead = 1, done = 0;
             uint64_t left = 0, right = 0, slot = 0;
             if (!Read(n + 0x19, isHead) || isHead || !Read(n, left) || !Read(n + 0x10, right)) continue;
             ++seen;
+            if (depth < 63 && left && left != head) stack[depth++] = left;
+            if (depth < 63 && right && right != head) stack[depth++] = right;
+            int32_t type = 0;
+            uint64_t hash[2] = {};
+            Read(n + 0x38, type);
+            Read(n + 0x24, hash);
+            const bool labels = type == 0x42;
+            if (labels && !hash[0] && !hash[1]) continue;
+            ++active;
             Read(n + 0x40, done);
             Read(n + 0x48, slot);
             const uint64_t first = hostObj + 0x500;
             const std::string who =
                 slot >= first && slot < first + 4 * 0x140 ? std::to_string((slot - first) / 0x140) : std::string("?");
-            (done ? loaded : waiting) += " [" + who + "]";
-            if (depth < 15 && left && left != head) stack[depth++] = left;
-            if (depth < 15 && right && right != head) stack[depth++] = right;
+            (done ? loaded : waiting) += " [" + who + (labels ? ", labels]" : "]");
         }
-        if (seen)
+        if (active)
             out += " loaded by the host thread's slots:" + (loaded.empty() ? std::string(" none") : loaded) +
                    ", awaited:" + (waiting.empty() ? std::string(" none") : waiting);
     }
