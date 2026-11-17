@@ -1479,7 +1479,8 @@ int PS4_SYSV_ABI sceNpSignalingTerminateConnection(int32_t ctxId, int32_t connId
                      "%.1f s ago, %s, %s\n",
                      core::Stamp().text, peer.c_str(), info.msSinceActive < 0 ? -1.0 : info.msSinceActive / 1e3,
                      info.msSinceDelivered < 0 ? -1.0 : info.msSinceDelivered / 1e3,
-                     info.state == net::p2p::State::None ? "no link" : info.relayed ? "relayed" : "direct",
+                     info.state == net::p2p::State::None ? "no link"
+                                                         : info.relayed ? "the link sends relayed" : "the link sends direct",
                      core::seslog::PlayerState(peer).c_str());
         g_link->Terminate(peer);
     }

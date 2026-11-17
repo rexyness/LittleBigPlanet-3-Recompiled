@@ -32,16 +32,17 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <vector>
 #include <set>
 #include <thread>
 
 #include "core/log_stamp.h"
 #include "core/session_log.h"
-#include "hle/online.h"
 #include "core/runner.h"
 #include "core/module.h"
 #include "hle/abi.h"
+#include "hle/online.h"
 
 namespace core {
 namespace {
@@ -554,7 +555,7 @@ bool InstallRttStub(Module& m, uint8_t* rtt) {
 //     "[ses-conn]" line per connection (send budget, cuts, the game's RTT and its samples).
 // Three calls of the game are redirected, only while online: the RTT sample (counted, never changed),
 // and on the host thread the call that restarts a slot's timer at every INPUTS message (eboot+0x39e822)
-// and the call that makes a frame for everyone (eboot+0x3a0a16). Offsets from the research notes
+// and the call that sends a frame it built to everyone (eboot+0x39f09e). Offsets from the research notes
 // (docs/research/netcode-*.md). LBP3_SESSION_LOG=0 turns it all off.
 using SesClock = std::chrono::steady_clock;
 int64_t SesNowUs() {
@@ -563,7 +564,7 @@ int64_t SesNowUs() {
 constexpr int64_t kSesHourUs = 3600ll * 1000 * 1000;
 
 struct FlipCounts {
-    std::atomic<uint32_t> flips{0}, steps{0}, noStep{0}, multi{0}, longestRun{0};
+    std::atomic<uint32_t> flips{0}, steps{0}, noStep{0}, multi{0}, longestRun{0}, jumps{0};
 } g_flip;
 std::atomic<uint32_t> g_socketDrops{0};
 std::atomic<core::seslog::LinkRtt> g_linkRtt{nullptr};
@@ -575,7 +576,7 @@ struct InputCounts {
 } g_inputs[4];
 struct FrameCounts {
     std::atomic<int64_t> lastUs{0};
-    std::atomic<uint32_t> made{0}, longestGapUs{0}, waits{0}, noFrame{0};
+    std::atomic<uint32_t> made{0}, longestGapUs{0}, waits{0}, catchUp{0};
 } g_frames;
 
 void RaiseMax(std::atomic<uint32_t>& a, uint32_t v) {
@@ -595,19 +596,15 @@ void PS4_SYSV_ABI NoteInputs(uint64_t slot) {
     c.count.fetch_add(1, std::memory_order_relaxed);
 }
 
-// Host thread: the host update asked for a frame for everyone and got one or not. A wait is a pause
-// of more than 50 ms between two frames (they are 33.3 ms apart).
-void PS4_SYSV_ABI NoteFrame(uint32_t produced, uint32_t first) {
-    (void)first;
-    if (!(produced & 0xff)) {
-        g_frames.noFrame.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
+// Host thread: a frame for everyone was built and is being sent. A wait is a pause of more than 50 ms
+// between two frames (they are 33.3 ms apart); a catch-up frame comes within 10 ms of the one before.
+void PS4_SYSV_ABI NoteFrame() {
     const int64_t now = SesNowUs();
     const int64_t last = g_frames.lastUs.exchange(now, std::memory_order_relaxed);
     if (last && now - last < kSesHourUs) {
         RaiseMax(g_frames.longestGapUs, static_cast<uint32_t>(now - last));
         if (now - last > 50000) g_frames.waits.fetch_add(1, std::memory_order_relaxed);
+        if (now - last < 10000) g_frames.catchUp.fetch_add(1, std::memory_order_relaxed);
     }
     g_frames.made.fetch_add(1, std::memory_order_relaxed);
 }
@@ -620,6 +617,16 @@ std::string SesName(uint64_t at) {
     return name;
 }
 
+// Each player's last state as the session log's thread saw it: the game clears a slot before it ends
+// the connection, so the line at that moment needs what was there.
+struct LastState {
+    std::string name;
+    int state = 0;
+    int64_t us = 0;
+};
+std::mutex g_lastStateMutex;
+LastState g_lastState[8];
+
 // The game's table of the other players: "[i] name state n", and the same for the host thread's own.
 std::string SesPlayers(bool& any) {
     std::string out;
@@ -630,13 +637,18 @@ std::string SesPlayers(bool& any) {
             int32_t state = 0;
             if (!Read(slots + 0x300ull * i + 0x2f8, state) || state == 0) continue;
             any = true;
-            out += " [" + std::to_string(i) + "] " + SesName(slots + 0x300ull * i) + " state " + std::to_string(state);
+            const std::string name = SesName(slots + 0x300ull * i);
+            out += " [" + std::to_string(i) + "] " + name + " state " + std::to_string(state);
+            std::lock_guard lk(g_lastStateMutex);
+            g_lastState[i] = {name, state, SesNowUs()};
         }
     }
     if (out.empty()) out = " none";
+    // The host thread's table means something only while this PC hosts: its own INPUTS reach it then.
     std::string host;
     const uint64_t h = reinterpret_cast<uint64_t>(g_base) + 0x1322760 + 0x500;
-    for (int i = 0; i < 4; ++i) {
+    const int64_t own = g_frames.lastUs.load(std::memory_order_relaxed);
+    for (int i = 0; i < 4 && own && SesNowUs() - own < 30000000; ++i) {
         int32_t state = 0;
         if (!Read(h + 0x140ull * i + 0x130, state) || state == 0) continue;
         host += " [" + std::to_string(i) + "] state " + std::to_string(state);
@@ -796,16 +808,17 @@ void SessionLogThread() {
         windowStart = now;
         const uint32_t flips = g_flip.flips.exchange(0), steps = g_flip.steps.exchange(0),
                        noStep = g_flip.noStep.exchange(0), multi = g_flip.multi.exchange(0),
-                       run = g_flip.longestRun.exchange(0), drops = g_socketDrops.exchange(0);
+                       run = g_flip.longestRun.exchange(0), drops = g_socketDrops.exchange(0),
+                       jumps = g_flip.jumps.exchange(0);
         std::string host;
         const uint32_t made = g_frames.made.exchange(0), frameGap = g_frames.longestGapUs.exchange(0),
-                       waits = g_frames.waits.exchange(0), noFrame = g_frames.noFrame.exchange(0);
-        if (made || noFrame) {
+                       waits = g_frames.waits.exchange(0), catchUp = g_frames.catchUp.exchange(0);
+        if (made) {
             char b[200];
             std::snprintf(b, sizeof(b),
-                          "; as host: %u frames made, longest %.0f ms between two, %u waits over 50 ms, %u updates with "
-                          "no frame; INPUTS",
-                          made, frameGap / 1e3, waits, noFrame);
+                          "; as host: %u frames made, longest %.0f ms between two, %u waits over 50 ms, %u catch-up "
+                          "frames; INPUTS",
+                          made, frameGap / 1e3, waits, catchUp);
             host = b;
             for (int i = 0; i < 4; ++i) {
                 const uint32_t n = g_inputs[i].count.exchange(0), gap = g_inputs[i].longestGapUs.exchange(0);
@@ -818,8 +831,9 @@ void SessionLogThread() {
         }
         std::fprintf(stderr,
                      "[ses-win] %s %.1f s: %u flips, %u steps, %u flips with no step (longest run %u), %u with two or "
-                     "more; simulation %s, loading screen %s; %u datagrams dropped at the socket queue%s\n",
-                     core::Stamp().text, secs, flips, steps, noStep, run, multi, running ? "running" : "stopped",
+                     "more, %u step counter resets; simulation %s, loading screen %s; %u datagrams dropped at the "
+                     "socket queue%s\n",
+                     core::Stamp().text, secs, flips, steps, noStep, run, multi, jumps, running ? "running" : "stopped",
                      loading ? "up" : "off", drops, host.c_str());
         const int64_t gameNow = reinterpret_cast<Clock>(g_base + 0x1b1b0)();
         const auto linkRtt = g_linkRtt.load();
@@ -883,29 +897,22 @@ void ApplySessionLog(Module& m, uint8_t* mem) {
     Put(o, {0x48, 0xb8});                                      // mov rax, imm64
     Put64(o, reinterpret_cast<uint64_t>(m.Addr(0x3abeb0)));
     Put(o, {0xff, 0xe0});                                      // jmp rax
-    // Frame stub: the game's call (rdi, esi = first call of the update), then NoteFrame(al, esi); the
-    // game's result is returned.
+    // Frame stub: NoteFrame() with the argument registers kept, then on to the game's send of the frame.
     uint8_t* frame = mem + 128;
     o = frame;
-    Put(o, {0x53});                    // push rbx
-    Put(o, {0x89, 0xf3});              // mov ebx, esi
-    Put(o, {0x48, 0xb8});              // mov rax, imm64
-    Put64(o, reinterpret_cast<uint64_t>(m.Addr(0x39ee60)));
-    Put(o, {0xff, 0xd0});              // call rax
-    Put(o, {0x50});                    // push rax
-    Put(o, {0x48, 0x83, 0xec, 0x08});  // sub rsp, 8
-    Put(o, {0x89, 0xc7});              // mov edi, eax
-    Put(o, {0x89, 0xde});              // mov esi, ebx
-    Put(o, {0x48, 0xb8});              // mov rax, imm64
+    Put(o, {0x57, 0x56, 0x52, 0x51, 0x41, 0x50, 0x41, 0x51});  // push rdi, rsi, rdx, rcx, r8, r9
+    Put(o, {0x48, 0x83, 0xec, 0x08});                          // sub rsp, 8
+    Put(o, {0x48, 0xb8});                                      // mov rax, imm64
     Put64(o, reinterpret_cast<uint64_t>(&NoteFrame));
-    Put(o, {0xff, 0xd0});              // call rax
-    Put(o, {0x48, 0x83, 0xc4, 0x08});  // add rsp, 8
-    Put(o, {0x58});                    // pop rax
-    Put(o, {0x5b});                    // pop rbx
-    Put(o, {0xc3});                    // ret
+    Put(o, {0xff, 0xd0});                                      // call rax
+    Put(o, {0x48, 0x83, 0xc4, 0x08});                          // add rsp, 8
+    Put(o, {0x41, 0x59, 0x41, 0x58, 0x59, 0x5a, 0x5e, 0x5f});  // pop r9, r8, rcx, rdx, rsi, rdi
+    Put(o, {0x48, 0xb8});                                      // mov rax, imm64
+    Put64(o, reinterpret_cast<uint64_t>(m.Addr(0x39e9f0)));
+    Put(o, {0xff, 0xe0});                                      // jmp rax
     FlushInstructionCache(GetCurrentProcess(), mem, 256);
     const bool a = Redirect(m, 0x39e822, 0x3abeb0, inputs);
-    const bool b = Redirect(m, 0x3a0a16, 0x39ee60, frame);
+    const bool b = Redirect(m, 0x39f09e, 0x39e9f0, frame);
     const bool r = InstallRttStub(m, mem + 256);
     std::thread(SessionLogThread).detach();
     std::fprintf(stderr, "[ses] the session log is on (INPUTS %s, frames %s, RTT samples %s)\n", a ? "yes" : "no",
@@ -934,7 +941,11 @@ void NoteFlip() {
     const int d = sim - last;
     last = sim;
     g_flip.flips.fetch_add(1, std::memory_order_relaxed);
-    if (d > 0) {
+    if (d < 0 || d > 30) {
+        // The game set its step counter anew (a level load): not steps.
+        g_flip.jumps.fetch_add(1, std::memory_order_relaxed);
+        run = 0;
+    } else if (d > 0) {
         g_flip.steps.fetch_add(static_cast<uint32_t>(d), std::memory_order_relaxed);
         if (d > 1) g_flip.multi.fetch_add(1, std::memory_order_relaxed);
         run = 0;
@@ -952,6 +963,13 @@ std::string PlayerState(const std::string& name) {
         int32_t state = 0;
         if (!Read(slots + 0x300ull * i + 0x2f8, state) || state == 0 || SesName(slots + 0x300ull * i) != name) continue;
         return "slot " + std::to_string(i) + " in state " + std::to_string(state);
+    }
+    std::lock_guard lk(g_lastStateMutex);
+    for (const LastState& l : g_lastState) {
+        if (l.name != name) continue;
+        char b[80];
+        std::snprintf(b, sizeof(b), "no slot now (state %d %.1f s ago)", l.state, (SesNowUs() - l.us) / 1e6);
+        return b;
     }
     return "no slot";
 }
