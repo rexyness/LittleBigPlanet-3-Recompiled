@@ -93,6 +93,9 @@ struct Config {
     // Tests, on incoming game datagrams: drop `testLossBurst` out of every `testLossEvery`; hold every
     // `testLateEvery`th back 50 ms (its successors overtake it); handle every `testDupEvery`th twice.
     int testLossEvery = 0, testLossBurst = 1, testLateEvery = 0, testDupEvery = 0;
+    // A test: a "[p2p-dg]" line with the bytes of every game datagram sent, received or dropped by
+    // testLossEvery (plain DATA2 only, so with diag on and data3 off).
+    bool dumpBytes = false;
     // Tests, on every incoming packet of a player (the link's own PINGs too, so its RTT shows the
     // delay): each is handled `testDelayMs` late plus up to `testJitterMs` more, in the order it came.
     // And once, `testHoldAfterMs` after the first game datagram, everything that arrives during

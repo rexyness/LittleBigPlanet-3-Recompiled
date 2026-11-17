@@ -543,6 +543,18 @@ struct Link::Impl {
     }
 
 
+    // Config::dumpBytes: one line per game datagram with its bytes (a test; the fatal-datagram runs).
+    static void DumpDatagram(const char* what, uint32_t seq, const uint8_t* d, size_t n) {
+        std::string hex;
+        hex.reserve(n * 2);
+        static const char* k = "0123456789abcdef";
+        for (size_t i = 0; i < n; ++i) {
+            hex.push_back(k[d[i] >> 4]);
+            hex.push_back(k[d[i] & 15]);
+        }
+        std::fprintf(stderr, "[p2p-dg] %s %s seq %u len %zu: %s\n", core::Stamp().text, what, seq, n, hex.c_str());
+    }
+
     // Lock held.
     void Remember(const Rec& r) {
         ring.push_back(r);
@@ -630,7 +642,8 @@ struct Link::Impl {
             const uint64_t c = testCounter++;
             if (cfg.testLossEvery > 0 && static_cast<int>(c % static_cast<uint64_t>(cfg.testLossEvery)) < cfg.testLossBurst) {
                 std::lock_guard lk(m);
-                if (++stats.testDropped <= 20)
+                if (cfg.dumpBytes && d[4] == kData2 && n >= 25) DumpDatagram("DROP", Get32(d + 13), d + 25, n - 25);
+                if (++stats.testDropped <= 20 || cfg.dumpBytes)
                     std::fprintf(stderr, "[p2p-test] %s an incoming game datagram dropped (LBP3_P2P_TEST_LOSS)\n",
                                  core::Stamp().text);
                 return;
@@ -791,6 +804,7 @@ struct Link::Impl {
                              relayed ? "relayed" : "direct");
             if (type == kData2) NoteDiag(*p, Get32(d + 13), static_cast<int64_t>(Get64(d + 17)), n - head, relayed);
             NoteDelivered(*p, n - head, now);
+            if (cfg.dumpBytes) DumpDatagram("rx", type == kData2 ? Get32(d + 13) : 0, d + head, n - head);
             if (sink) sink(p->gameAddr, Get16(d + 5), Get16(d + 7), d + head, n - head);
             break;
         }
@@ -1423,6 +1437,7 @@ bool Link::SendData(const Endpoint& gameAddr, uint16_t srcVport, uint16_t dstVpo
         I.diag.maxTx = std::max(I.diag.maxTx, len);
         I.Remember({sentAt, seq, static_cast<uint32_t>(len), -1, 't', I.PathOf(peer, now)});
     }
+    if (I.cfg.dumpBytes) Impl::DumpDatagram("tx", seq, p, len);
     I.SendToPeer(peer, b, now);
     return true;
 }

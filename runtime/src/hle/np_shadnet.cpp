@@ -1224,6 +1224,10 @@ void StartLink() {
         if (const char* comma = std::strchr(p, ',')) c.testLossBurst = std::max(1, std::atoi(comma + 1));
         std::fprintf(stderr, "[p2p] LBP3_P2P_TEST_LOSS=%s: dropping incoming game datagrams (a test)\n", p);
     }
+    if (const char* p = std::getenv("LBP3_P2P_TEST_DUMP"); p && *p == '1') {
+        c.dumpBytes = true;
+        std::fprintf(stderr, "[p2p] LBP3_P2P_TEST_DUMP=1: the bytes of every game datagram logged (a test)\n");
+    }
     if (const char* p = std::getenv("LBP3_P2P_TEST_LATE"); p && *p) c.testLateEvery = std::atoi(p);
     if (const char* p = std::getenv("LBP3_P2P_TEST_DUP"); p && *p) c.testDupEvery = std::atoi(p);
     if (const char* p = std::getenv("LBP3_P2P_TEST_DELAY"); p && *p) {

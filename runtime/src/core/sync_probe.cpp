@@ -304,6 +304,90 @@ void LogSlots() {
     }
 }
 
+// LBP3_CONN_PROBE=1 (with the sync probe): a "[conn]" line per connection object once a second, from
+// a thread of ours that only reads. Per connection (the list of LogSlots): seconds since the last
+// keepalive was read (+0x160) and since +0xc0; unacknowledged messages (+0x188); messages held out of
+// order (+0x270); the last delivered numbers (+0x50, +0x68); the send budget and cap (+0x118,
+// +0x11c), the growth step (+0x12c), the last notice and cut (+0x120, +0x124, raw); bytes sent in the
+// last half second (+0x110); the game's RTT in microseconds (+0xf0). Offsets from the research notes
+// (netcode-game-netcode-limits, netcode-send-budget-cuts). For the fatal-datagram runs.
+void ConnProbeThread() {
+    using Clock = int64_t(PS4_SYSV_ABI*)();
+    for (;;) {
+        Sleep(1000);
+        uint64_t net = 0, list = 0;
+        uint32_t count = 0;
+        if (!g_base || !Read(reinterpret_cast<uint64_t>(g_base + 0x130d5b8 + 0x80), net) || !net) continue;
+        Read(net + 0x50, list);
+        Read(net + 0x58, count);
+        const int64_t now = reinterpret_cast<Clock>(g_base + 0x1b1b0)();
+        for (uint32_t j = 0; j < count && j < 8; ++j) {
+            uint64_t c = 0;
+            if (!Read(list + 8ull * j, c) || !c || !Readable(reinterpret_cast<const void*>(c), 0x280)) continue;
+            char name[17] = {};
+            std::memcpy(name, reinterpret_cast<const void*>(c + 0x10), 16);
+            for (char& ch : name)
+                if (ch && (ch < 0x20 || ch > 0x7e)) ch = '.';
+            auto u32 = [&](uint32_t off) { uint32_t v = 0; Read(c + off, v); return v; };
+            auto i64 = [&](uint32_t off) { int64_t v = 0; Read(c + off, v); return v; };
+            const int64_t ka = i64(0x160), c0 = i64(0xc0), bye = i64(0x168);
+            std::fprintf(stderr,
+                         "[conn] %s %s: keepalive %.2f s ago, +0xc0 %.2f s ago, bye %d; unacked %u, held %u; "
+                         "delivered %u/%u; budget %u cap %u step %u notice %08x cut %08x; sent/0.5s %u; rtt %u us\n",
+                         core::Stamp().text, name, ka ? (now - ka) / 1e9 : -1.0, c0 ? (now - c0) / 1e9 : -1.0, bye != 0,
+                         u32(0x188), u32(0x270), u32(0x50), u32(0x68), u32(0x118), u32(0x11c), u32(0x12c), u32(0x120),
+                         u32(0x124), u32(0x110), u32(0xf0));
+        }
+    }
+}
+
+// LBP3_CONN_PROBE=1: the RTT sample the game takes when a message is acknowledged (eboot+0x37f0f1:
+// now - the message's first-send time at +0x88, through eboot+0x1b2a0 at +0x37f100, added to the
+// current half-second bucket). Logs every sample above 5 s with the message (0xb8 bytes in the
+// connection's unacknowledged list: number +0, flags +2 and +3, stream +0x1c, last send +0x80, first
+// send +0x88) and the acknowledgement entry (number +0, flags +2 and +3). Returns what the game's
+// own function returns.
+float PS4_SYSV_ABI LogRttSample(int64_t ns, uint64_t msg, uint64_t conn, uint64_t ack) {
+    using Seconds = float(PS4_SYSV_ABI*)(int64_t);
+    // LBP3_RTT_CLAMP=1 (a test): a negative sample counts as 0. The game's function takes the
+    // nanoseconds as unsigned, so -100 ns reads as 18 billion seconds.
+    static const bool clamp = [] {
+        const char* v = std::getenv("LBP3_RTT_CLAMP");
+        return v && *v == '1';
+    }();
+    if (clamp && ns < 0) {
+        static std::atomic<int> clamped{0};
+        const int n = clamped.fetch_add(1) + 1;
+        if (n <= 5 || n % 100 == 0)
+            std::fprintf(stderr, "[rtt] %s a sample of %lld ns counted as 0 (LBP3_RTT_CLAMP; %d so far)\n",
+                         core::Stamp().text, static_cast<long long>(ns), n);
+        ns = 0;
+    }
+    const float s = reinterpret_cast<Seconds>(g_base + 0x1b2a0)(ns);
+    static std::atomic<int> logged{0};
+    if ((s > 5.0f || s < 0.0f) && logged.fetch_add(1) < 400) {
+        char name[17] = {};
+        if (Readable(reinterpret_cast<const void*>(conn + 0x10), 16))
+            std::memcpy(name, reinterpret_cast<const void*>(conn + 0x10), 16);
+        uint16_t num = 0, ackNum = 0;
+        uint8_t f2 = 0, f3 = 0, a2 = 0, a3 = 0;
+        uint32_t stream = 0, left = 0, unacked = 0;
+        int64_t last = 0, first = 0;
+        uint64_t list = 0;
+        Read(msg, num); Read(msg + 2, f2); Read(msg + 3, f3); Read(msg + 0x1c, stream);
+        Read(msg + 0x80, last); Read(msg + 0x88, first); Read(msg + 0x90, left);
+        Read(ack, ackNum); Read(ack + 2, a2); Read(ack + 3, a3);
+        Read(conn + 0x180, list); Read(conn + 0x188, unacked);
+        std::fprintf(stderr,
+                     "[rtt] %s %s: sample %.3f s (%lld ns); message %u stream %u flags %u/%u, first send %lld, last send "
+                     "%lld, +0x90 %u, entry %llu of %u; ack %u flags %u/%u\n",
+                     core::Stamp().text, name, s, static_cast<long long>(ns), num, stream, f2, f3,
+                     static_cast<long long>(first), static_cast<long long>(last), left,
+                     static_cast<unsigned long long>(list ? (msg - list) / 0xb8 : 0), unacked, ackNum, a2, a3);
+    }
+    return s;
+}
+
 void PS4_SYSV_ABI LogSent(uint64_t world, uint32_t hash, uint32_t frame) {
     LogSlots();
     uint32_t count = 0;
@@ -482,6 +566,25 @@ void ApplySyncProbe(Module& m) {
     if (v[0] == '2' || std::getenv("LBP3_MSG_PROBE")) {
         const bool c = Redirect(m, kFetchCall, kFetchFn, fetched);
         std::fprintf(stderr, "[sync] session messages logged: %s\n", c ? "yes" : "no");
+    }
+    if (const char* cp = std::getenv("LBP3_CONN_PROBE"); cp && *cp == '1') {
+        // RTT stub: LogRttSample(rdi = ns, rbx = the message, r12 = the connection, r14 = the ack).
+        uint8_t* rtt = mem + 2048;
+        uint8_t* q = rtt;
+        Put(q, {0x48, 0x83, 0xec, 0x08});  // sub rsp, 8
+        Put(q, {0x48, 0x89, 0xde});        // mov rsi, rbx
+        Put(q, {0x4c, 0x89, 0xe2});        // mov rdx, r12
+        Put(q, {0x4c, 0x89, 0xf1});        // mov rcx, r14
+        Put(q, {0x48, 0xb8});              // mov rax, imm64
+        Put64(q, reinterpret_cast<uint64_t>(&LogRttSample));
+        Put(q, {0xff, 0xd0});              // call rax
+        Put(q, {0x48, 0x83, 0xc4, 0x08});  // add rsp, 8
+        Put(q, {0xc3});                    // ret
+        FlushInstructionCache(GetCurrentProcess(), rtt, 64);
+        const bool r = Redirect(m, 0x37f100, 0x1b2a0, rtt);
+        std::fprintf(stderr, "[sync] RTT samples above 5 s logged: %s\n", r ? "yes" : "no");
+        std::thread(ConnProbeThread).detach();
+        std::fprintf(stderr, "[sync] LBP3_CONN_PROBE=1: a [conn] line per connection every second\n");
     }
     std::fprintf(stderr, "[sync] LBP3_SYNC_PROBE=1: sync checks logged (sent %s, received %s)\n", a ? "yes" : "no",
                  b ? "yes" : "no");
