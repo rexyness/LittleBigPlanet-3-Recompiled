@@ -567,6 +567,42 @@ struct FlipCounts {
     std::atomic<uint32_t> flips{0}, steps{0}, noStep{0}, multi{0}, longestRun{0}, jumps{0};
 } g_flip;
 std::atomic<uint32_t> g_socketDrops{0};
+
+// Test settings of the session log's thread (the set-conditions runs; all off without their variable):
+//   LBP3_TEST_FREEZE=1: a number of milliseconds written to analysis\freeze_cmd.txt (in the working
+//     directory) stops the game's frame thread for that long at its next flip, as a shader build does.
+//     The link's thread and the others run on.
+//   LBP3_TEST_CATCHUP_FRAMES=n: FramesBeforeAgressiveCatchup in the game's network settings
+//     ([eboot+0x130d670]+0x68, 30 by default) is kept at n.
+//   LBP3_TEST_KICK_SECONDS=n: the game's kick limit (the float at eboot+0x1061c4c, 10.0) is set to n.
+std::atomic<int> g_freezeMs{0};
+int TestInt(const char* name) {
+    const char* v = std::getenv(name);
+    return v && *v ? std::atoi(v) : 0;
+}
+void SesTestSettings() {
+    static const bool freeze = TestInt("LBP3_TEST_FREEZE") == 1;
+    static const int catchUp = TestInt("LBP3_TEST_CATCHUP_FRAMES");
+    if (freeze) {
+        if (std::FILE* f = std::fopen("analysis/freeze_cmd.txt", "r")) {
+            int ms = 0;
+            const bool ok = std::fscanf(f, "%d", &ms) == 1;
+            std::fclose(f);
+            std::remove("analysis/freeze_cmd.txt");
+            if (ok && ms > 0 && ms <= 60000) g_freezeMs = ms;
+        }
+    }
+    if (catchUp > 0) {
+        uint64_t settings = 0;
+        int32_t have = 0;
+        if (Read(reinterpret_cast<uint64_t>(g_base + 0x130d670), settings) && settings && Read(settings + 0x68, have) &&
+            have != catchUp && have > 0 && have <= 1000) {
+            std::memcpy(reinterpret_cast<void*>(settings + 0x68), &catchUp, sizeof(catchUp));
+            std::fprintf(stderr, "[ses] %s LBP3_TEST_CATCHUP_FRAMES: FramesBeforeAgressiveCatchup was %d, now %d (a test)\n",
+                         core::Stamp().text, have, catchUp);
+        }
+    }
+}
 std::atomic<core::seslog::LinkRtt> g_linkRtt{nullptr};
 
 // The host thread's side: INPUTS as they reach the game, per slot of its table, and the frames made.
@@ -743,6 +779,7 @@ void SessionLogThread() {
     using Clock = int64_t(PS4_SYSV_ABI*)();
     for (;;) {
         Sleep(100);
+        SesTestSettings();
         const int64_t now = SesNowUs();
         bool any = false;
         const std::string players = SesPlayers(any);
@@ -947,6 +984,14 @@ void ApplySessionLog(Module& m, uint8_t* mem) {
     const bool a = Redirect(m, 0x39e822, 0x3abeb0, inputs);
     const bool b = Redirect(m, 0x39f09e, 0x39e9f0, frame);
     const bool r = InstallRttStub(m, mem + 256);
+    if (const int kick = TestInt("LBP3_TEST_KICK_SECONDS"); kick > 0) {
+        float was = 0;
+        std::memcpy(&was, m.Addr(0x1061c4c), sizeof(was));
+        const float now = static_cast<float>(kick);
+        if (was == 10.0f) std::memcpy(m.Addr(0x1061c4c), &now, sizeof(now));
+        std::fprintf(stderr, "[ses] LBP3_TEST_KICK_SECONDS: the kick limit was %.1f s, %s (a test)\n", was,
+                     was == 10.0f ? "now set" : "left alone: not the 10.0 expected");
+    }
     std::thread(SessionLogThread).detach();
     std::fprintf(stderr, "[ses] the session log is on (INPUTS %s, frames %s, RTT samples %s)\n", a ? "yes" : "no",
                  b ? "yes" : "no", r ? "yes" : "no");
@@ -967,6 +1012,11 @@ bool Enabled() {
 void NoteFlip() {
     static const bool on = Enabled();
     if (!on || !g_base) return;
+    if (const int ms = g_freezeMs.exchange(0, std::memory_order_relaxed)) {
+        std::fprintf(stderr, "[ses] %s test freeze: the frame thread stops for %d ms\n", core::Stamp().text, ms);
+        Sleep(static_cast<DWORD>(ms));
+        std::fprintf(stderr, "[ses] %s test freeze: over\n", core::Stamp().text);
+    }
     using Counter = int(PS4_SYSV_ABI*)();
     const int sim = reinterpret_cast<Counter>(g_base + 0x7c79e0)();
     static int last = sim;
