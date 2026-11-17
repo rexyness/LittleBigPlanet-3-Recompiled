@@ -657,8 +657,9 @@ std::string SesPlayers(bool& any) {
     return out;
 }
 
-// Who the host still waits for in a join's block, and what the resource transfer manager is moving.
-std::string SesBlockDetail() {
+// The host thread's game state exchange: who has reported the state loaded and who is awaited ("" = no
+// exchange is open).
+std::string SesExchange() {
     std::string out;
     const uint64_t hostObj = reinterpret_cast<uint64_t>(g_base) + 0x1322760;
     uint64_t head = 0, root = 0;
@@ -685,9 +686,15 @@ std::string SesBlockDetail() {
             if (depth < 15 && right && right != head) stack[depth++] = right;
         }
         if (seen)
-            out += "; game state loaded by the host thread's slots:" + (loaded.empty() ? std::string(" none") : loaded) +
+            out += " loaded by the host thread's slots:" + (loaded.empty() ? std::string(" none") : loaded) +
                    ", awaited:" + (waiting.empty() ? std::string(" none") : waiting);
     }
+    return out;
+}
+
+// What the resource transfer manager is moving ("" = nothing).
+std::string SesResources() {
+    std::string out;
     const uint64_t mgr = reinterpret_cast<uint64_t>(g_base) + 0x1315b18;
     std::string sending, fetching;
     for (int i = 0; i < 32; ++i) {
@@ -710,9 +717,15 @@ std::string SesBlockDetail() {
         std::snprintf(b, sizeof(b), " %u of %u", got, size);
         fetching += b;
     }
-    if (!sending.empty()) out += "; resources being sent:" + sending;
-    if (!fetching.empty()) out += "; resources being fetched:" + fetching;
+    if (!sending.empty()) out += " sending" + sending + ";";
+    if (!fetching.empty()) out += " fetching" + fetching + ";";
+    if (!out.empty()) out.pop_back();
     return out;
+}
+
+std::string SesBlockDetail() {
+    const std::string x = SesExchange(), r = SesResources();
+    return (x.empty() ? std::string() : "; game state" + x) + (r.empty() ? std::string() : "; resources:" + r);
 }
 
 void SessionLogThread() {
@@ -722,7 +735,9 @@ void SessionLogThread() {
         int64_t lastCutUs = 0;
     };
     std::vector<ConnSeen> seen;
-    std::string lastPlayers;
+    std::string lastPlayers, lastExchange;
+    bool resourcesMoving = false;
+    int64_t exchangeSince = 0, resourcesLastLine = 0;
     bool inSession = false, blockOpen = false, loading = false;
     int64_t blockSince = 0, blockLastLine = 0, loadingSince = 0, windowStart = SesNowUs();
     using Clock = int64_t(PS4_SYSV_ABI*)();
@@ -759,6 +774,24 @@ void SessionLogThread() {
             blockOpen = false;
             std::fprintf(stderr, "[ses] %s join block: over after %.1f s%s\n", core::Stamp().text,
                          (now - blockSince) / 1e6, SesBlockDetail().c_str());
+        }
+        // The exchange outlasts the block on the host: a line whenever who has loaded changes.
+        if (const std::string x = SesExchange(); x != lastExchange) {
+            if (lastExchange.empty()) exchangeSince = now;
+            if (x.empty())
+                std::fprintf(stderr, "[ses] %s game state exchange: over after %.1f s\n", core::Stamp().text,
+                             (now - exchangeSince) / 1e6);
+            else std::fprintf(stderr, "[ses] %s game state exchange:%s\n", core::Stamp().text, x.c_str());
+            lastExchange = x;
+        }
+        // Resources on the move outside a block: a line every 2 s, and one when they stop.
+        if (const std::string r = SesResources(); !r.empty() && running && now - resourcesLastLine >= 2000000) {
+            resourcesLastLine = now;
+            resourcesMoving = true;
+            std::fprintf(stderr, "[ses] %s resources:%s\n", core::Stamp().text, r.c_str());
+        } else if (r.empty() && resourcesMoving) {
+            resourcesMoving = false;
+            std::fprintf(stderr, "[ses] %s resources: none on the move now\n", core::Stamp().text);
         }
         if ((flag != 0) != loading) {
             loading = flag != 0;
@@ -825,13 +858,13 @@ void SessionLogThread() {
                 const int64_t last = g_inputs[i].lastUs.load();
                 if (!n && (!last || now - last > 60000000)) continue;
                 std::snprintf(b, sizeof(b), " [%d] %u, longest gap %.0f ms, last %.0f ms ago", i, n, gap / 1e3,
-                              last ? (now - last) / 1e3 : -1.0);
+                              last ? std::max<int64_t>(now - last, 0) / 1e3 : -1.0);
                 host += b;
             }
         }
         std::fprintf(stderr,
                      "[ses-win] %s %.1f s: %u flips, %u steps, %u flips with no step (longest run %u), %u with two or "
-                     "more, %u step counter resets; simulation %s, loading screen %s; %u datagrams dropped at the "
+                     "more, %u step counter jumps; simulation %s, loading screen %s; %u datagrams dropped at the "
                      "socket queue%s\n",
                      core::Stamp().text, secs, flips, steps, noStep, run, multi, jumps, running ? "running" : "stopped",
                      loading ? "up" : "off", drops, host.c_str());
@@ -942,7 +975,7 @@ void NoteFlip() {
     last = sim;
     g_flip.flips.fetch_add(1, std::memory_order_relaxed);
     if (d < 0 || d > 30) {
-        // The game set its step counter anew (a level load): not steps.
+        // The step counter went back or leapt (a level load, a prediction undone): not steps.
         g_flip.jumps.fetch_add(1, std::memory_order_relaxed);
         run = 0;
     } else if (d > 0) {
