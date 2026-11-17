@@ -674,6 +674,11 @@ int main() {
         // The session log's counts (PeerInfo): what the game got, the RTT's spread, packets and bytes.
         CHECK(r.ib.delivered == 100 && r.ia.delivered == 0);
         CHECK(r.ib.gapsOpened == 0 && r.ib.longestDeliverGapMs < 150);
+        // How long the connection has been up, and since the game last got a datagram (-1 = never).
+        CHECK(r.ia.msSinceActive >= 0 && r.ib.msSinceActive >= 0 && r.ib.msSinceActive < 60'000);
+        CHECK(r.ib.msSinceDelivered >= 0 && r.ib.msSinceDelivered <= r.ib.msSinceActive);
+        CHECK(r.ia.msSinceDelivered == -1);
+        CHECK(net::p2p::PeerInfo{}.msSinceActive == -1 && net::p2p::PeerInfo{}.msSinceDelivered == -1);
         CHECK(r.ia.pings > 0 && r.ia.pongs > 0 && r.ia.pongs <= r.ia.pings);
         CHECK(r.ia.rttMinUs >= 115'000 && r.ia.rttMaxUs >= r.ia.rttMinUs && r.ia.rttMaxUs < 400'000);
         CHECK(r.ia.txPackets >= 100 && r.ia.txBytes > 100 * 7 && r.ib.rxPackets >= 100 && r.ib.rxBytes > 100 * 7);
