@@ -21,6 +21,7 @@
 #include <ipexport.h>
 #include <icmpapi.h>
 
+#include "core/session_log.h"
 #include "core/wait_stats.h"
 #include "hle/kernel_errors.h"
 #include "hle/net_delay.h"
@@ -109,6 +110,7 @@ constexpr int kMsgPeek = 0x2;       // MSG_PEEK (FreeBSD): read the next datagra
 
 // Lock held: a datagram that didn't fit the socket's queue (dropped, as a full UDP buffer does).
 void NoteDropped(int s, const char* kind, size_t len) {
+    core::seslog::NoteSocketDrop();  // counted in the [ses-win] lines
     static int logged = 0;
     if (logged++ < 20)
         std::fprintf(stderr, "[net] the queue of socket %d is full (%zu): a %zu-byte %s datagram dropped\n", s,

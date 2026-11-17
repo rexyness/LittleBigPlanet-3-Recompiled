@@ -47,6 +47,7 @@
 
 #include "core/log_stamp.h"
 #include "core/runner.h"
+#include "core/session_log.h"
 #include "hle/common_dialog.h"
 #include "hle/kernel_errors.h"
 #include "hle/net_remote.h"
@@ -1275,6 +1276,12 @@ void StartLink() {
         return;
     }
     g_link = std::move(link);
+    // The session log prints the link's RTT next to the game's own.
+    core::seslog::SetLinkRtt([](const char* name) {
+        if (!g_link) return -1;
+        const net::p2p::PeerInfo info = g_link->Info(name);
+        return info.state == net::p2p::State::None ? -1 : info.rttUs;
+    });
     p2pnet::SetRemoteSend(&LinkSend);
     // Closing the window and Quit Game end the process at once (ExitProcess), which never ran the
     // link's Stop: the other players heard no BYE and waited for the game's own timeout (about 10 s)
@@ -1463,7 +1470,19 @@ int PS4_SYSV_ABI sceNpSignalingTerminateConnection(int32_t ctxId, int32_t connId
                 g_sigPending.push_back({c->second.cb, ctxId, connId, kSigEventDead, kSigErrTerminatedByMyself, c->second.arg});
         }
     }
-    if (g_link) g_link->Terminate(peer);
+    if (g_link) {
+        // The session log: how old the connection was, how long the game had heard nothing, and
+        // what the game thought of the player.
+        const net::p2p::PeerInfo info = g_link->Info(peer);
+        std::fprintf(stderr,
+                     "[ses] %s the game ends its connection to %s: up for %.1f s, last datagram given to the game "
+                     "%.1f s ago, %s, %s\n",
+                     core::Stamp().text, peer.c_str(), info.msSinceActive < 0 ? -1.0 : info.msSinceActive / 1e3,
+                     info.msSinceDelivered < 0 ? -1.0 : info.msSinceDelivered / 1e3,
+                     info.state == net::p2p::State::None ? "no link" : info.relayed ? "relayed" : "direct",
+                     core::seslog::PlayerState(peer).c_str());
+        g_link->Terminate(peer);
+    }
     return 0;
 }
 

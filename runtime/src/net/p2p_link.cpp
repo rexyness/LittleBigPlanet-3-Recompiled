@@ -168,6 +168,7 @@ struct Link::Impl {
         Counts win, tot;
         std::vector<int> winRtt;            // this window's RTT samples
         Clock::time_point lastDeliver{};    // the last datagram given to the game
+        Clock::time_point activeAt{};       // when the connection came up
         int deliverWarned = 0;              // 1 past 2 s without one, 2 past 5 s
         Clock::time_point gapOpened{};      // the DATA3 gap being waited behind
         uint32_t gapAt = 0;                 // its first missing number
@@ -590,6 +591,7 @@ struct Link::Impl {
     void SetActive(Peer& p) {
         if (p.state != State::Active) {
             p.state = State::Active;
+            p.activeAt = Clock::now();
             if (p.local) events.push_back({Event::Established, p.name, 0});
             else events.push_back({Event::PeerActivated, p.name, 0});
             std::fprintf(stderr, "[p2p] %s: connected (%s, game address %s) at %s, %lld ms after it began\n", p.name.c_str(),
@@ -1358,6 +1360,9 @@ PeerInfo Link::Info(const std::string& peer) const {
     info.txBytes = t.txBytes + w.txBytes;
     info.rxBytes = t.rxBytes + w.rxBytes;
     info.directHeard = t.directHeard + w.directHeard;
+    const auto now = Clock::now();
+    if (p.activeAt != Clock::time_point{}) info.msSinceActive = Ms(now - p.activeAt);
+    if (p.lastDeliver != Clock::time_point{}) info.msSinceDelivered = Ms(now - p.lastDeliver);
     return info;
 }
 

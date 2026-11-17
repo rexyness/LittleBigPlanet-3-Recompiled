@@ -20,6 +20,7 @@
 
 #include "core/log_stamp.h"
 #include "core/runner.h"
+#include "core/session_log.h"
 #include "hle/abi.h"
 #include "hle/kernel_errors.h"
 #include "hle/kernel_sync.h"
@@ -661,6 +662,7 @@ int PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void* const* 
     static const bool noted = (kernel::NoteMainThread(), true);  // the game's frame thread
     (void)noted;
     TraceSimSteps();
+    core::seslog::NoteFlip();  // online only: steps per flip for the [ses-win] lines
     const int simSteps = FrameGenSimSteps();
     const double camJump = FrameGenCamJump();
     if (gpu::fg::Enabled()) {  // LBP3_FG_DUMP: counters and the main view (camera now +0x20, before +0x160)

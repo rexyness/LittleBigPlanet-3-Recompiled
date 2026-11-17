@@ -138,6 +138,8 @@ struct PeerInfo {
     int maxExtraOutUs = 0, maxExtraBackUs = 0;
     uint64_t txPackets = 0, rxPackets = 0, txBytes = 0, rxBytes = 0;
     uint32_t directHeard = 0;        // packets that came directly (not through the relay)
+    // Milliseconds since the connection came up and since the game last got a datagram (-1 = never).
+    long long msSinceActive = -1, msSinceDelivered = -1;
 };
 
 class Link {
