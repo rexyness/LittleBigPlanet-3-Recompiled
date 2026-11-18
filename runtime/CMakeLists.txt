@@ -178,6 +178,10 @@ target_link_libraries(exactmathtest PRIVATE hle)
 add_executable(unlocktest tests/unlocktest.cpp)
 target_link_libraries(unlocktest PRIVATE hle)
 
+# The English voice fallback (core/vfs.h): a voice file the copy lacks for a language is the English one.
+add_executable(vfstest tests/vfstest.cpp)
+target_link_libraries(vfstest PRIVATE hle)
+
 # The driver pipeline cache file (fix/pipeline-warmup): which saved caches are handed to the driver.
 add_executable(vkcachetest tests/vkcachetest.cpp)
 target_link_libraries(vkcachetest PRIVATE hle)
@@ -269,7 +273,7 @@ target_link_libraries(p2ptest PRIVATE hle)
 add_executable(clocktest tests/clocktest.cpp)
 target_link_libraries(clocktest PRIVATE hle)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest restest exactmathtest unlocktest vkcachetest uxtest motiontest shadnettest p2ptest clocktest LBP3Launcher)
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest restest exactmathtest unlocktest vfstest vkcachetest uxtest motiontest shadnettest p2ptest clocktest LBP3Launcher)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()

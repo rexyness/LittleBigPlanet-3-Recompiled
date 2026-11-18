@@ -1,5 +1,7 @@
 #include "core/vfs.h"
 
+#include <atomic>
+#include <cstdio>
 #include <map>
 #include <mutex>
 #include <system_error>
@@ -65,7 +67,48 @@ bool IsStartupVideo(const std::string& rest) {
     return false;
 }
 
+// The first app0 layer that has `rest`, or an empty path.
+fs::path FindInApp0(const std::string& rest) {
+    std::error_code ec;
+    for (const auto& layer : g_app0) {
+        fs::path p = rest.empty() ? layer : layer / fs::u8path(rest);
+        if (fs::exists(p, ec)) return p;
+    }
+    return {};
+}
+
 }  // namespace
+
+// The idea and the three path rules are LBPPC's (emurphy04, GPL-3.0-or-later, e9b6b4e,
+// src/runtime_file.c english_voice, their issue #35); the code here is our own, and the folder
+// names and bank names were checked against a US 1.28 copy's gamedata/audio.
+std::vector<std::string> EnglishVoiceCandidates(std::string_view rest) {
+    static constexpr std::string_view kLanguages[] = {
+        "arabic", "braz_portuguese", "danish", "dutch", "finnish", "french", "german", "italian",
+        "latam_spanish", "norwegian", "polish", "portuguese", "russian", "spanish", "swedish"};
+    constexpr std::string_view kAudio = "gamedata/audio/";
+    constexpr std::string_view kDialogue = "dialogue/";
+    if (rest.substr(0, kAudio.size()) != kAudio) return {};
+    std::string_view tail = rest.substr(kAudio.size());
+    const bool dialogue = tail.substr(0, kDialogue.size()) == kDialogue;
+    if (dialogue) tail.remove_prefix(kDialogue.size());
+    const std::string before(rest.substr(0, rest.size() - tail.size()));  // up to the language folder
+    for (std::string_view language : kLanguages) {
+        if (tail.size() <= language.size() + 1 || tail.substr(0, language.size()) != language ||
+            tail[language.size()] != '/')
+            continue;
+        const std::string_view file = tail.substr(language.size() + 1);
+        if (dialogue) return {before + std::string(file)};
+        if (file.find('/') != std::string_view::npos) return {};
+        std::vector<std::string> out;
+        // <bank>_<xxx>.fsb: the three letters name the language (fre, ger, spa...).
+        if (file.size() > 8 && file[file.size() - 8] == '_' && file.substr(file.size() - 4) == ".fsb")
+            out.push_back(before + std::string(file.substr(0, file.size() - 8)) + "_eng.fsb");
+        out.push_back(before + std::string(file));
+        return out;
+    }
+    return {};
+}
 
 void SetSkipIntro(bool skip) { g_skipIntro = skip; }
 
@@ -112,13 +155,25 @@ Resolved Resolve(std::string_view guestPath) {
 
     if (HasMount(r.guest, "/app0", rest) || HasMount(r.guest, "/hostapp", rest)) {
         if (g_skipIntro && IsStartupVideo(rest)) rest = "gamedata/videos/empty_video.bik";
-        for (const auto& layer : g_app0) {
-            fs::path p = rest.empty() ? layer : layer / fs::u8path(rest);
-            if (fs::exists(p, ec)) {
-                r.host = p;
-                r.status = Status::Ok;
-                return r;
+        if (fs::path p = FindInApp0(rest); !p.empty()) {
+            r.host = p;
+            r.status = Status::Ok;
+            return r;
+        }
+        // A voice bank or dialogue file this copy doesn't have for the language (the US copy
+        // carries story voices in English and French only, so with LBP3_LANGUAGES=all the
+        // characters were silent in the others): the English recording instead of nothing.
+        for (const std::string& english : EnglishVoiceCandidates(rest)) {
+            fs::path p = FindInApp0(english);
+            if (p.empty()) continue;
+            static std::atomic<bool> told{false};
+            if (!told.exchange(true)) {
+                std::fprintf(stderr, "[vfs] no voices for this language in this copy, English voices instead (%s -> %s)\n",
+                             rest.c_str(), english.c_str());
             }
+            r.host = p;
+            r.status = Status::Ok;
+            return r;
         }
         r.host = g_app0.empty() ? fs::path() : g_app0.back() / fs::u8path(rest);
         r.status = Status::NotFound;

@@ -30,6 +30,14 @@ struct Resolved {
 // For reads of /app0, `host` is the highest-priority layer that has the path.
 Resolved Resolve(std::string_view guestPath);
 
+// Where the English recording of a localised voice file would be, most likely first; empty when
+// `rest` (a path under /app0, no leading slash) isn't one. Resolve serves the first that exists
+// when the copy has no file at `rest` itself:
+//   gamedata/audio/<language>/<bank>_<xxx>.fsb  -> gamedata/audio/<bank>_eng.fsb
+//   gamedata/audio/<language>/<bank>.fsb        -> gamedata/audio/<bank>.fsb
+//   gamedata/audio/dialogue/<language>/<rest>   -> gamedata/audio/dialogue/<rest>
+std::vector<std::string> EnglishVoiceCandidates(std::string_view rest);
+
 // Serve the startup logo/intro movies as an empty video (--skip-intro).
 void SetSkipIntro(bool skip);
 
