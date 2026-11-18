@@ -371,6 +371,30 @@ float PS4_SYSV_ABI LogRttSample(int64_t ns, uint64_t msg, uint64_t conn, uint64_
         if (ns < 0) c.negative.fetch_add(1, std::memory_order_relaxed);
         break;
     }
+    // LBP3_RTT_HIST=1 (a test): every 500 samples, how the raw samples of this process spread.
+    static const bool hist = [] {
+        const char* v = std::getenv("LBP3_RTT_HIST");
+        return v && *v == '1';
+    }();
+    if (hist) {
+        static std::atomic<uint32_t> bins[7];
+        static std::atomic<uint32_t> total{0};
+        const int64_t ms = 1'000'000;
+        const int b = ns < 0 ? 0 : ns == 0 ? 1 : ns < ms ? 2 : ns < 8 * ms ? 3 : ns < 30 * ms ? 4 : ns < 40 * ms ? 5 : 6;
+        bins[b].fetch_add(1, std::memory_order_relaxed);
+        if (total.fetch_add(1, std::memory_order_relaxed) % 500 == 499)
+            std::fprintf(stderr,
+                         "[rtt-hist] %s raw samples so far: below 0: %u, exactly 0: %u, under 1 ms: %u, 1 to 8 ms: %u, "
+                         "8 to 30 ms: %u, 30 to 40 ms: %u, 40 ms and up: %u\n",
+                         core::Stamp().text, bins[0].load(), bins[1].load(), bins[2].load(), bins[3].load(),
+                         bins[4].load(), bins[5].load(), bins[6].load());
+    }
+    // LBP3_RTT_FLOOR_MS=<n> (a test): a sample below n ms, negative ones included, counts as n ms.
+    static const int64_t floorNs = [] {
+        const char* v = std::getenv("LBP3_RTT_FLOOR_MS");
+        return v ? static_cast<int64_t>(std::atof(v) * 1e6) : int64_t{0};
+    }();
+    if (floorNs > 0 && ns < floorNs) ns = floorNs;
     // The session log only counts: the sample goes to the game as it is.
     if (!g_connProbe.load(std::memory_order_relaxed)) return reinterpret_cast<Seconds>(g_base + 0x1b2a0)(ns);
     // LBP3_RTT_CLAMP=1 (a test): a negative sample counts as 0. The game's function takes the
