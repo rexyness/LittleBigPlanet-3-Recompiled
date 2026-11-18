@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <mutex>
 #include <system_error>
@@ -175,6 +176,10 @@ Resolved Resolve(std::string_view guestPath) {
             r.status = Status::Ok;
             return r;
         }
+        // LBP3_TRACE_MISSING_AUDIO=1: every audio path asked for that no layer has, by any call.
+        static const bool traceAudio = std::getenv("LBP3_TRACE_MISSING_AUDIO") != nullptr;
+        if (traceAudio && rest.compare(0, 15, "gamedata/audio/") == 0)
+            std::fprintf(stderr, "[vfs] missing audio %s\n", rest.c_str());
         r.host = g_app0.empty() ? fs::path() : g_app0.back() / fs::u8path(rest);
         r.status = Status::NotFound;
         return r;
