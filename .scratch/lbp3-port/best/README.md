@@ -55,6 +55,7 @@ One row per feature, filled in by the integrator as each one merges.
 ### Graphics lane notes (`feat/best-gfx`, perf/best_gfx.md)
 
 - **Take `c3242e5` only:** the bloom chain scaled at 1440p. It's on by default inside `LBP3_RES=1440`; `LBP3_RES_SKIP=bloom` restores the old sizes. No LBPPC code is used, only the three target addresses, taken from their `src/probe.c`.
+  - **Undone 2026-11-14 (runtime `9d3404c`, perf/capture_pitch.md):** the scaled chain sheared every photo and costume icon (the CPU reads the chain back with a stride of its width, which wasn't a multiple of 16). The chain keeps its 1080p sizes at 16:9 again; `BLOOM_1440` and the launcher's "Finer glow" toggle are retired.
 - **LBPPC's orange-flare and black-streak bugs don't reproduce on our port.** Nothing was ported, and their `BufferWriteImageSync` isn't needed.
 - **The low-latency limiter has no effect on LBP3** (the frame thread already starts each frame at the slot; there's no two-frame queue to remove). Leave the commits after `c3242e5` out.
 

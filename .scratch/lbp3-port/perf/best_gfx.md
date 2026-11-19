@@ -49,6 +49,7 @@ Bunkum route plus the Pod, on a shader-cache copy, the bgfx build. Three arms: 1
 - **Visible difference:** none at this viewing scale. The chain is just finer, as expected.
 - **The 1080p arm** reached the Pod late (its window was still black at 28 s), so the scripted route never entered Bunkum. Earlier 1440p work (`res1440_experiment.md`) already compared 1440p against 1080p.
 - **Verdict:** merge-ready, on by default within `LBP3_RES=1440` (`LBP3_RES_SKIP=bloom` restores the old sizes). The limiter and repro runs below also ran with it on, at `play.bat`'s settings.
+- **Withdrawn 2026-11-14 (perf/capture_pitch.md, runtime `9d3404c`):** the bloom chain is also the capture chain, which the CPU reads back with a stride of the table's width. 1707/853/427 are not multiples of 16, the GPU pads rows to 64 bytes, and every photo, costume icon and profile picture taken at 1440p from 11/13 on was sheared into streaks (and cropped to the middle 3/4). This lane never took a photo. The chain is back at its 1080p sizes at every 16:9 size; the glow measured the same before and after.
 
 ### LBPPC's buffer-write bugs on our port (2026-11-13 ~06:00)
 

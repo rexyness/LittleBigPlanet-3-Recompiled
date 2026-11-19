@@ -1,3 +1,42 @@
+# One build instead of two (2026-11-14, late afternoon)
+
+> You asked why there were two builds and said "go ahead" to merging them. Done: there's one build now, the release line (`main`).
+
+- **The build:** the main project folder `D:\Recomps\lbp3-recompiled` is on `main` (shadPS4 `lbp3`), built in its `build\` folder. Your launcher setting is `build=port` ("the game folder's"), so whichever launcher you open starts `D:\Recomps\lbp3-recompiled\build\lbp3.exe`. Best to open `D:\Recomps\lbp3-recompiled\build\LBP3Launcher.exe` from now on.
+- **One shader cache:** `user\shader_cache`. Best's cache was a strict superset of it (every file identical, plus 6,937 more), so it became the cache. A boot plus the photo route on a copy built **0** new shaders (7,113 of 7,113 loaded).
+- **Checked:** offline suites (restest, launchertest, rescachetest, exactmathtest) pass; a photo at 1440p passes the pixel check; both launchers' Play plans point at the new exe.
+- **Backups, untouched:** `lbp3-wt\best` (detached at `9f20506`, with its exe and `user\shader_cache_best`), the old main cache `user\shader_cache\CUSA00473_pre_single_20261114`, the old port exe `build\lbp3.exe.port_5fbc009_20261114`, `user\config\launcher.ini.pre_single_20261114`, and your saves `analysis\savedata_backups\human_play_20261114_before_single_build`. They can go after a few days of normal play.
+- **`play.bat`** in the main folder now plays the same as `play_best.bat` did offline (those extra switches only set the runtime's defaults). Online goes through the launcher.
+
+---
+
+# v0.1.4 (2026-11-14, afternoon)
+
+> Released at your go: https://github.com/rexyness/LittleBigPlanet-3-Recompiled/releases/tag/v0.1.4-lbp3port. Your own build is on it too.
+
+- **The photo and costume-icon fix** (below), for everyone.
+- **The launcher checks for updates when it opens** (your ask). It's on by default, and switched on once for everyone updating from an older version, because their settings files all said "off". When a new version is out, the line under the title says "vX is out (you have vY)" with an **Update** button that opens Tools. Nothing installs until they press "Download and install". Turning it off (Tools > Updates) sticks.
+- **Friends on v0.1.1 to v0.1.3** still need to update by hand once (Tools > Check for updates), since their launchers don't have this yet. From v0.1.4 on, they'll be told.
+- **Tested:** photos at 1440p, ultrawide and 4K with the new pixel check; the full regression in both configs (milestone 1's checks included, at last), all passing; the clean-folder package test; and the update notice live, using a launcher that thinks it's v0.1.2.
+- **Heads-up:** Windows restarted twice at 14:15 while I was packaging. One git file came back blank (repaired); I scanned everything written that afternoon and nothing else was damaged, your saves included.
+- Details: `best/package.md` (v0.1.4).
+
+---
+
+# Streaked photos and costume icons, fixed (2026-11-14, early afternoon)
+
+> You said the best build makes "wacky images" when you save a costume or take a picture. Fixed, tested, and in the build you play (`lbp3-wt\best\build\lbp3.exe`).
+
+- **What it was:** at 1440p the glow's (bloom's) render targets had been made bigger (853 pixels wide instead of 640) since the 11/13 "best of both worlds" build. Those same targets hold every photo, costume icon and your profile picture, and the game copies them out row by row assuming rows of exactly 853 pixels, while the graphics card stores them in rows of 864. So each row slid 11 pixels and the picture smeared into streaks. It wasn't random: all 6 streaked photos in your profile came from sessions with that change, all the good ones from before it.
+- **The fix:** those targets keep the PS4's sizes again at 1080p, 1440p and 4K (and on ultrawide screens they only get wider, by a multiple of 16). Photos also show the whole photo frame again; the bigger targets had been cutting off the edges. At 1440p the glow measures the same before and after; at 4K it goes back to the 1080p look (the bigger targets had made it tighter there; not looked at in game).
+- **Tested:** photos at 1440p and 3440x1440 match what was on screen, a saved costume gets a proper Sackboy picture, the profile picture is right, 0 GPU errors. A new pixel check fails the old build and passes the new one. Not run: the full regression (milestone 1's checks); the change touches only these three targets.
+- **What you need to do:** the 6 streaked photos and your "Arap" costume's icon are stored in your save and can't be repaired. Delete and retake those photos, and re-save the costume. New ones come out right.
+- **Launcher:** the "Finer glow above 1080p" switch is gone (it was the cause). The launcher in `lbp3-wt\best\build` (the one you had open) is rebuilt without it; the v0.1.3 package's copy in `lbp3-wt\release\build` still shows it, and it no longer does anything at 16:9.
+- **Friends on v0.1.3** have the same bug at their default 1440p. A v0.1.4 with this fix is ready to package when you say so.
+- Details: `perf/capture_pitch.md`.
+
+---
+
 # v0.1.3 (2026-11-14, late morning)
 
 > Released at your go: https://github.com/rexyness/LittleBigPlanet-3-Recompiled/releases/tag/v0.1.3-lbp3port. Your own build is on it too.

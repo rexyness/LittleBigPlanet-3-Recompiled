@@ -146,3 +146,25 @@ Labels: **[dec]** decompiled from the eboot, **[data]** game data or strings, **
   - At runtime defaults with the fix: osk, `t13_coop` and backup all pass.
   - All 11 offline test programs pass on the merged clone.
   - The note in `play.bat` ("don't press Circle") stays as advice.
+- 2026-11-14 evening, **moved into the in-game menu** (human: "why not put it in the L3+R3 menu and be done with it?"). The launcher toggle only existed because the import (11/12) came a day before the in-game menu (11/13). `feat/menu-unlocks` `8fe0e90` (from `main` `9f20506`, runtime only, pushed to the fork):
+  - **The menu item:** "Import LBP1/LBP2 items", between Volume and Quit. Cross arms it; the next start menu (Options) starts the game's own import (flags `0x7f`), in the Pod or in a level. The row shows armed / importing... / done, and Cross disarms it before it starts. The footer explains each state.
+  - **Where it can fire [measured]:** with `LBP3_MY_UNLOCKS_TRACE=1` (now also logs `IsOnline__` calls), `IsOnline__` was called 0 times in about 70 s of boot and Pod, and 0 times in a level (Manglewood hub). With the start menu open it is called about 30 times a second (once per game frame), and the calls stop when it closes. So an armed import starts only from the start menu, never mid-play.
+  - **Runtime:** the `IsOnline__` hook is now always in place. Unarmed it costs one atomic load per call; `LBP3_MY_UNLOCKS=off` installs nothing. The Circle guard keys on "an import this runtime started is on screen". `LBP3_MY_UNLOCKS=lbp1,lbp2` still arms it at launch, and `play.bat`'s `MY_UNLOCKS` is kept for scripts.
+  - **Launcher:** the "LBP1 and LBP2 items" card and its env mapping are gone. An old `launcher.ini` with `my_unlocks=1` is ignored, so nothing imports on every launch; `launchertest` pins it. The in-game menu toggle's help says that switching the menu off removes the import.
+  - **Offline:** `unlocktest` 33, `uxtest` 73, `launchertest` 402, all pass; 20 of 22 programs pass. `padtest` is a live monitor, so its timeout is expected. `shadnettest` failed one mock-timing check once (`notices >= 1`, line 661), then passed 3 of 3 reruns; its code is untouched.
+  - **In game [measured]** (`lbp3-wt\_tools\menuunl_session.sh`, story baseline, 1440p + frame generation, capfix cache copy, under the game lock):
+    - Unarmed Options: no import.
+    - Armed from the menu in the Pod, no import with the menu open or closed; then Options started it. Circle twice during it was held off. "Objects from LittleBigPlanet have been successfully imported!", and the profile went from 328,492 to 413,604 B (unl3: 413,456).
+    - Played on: closed the start menu and entered a level. Armed there, Options ran the import again from the level's start menu; "successfully imported", the profile stayed 413,592 B, not re-saved. That matches unl5.
+    - Five more Options open/close cycles in the level: no crash, no error lines. Two arms gave exactly two imports. Shots `analysis\screenshots\m2_mu_*.png`, log `analysis\mu_stderr.txt`, test saves `analysis\mu_testsaves`. The human's saves were restored.
+  - **Not tested:** during an online session (the import is local to the profile), and in Create with unsaved work.
+  - **Regression [measured]** (`lbp3-wt\_tools\menuunl_regress.sh` = `rel_regress.sh` twice, output `analysis\menuunl_regress_out.txt`, 17:06-17:54). A at runtime defaults and B at the launcher's defaults (1440p, rescale, frame generation):
+    - osk, photo (pixel check) and backup pass in both; `t13_coop` passes in both.
+    - `m1_checks` OK in 3 of 3 runs each.
+    - 0 GPU warnings and 0 crashes in every run, and no nvlddmkm/Display events.
+    - The clone build was restored by md5.
+  - **Merged 2026-11-14 ~17:55:** fork `main` = `8fe0e90` (fast-forward from `9f20506`, runtime only; shadPS4 unchanged at `9423d341`), pushed.
+    - The user's build was rebuilt (`build_clone.cmd`, 17:58). The old exes are kept as `build\lbp3.exe.pre_menuunl_20261114` and `build\LBP3Launcher.exe.pre_menuunl_20261114`.
+    - `unlocktest`, `uxtest` and `launchertest` pass on it.
+    - `--print-launch` with the user's `launcher.ini` (which still has `my_unlocks=0`, now ignored): `build\lbp3.exe`, no `LBP3_MY_UNLOCKS`.
+    - Not in a release zip yet; friends get it with the next version.
