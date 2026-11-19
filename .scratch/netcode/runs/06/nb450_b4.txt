@@ -1,0 +1,27 @@
+lock: acquired by netcode-cells
+35944 41724 
+[shadnet] signed in as Kistopawa: 2 friend(s), 1 request(s) received, 0 sent
+[shadnet] signed in as Kistopawa2: 2 friend(s), 0 request(s) received, 0 sent
+ready
+join_pressed 21:33:56
+j_nb450_b4: join pressed 21:34:07
+j_nb450_b4: allow 21:34:19 (waited 5 s)
+pod_start 21:34:36
+pod_end 21:36:39
+level_cmd 21:36:40
+level_play 21:37:11
+end 21:38:14
+=== cell nb450_b4
+join: in; host thread's slot 5 to 11 in 15.1 s; join block host 4.3 s, guest 5.8 s
+pod, host:  24 windows, flips per 5 s min 150; no step 964 of 3640 flips (26.5%), longest run 28, windows with a run of 30 or more: 0, of 8 to 29: 24; host waits over 50 ms 84, longest between two frames 1001 ms, catch-up frames 1109; guest's INPUTS longest gap 1001 ms
+pod, guest: 23 windows, flips per 5 s min 150; no step 1536 of 3485 flips (44.1%), longest run 33, windows with a run of 30 or more: 2, of 8 to 29: 21
+level start: happened; host's longest run with no step around it 29 flips; guest's 68 flips; guest's INPUTS longest gap 1684 ms
+level, host:  11 windows, flips per 5 s min 150; no step 443 of 1677 flips (26.4%), longest run 28, windows with a run of 30 or more: 0, of 8 to 29: 11; host waits over 50 ms 17, longest between two frames 1001 ms, catch-up frames 472; guest's INPUTS longest gap 1001 ms
+level, guest: 11 windows, flips per 5 s min 151; no step 740 of 1668 flips (44.4%), longest run 49, windows with a run of 30 or more: 2, of 8 to 29: 9
+host's connection to the guest:  budget 32768 to 131072 (min 32768), cuts 0; game RTT median 490 ms, link 451 ms, wrong in 0 of 43, negative samples 0; unacknowledged max 43, held max 28
+guest's connection to the host:  budget 16384 to 16384 (min 16384), cuts 0; game RTT median 456 ms, link 451 ms, wrong in 0 of 43, negative samples 0; unacknowledged max 23, held max 33
+link, host's side:  longest wait for a datagram 333 ms; gaps 0 (asked again 0, given up 0), longest hold behind a gap 0 ms; path direct, LAN; in all: 272 dropped by the test, 0 filled from copies, 0 sent again of 0 asked, 0 skipped
+link, guest's side: longest wait for a datagram 466 ms; gaps 0 (asked again 0, given up 0), longest hold behind a gap 0 ms; path direct, LAN; in all: 568 dropped by the test, 0 filled from copies, 0 sent again of 0 asked, 0 skipped
+events: guest +46 s: catch-up loading screen: shown; guest +51 s: catch-up loading screen: shown; guest +57 s: catch-up loading screen: shown; guest +64 s: catch-up loading screen: shown; guest +69 s: catch-up loading screen: shown; guest +74 s: catch-up loading screen: shown; guest +79 s: catch-up loading screen: shown; guest +84 s: catch-up loading screen: shown; guest +91 s: catch-up loading screen: shown; guest +98 s: catch-up loading screen: shown; guest +105 s: catch-up loading screen: shown; guest +112 s: catch-up loading screen: shown; guest +118 s: catch-up loading screen: shown; guest +123 s: catch-up loading screen: shown; guest +127 s: catch-up loading screen: shown; guest +134 s: catch-up loading screen: shown; guest +138 s: catch-up loading screen: shown; guest +144 s: catch-up loading screen: shown; guest +148 s: catch-up loading screen: shown; guest +153 s: catch-up loading screen: shown; guest +157 s: catch-up loading screen: shown; guest +163 s: catch-up loading screen: shown; guest +168 s: catch-up loading screen: shown; guest +174 s: catch-up loading screen: shown; guest +179 s: catch-up loading screen: shown; guest +185 s: catch-up loading screen: shown; guest +196 s: catch-up loading screen: shown; guest +200 s: catch-up loading screen: shown; guest +205 s: catch-up loading screen: shown; guest +211 s: catch-up loading screen: shown; guest +217 s: catch-up loading screen: shown; guest +223 s: catch-up loading screen: shown; guest +230 s: catch-up loading screen: shown; guest +236 s: catch-up loading screen: shown; guest +242 s: catch-up loading screen: shown; guest +247 s: catch-up loading screen: shown; guest +254 s: catch-up loading screen: shown
+ROW|nb450_b4|join ok|level ok|kick no
+lock: released by netcode-cells

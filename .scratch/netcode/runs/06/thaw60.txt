@@ -1,0 +1,28 @@
+lock: acquired by netcode-cells
+24524 39384 
+[shadnet] signed in as Kistopawa: 2 friend(s), 1 request(s) received, 0 sent
+[shadnet] signed in as Kistopawa2: 2 friend(s), 0 request(s) received, 0 sent
+ready
+join_pressed 22:43:13
+j_thaw60: join pressed 22:43:24
+j_thaw60: allow 22:43:35 (waited 5 s)
+pod_start 22:43:40
+pod_end 22:45:10
+level_cmd 22:45:12
+level_play 22:45:42
+end 22:46:45
+=== cell thaw60
+join: in; host thread's slot 5 to 11 in 3.9 s; join block host 1.5 s, guest 2.0 s
+pod, host:  17 windows, flips per 5 s min 150; no step 154 of 2570 flips (6.0%), longest run 21, windows with a run of 30 or more: 0, of 8 to 29: 3; host waits over 50 ms 24, longest between two frames 1067 ms, catch-up frames 186; guest's INPUTS longest gap 12019 ms
+pod, guest: 17 windows, flips per 5 s min 0; no step 687 of 2228 flips (30.8%), longest run 3, windows with a run of 30 or more: 0, of 8 to 29: 0
+level start: happened; host's longest run with no step around it 26 flips; guest's 26 flips; guest's INPUTS longest gap 1117 ms
+level, host:  11 windows, flips per 5 s min 151; no step 2 of 1679 flips (0.1%), longest run 1, windows with a run of 30 or more: 0, of 8 to 29: 0; host waits over 50 ms 1, longest between two frames 67 ms, catch-up frames 1; guest's INPUTS longest gap 67 ms
+level, guest: 12 windows, flips per 5 s min 151; no step 1 of 1823 flips (0.1%), longest run 1, windows with a run of 30 or more: 0, of 8 to 29: 0
+host's connection to the guest:  budget 32768 to 45618 (min 13824), cuts 3; game RTT median 67 ms, link 61 ms, wrong in 1 of 36, negative samples 0; unacknowledged max 270, held max 0
+guest's connection to the host:  budget 16384 to 16384 (min 16384), cuts 0; game RTT median 68 ms, link 61 ms, wrong in 0 of 37, negative samples 0; unacknowledged max 5, held max 91
+link, host's side:  longest wait for a datagram 12016 ms; gaps 0 (asked again 0, given up 0), longest hold behind a gap 0 ms; path direct, LAN
+link, guest's side: longest wait for a datagram 367 ms; gaps 0 (asked again 0, given up 0), longest hold behind a gap 0 ms; path direct, LAN
+events: host: [p2p] 22:44:15.784 Kistopawa2: no game datagram for the game in 5 s (last packet of any kind 360 ms ago, 0 held behind a gap); guest +58 s: test freeze: the frame thread stops for 12000 ms; guest +76 s: catch-up loading screen: shown
+freeze 12000 ms at +57 s: host's longest run with no step 21 flips, waits 12, guest's INPUTS longest gap 35 ms, catch-up frames 114
+ROW|thaw60|join ok|level ok|kick no
+lock: released by netcode-cells

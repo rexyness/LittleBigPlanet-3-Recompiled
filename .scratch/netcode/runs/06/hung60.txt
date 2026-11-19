@@ -1,0 +1,29 @@
+lock: acquired by netcode-cells
+18612 39028 
+[shadnet] signed in as Kistopawa: 2 friend(s), 1 request(s) received, 0 sent
+[shadnet] signed in as Kistopawa2: 2 friend(s), 0 request(s) received, 0 sent
+ready
+join_pressed 22:37:44
+j_hung60: join pressed 22:37:55
+j_hung60: allow 22:38:07 (waited 5 s)
+suspend 22:38:08
+CELL hung60: the guest did not get in within 90 s
+pod_start 22:39:43
+pod_end 22:40:44
+level_cmd 22:40:46
+level_play 22:41:16
+end 22:42:19
+=== cell hung60
+join: NOT IN; host thread's slot 5 to 11 in nan s; join block host 10.6 s, guest 21.3 s
+pod, host:  11 windows, flips per 5 s min 150; no step 307 of 1665 flips (18.4%), longest run 307, windows with a run of 30 or more: 2, of 8 to 29: 0; host waits over 50 ms 1, longest between two frames 67 ms, catch-up frames 0
+pod, guest: 11 windows, flips per 5 s min 150; no step 0 of 1665 flips (0.0%), longest run 0, windows with a run of 30 or more: 0, of 8 to 29: 0
+level start: happened; host's longest run with no step around it 459 flips; guest's 0 flips; guest's INPUTS longest gap 0 ms
+level, host:  12 windows, flips per 5 s min 151; no step 0 of 1824 flips (0.0%), longest run 0, windows with a run of 30 or more: 0, of 8 to 29: 0; host waits over 50 ms 0, longest between two frames 35 ms, catch-up frames 1
+level, guest: 11 windows, flips per 5 s min 151; no step 0 of 1673 flips (0.0%), longest run 0, windows with a run of 30 or more: 0, of 8 to 29: 0
+host's connection to the guest:  no lines
+guest's connection to the host:  no lines
+link, host's side:  no lines
+link, guest's side: no lines
+events: host +35 s: the game ends its connection to Kistopawa2: up for 18.6 s, last datagram given to the game 9.7 s ago, the link; host: [p2p] 22:38:14.409 Kistopawa2: no game datagram for the game in 5 s (last packet of any kind 5012 ms ago, 0 held behind a gap); guest +40 s: the game ends its connection to Kistopawa: up for -1.0 s, last datagram given to the game -1.0 s ago, no link,
+ROW|hung60|join FAILED|level ok|kick YES
+lock: released by netcode-cells

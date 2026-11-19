@@ -1,0 +1,365 @@
+diff --git a/runtime/CMakeLists.txt b/runtime/CMakeLists.txt
+index 3c77f18..9fd17eb 100644
+--- a/runtime/CMakeLists.txt
++++ b/runtime/CMakeLists.txt
+@@ -55,7 +55,7 @@ add_library(hle STATIC
+ target_include_directories(hle PUBLIC src)
+ target_link_libraries(hle PUBLIC shader_recompiler video_core)
+ target_compile_definitions(hle PUBLIC _WIN32_WINNT=0x0A00 NOMINMAX _CRT_SECURE_NO_WARNINGS)
+-target_link_libraries(hle PUBLIC SDL3::SDL3 bcrypt winmm dbghelp onecore advapi32)
++target_link_libraries(hle PUBLIC SDL3::SDL3 bcrypt winmm dbghelp onecore advapi32 dxgi)
+ 
+ add_executable(lbp3 src/main.cpp)
+ target_link_libraries(lbp3 PRIVATE hle)
+diff --git a/runtime/src/hle/videoout.cpp b/runtime/src/hle/videoout.cpp
+index 755235a..1b96703 100644
+--- a/runtime/src/hle/videoout.cpp
++++ b/runtime/src/hle/videoout.cpp
+@@ -64,9 +64,11 @@ constexpr uint32_t kIrqGfxFlip = 0x08;
+ // Waits for this flip's slot. Flips land on vblanks, every (rate + 1) of the
+ // console's 60 Hz ones. Use the window's real vsync when the rates divide evenly,
+ // so every frame stays on screen equally long; otherwise a 60 Hz timer.
+-void WaitFlipSlot() {
++// Returns true when the flip was paced by vblanks, false when by the timer grid.
++bool WaitFlipSlotInner() {
+     const int vblanksPerFlip = g_flipRate.load() + 1;
+-    if (video::WaitForFlipSlot(60.0 / vblanksPerFlip)) {
++    int64_t slotNs = 0;
++    if (video::WaitForFlipSlot(60.0 / vblanksPerFlip, &slotNs)) {
+         g_nextFlip = Clock::now();
+     } else {
+         // Flips stay on a fixed grid of vblanks: the next slot follows from the last slot,
+@@ -90,9 +92,43 @@ void WaitFlipSlot() {
+         // thread's steady clock anchors on the grid, not on when the flip happened.
+         kernel::NoteFlip(std::chrono::duration_cast<std::chrono::nanoseconds>(g_nextFlip.time_since_epoch()).count());
+         g_nextFlip += period;
+-        return;
++        return false;
++    }
++    // The vblank's ideal time, so the game's frame clock sees exact frame deltas.
++    kernel::NoteFlip(slotNs ? slotNs
++                            : std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count());
++    return true;
++}
++
++// Pacing statistics for the [video] status line: time spent waiting for the slot (the
++// frame's headroom under the cap) and how many flips fell back to the timer.
++double g_paceWaitMs = 0, g_paceWorkMs = 0;
++int g_paceTimerFlips = 0;
++
++void WaitFlipSlot() {
++    static Clock::time_point lastEnd = Clock::now();
++    const auto start = Clock::now();
++    const bool vsynced = WaitFlipSlotInner();
++    const auto end = Clock::now();
++    const double waitMs = std::chrono::duration<double, std::milli>(end - start).count();
++    const double workMs = std::chrono::duration<double, std::milli>(start - lastEnd).count();
++    lastEnd = end;
++    g_paceWaitMs += waitMs;
++    g_paceWorkMs += workMs;
++    g_paceTimerFlips += !vsynced;
++    // LBP3_PACE_LOG=1: one line per flip in analysis\pace.csv.
++    static FILE* csv = [] {
++        FILE* f = std::getenv("LBP3_PACE_LOG") ? std::fopen("analysis\\pace.csv", "w") : nullptr;
++        if (f) std::fprintf(f, "flip,end_ms,work_ms,wait_ms,path,vblanks\n");
++        return f;
++    }();
++    if (csv) {
++        static uint64_t n = 0;
++        std::fprintf(csv, "%llu,%.3f,%.3f,%.3f,%c,%llu\n", static_cast<unsigned long long>(n++),
++                     std::chrono::duration<double, std::milli>(end.time_since_epoch()).count(), workMs, waitMs,
++                     vsynced ? 'v' : 't', static_cast<unsigned long long>(video::VBlankCount()));
++        if (n % 300 == 0) std::fflush(csv);
+     }
+-    kernel::NoteFlip(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count());
+ }
+ 
+ // Reports a completed flip to the game.
+@@ -111,12 +147,16 @@ void SignalFlip(int64_t flipArg) {
+     if (++g_flipCount % kFlipsPerStatus == 0) {
+         std::fprintf(stderr,
+                      "[video] %llu frames flipped (avg %.1f ms, worst %.1f ms, %d over 40 ms; %u new images, "
+-                     "%u expanded; %u early releases, %u wait addresses learned)\n",
++                     "%u expanded; %u early releases, %u wait addresses learned; work %.1f ms, slot wait %.1f ms, "
++                     "%d on timer)\n",
+                      static_cast<unsigned long long>(g_flipCount), sumMs / kFlipsPerStatus, worstMs, slow,
+                      VideoCore::g_lbp3ImageCreates.exchange(0), VideoCore::g_lbp3ImageExpands.exchange(0),
+-                     gpu::TakeEarlyReleases(), gpu::LearnedWaits());
++                     gpu::TakeEarlyReleases(), gpu::LearnedWaits(), g_paceWorkMs / kFlipsPerStatus,
++                     g_paceWaitMs / kFlipsPerStatus, g_paceTimerFlips);
+         sumMs = worstMs = 0;
+         slow = 0;
++        g_paceWaitMs = g_paceWorkMs = 0;
++        g_paceTimerFlips = 0;
+     }
+     for (void* eq : g_flipQueues)
+         kernel::TriggerEvent(eq, kInternalFlipEventId, kernel::kEvfiltVideoOut,
+diff --git a/runtime/src/video/presenter.cpp b/runtime/src/video/presenter.cpp
+index bfb042c..7cb155d 100644
+--- a/runtime/src/video/presenter.cpp
++++ b/runtime/src/video/presenter.cpp
+@@ -15,6 +15,7 @@
+ 
+ #define WIN32_LEAN_AND_MEAN
+ #include <windows.h>
++#include <dxgi.h>
+ 
+ namespace video {
+ namespace {
+@@ -32,12 +33,77 @@ uint32_t g_frameW = 0, g_frameH = 0;
+ bool g_haveFrame = false;
+ uint64_t g_frameSeq = 0;  // bumps with every new frame, so unchanged ones aren't re-uploaded
+ 
+-// Real display refreshes: the present loop blocks on vsync, so each pass is one.
++// Real display refreshes. With LBP3_PACING=present (upstream) the present loop counts
++// them, trusting SDL_RenderPresent to block on vsync. A driver can force vsync off
++// (NVIDIA's "Vertical sync: Force off"), and then presents return thousands of times a
++// second. The default (vblank) counts them on a separate thread from the DXGI output
++// the window is on (IDXGIOutput::WaitForVBlank), which the driver setting doesn't affect.
+ std::mutex g_vblankMutex;
+ std::condition_variable g_vblankCv;
+ uint64_t g_vblanks = 0;
+-std::atomic<float> g_refreshHz{0.0f};
++std::atomic<bool> g_vblankSourceOk{false};
++std::atomic<double> g_refreshHz{0.0};
++std::atomic<HWND> g_hwnd{nullptr};
+ std::atomic<void (*)(int)> g_hotkeyHandler{nullptr};
++std::atomic<uint64_t> g_presents{0};
++
++void CountVBlank() {
++    {
++        std::lock_guard lock(g_vblankMutex);
++        ++g_vblanks;
++    }
++    g_vblankCv.notify_all();
++}
++
++// Waits on the vblanks of whichever output the window is on, checked about every
++// 60 refreshes so moving the window to another display follows it.
++void VBlankThread() {
++    IDXGIFactory1* factory = nullptr;
++    IDXGIOutput* output = nullptr;
++    HMONITOR monitor = nullptr;
++    int sinceCheck = 0;
++    for (;;) {
++        if (!output || ++sinceCheck >= 60) {
++            sinceCheck = 0;
++            const HWND hwnd = g_hwnd.load();
++            const HMONITOR m = hwnd ? MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) : nullptr;
++            if (m && (m != monitor || !output || !factory || !factory->IsCurrent())) {
++                if (output) output->Release();
++                output = nullptr;
++                if (!factory || !factory->IsCurrent()) {
++                    if (factory) factory->Release();
++                    factory = nullptr;
++                    CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory));
++                }
++                IDXGIAdapter1* adapter = nullptr;
++                for (UINT a = 0; factory && !output && factory->EnumAdapters1(a, &adapter) != DXGI_ERROR_NOT_FOUND; ++a) {
++                    IDXGIOutput* o = nullptr;
++                    for (UINT i = 0; !output && adapter->EnumOutputs(i, &o) != DXGI_ERROR_NOT_FOUND; ++i) {
++                        DXGI_OUTPUT_DESC desc{};
++                        if (SUCCEEDED(o->GetDesc(&desc)) && desc.Monitor == m) {
++                            output = o;
++                            std::fprintf(stderr, "[video] vblank source: %ls\n", desc.DeviceName);
++                        } else {
++                            o->Release();
++                        }
++                    }
++                    adapter->Release();
++                }
++                monitor = m;
++                if (!output) std::fprintf(stderr, "[video] vblank source: no DXGI output for the window's monitor\n");
++            }
++        }
++        if (!output || FAILED(output->WaitForVBlank())) {
++            g_vblankSourceOk = false;
++            if (output) output->Release();
++            output = nullptr;
++            Sleep(100);
++            continue;
++        }
++        g_vblankSourceOk = true;
++        CountVBlank();
++    }
++}
+ 
+ void PresenterThread() {
+     if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
+@@ -56,10 +122,29 @@ void PresenterThread() {
+     SDL_GetRenderVSync(renderer, &vsync);
+     std::fprintf(stderr, "[video] window renderer: %s, vsync %s (%d)\n", SDL_GetRendererName(renderer),
+                  vsyncOk ? "on" : "FAILED", vsync);
+-    if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window))) {
+-        g_refreshHz = mode->refresh_rate;
+-        std::fprintf(stderr, "[video] display refresh %.2f Hz\n", mode->refresh_rate);
++    auto readRefresh = [&] {
++        if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window))) {
++            // The exact rational when SDL has it (239.999 Hz shows as 240.00 in refresh_rate).
++            const double hz = mode->refresh_rate_numerator > 0 && mode->refresh_rate_denominator > 0
++                                  ? double(mode->refresh_rate_numerator) / double(mode->refresh_rate_denominator)
++                                  : double(mode->refresh_rate);
++            g_refreshHz = hz;
++            std::fprintf(stderr, "[video] display refresh %.3f Hz\n", hz);
++        }
++    };
++    readRefresh();
++    const Pacing pacing = PacingMode();
++    std::fprintf(stderr, "[video] pacing: %s\n", PacingName());
++    if (pacing != Pacing::Present) {
++        g_hwnd = static_cast<HWND>(
++            SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
++        std::thread(VBlankThread).detach();
+     }
++    uint64_t presentedAtVblank = 0;
++    LARGE_INTEGER qpf, statsFrom;
++    QueryPerformanceFrequency(&qpf);
++    QueryPerformanceCounter(&statsFrom);
++    uint64_t statsPresents = 0, statsVblanks = 0;
+     SDL_Texture* texture = nullptr;
+     uint32_t texW = 0, texH = 0;
+     uint64_t shownSeq = ~0ull;
+@@ -71,6 +156,7 @@ void PresenterThread() {
+             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
+                 if (auto handler = g_hotkeyHandler.load()) handler(static_cast<int>(e.key.key));
+             }
++            if (e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED) readRefresh();
+             if (e.type == SDL_EVENT_QUIT) {
+                 std::fprintf(stderr, "[video] window closed\n");
+                 std::fflush(stderr);
+@@ -78,6 +164,13 @@ void PresenterThread() {
+             }
+         }
+ 
++        // Present once per real vblank, so the window doesn't spin when vsync is forced off.
++        if (pacing != Pacing::Present && g_vblankSourceOk.load()) {
++            std::unique_lock lock(g_vblankMutex);
++            g_vblankCv.wait_for(lock, std::chrono::milliseconds(50), [&] { return g_vblanks > presentedAtVblank; });
++            presentedAtVblank = g_vblanks;
++        }
++
+         DisplayBuffer buf;
+         bool fresh = true;
+         {
+@@ -110,20 +203,61 @@ void PresenterThread() {
+                 SDL_UpdateTexture(texture, nullptr, buf.address, static_cast<int>(buf.pitchPixels * 4));
+             SDL_RenderTexture(renderer, texture, nullptr, nullptr);
+         }
+-        SDL_RenderPresent(renderer);  // paced by vsync
+-        {
+-            std::lock_guard lock(g_vblankMutex);
+-            ++g_vblanks;
++        SDL_RenderPresent(renderer);  // paced by vsync, unless a driver forces it off
++        ++g_presents;
++        if (pacing == Pacing::Present) CountVBlank();
++
++        // Presents and vblanks per second, every 5 s.
++        LARGE_INTEGER now;
++        QueryPerformanceCounter(&now);
++        const double secs = double(now.QuadPart - statsFrom.QuadPart) / double(qpf.QuadPart);
++        if (secs >= 5.0) {
++            uint64_t vb;
++            {
++                std::lock_guard lock(g_vblankMutex);
++                vb = g_vblanks;
++            }
++            const uint64_t pr = g_presents.load();
++            std::fprintf(stderr, "[pace] %.1f presents/s, %.1f vblanks/s (%s), refresh %.2f Hz\n",
++                         double(pr - statsPresents) / secs, double(vb - statsVblanks) / secs, PacingName(),
++                         g_refreshHz.load());
++            statsPresents = pr;
++            statsVblanks = vb;
++            statsFrom = now;
+         }
+-        g_vblankCv.notify_all();
+     }
+ }
+ 
+ }  // namespace
+ 
+-bool WaitForFlipSlot(double gameHz) {
+-    const float refresh = g_refreshHz.load();
+-    if (refresh <= 0.0f || gameHz <= 0.0) return false;
++Pacing PacingMode() {
++    static const Pacing mode = [] {
++        const char* v = std::getenv("LBP3_PACING");
++        if (v && std::strcmp(v, "present") == 0) return Pacing::Present;
++        if (v && std::strcmp(v, "timer") == 0) return Pacing::Timer;
++        return Pacing::VBlank;
++    }();
++    return mode;
++}
++
++const char* PacingName() {
++    switch (PacingMode()) {
++    case Pacing::Present: return "present";
++    case Pacing::Timer: return "timer";
++    default: return "vblank";
++    }
++}
++
++uint64_t VBlankCount() {
++    std::lock_guard lock(g_vblankMutex);
++    return g_vblanks;
++}
++
++bool WaitForFlipSlot(double gameHz, int64_t* slotNs) {
++    if (PacingMode() == Pacing::Timer) return false;
++    if (PacingMode() == Pacing::VBlank && !g_vblankSourceOk.load()) return false;
++    const double refresh = g_refreshHz.load();
++    if (refresh <= 0.0 || gameHz <= 0.0) return false;
+     const double ratio = refresh / gameHz;
+     const uint64_t perFlip = static_cast<uint64_t>(ratio + 0.5);
+     if (perFlip == 0 || std::abs(ratio - static_cast<double>(perFlip)) > 0.05) return false;  // e.g. 30 fps on 144 Hz
+@@ -132,8 +266,30 @@ bool WaitForFlipSlot(double gameHz) {
+     if (next == 0 || next > g_vblanks + perFlip) next = g_vblanks + perFlip;  // first flip / after a resync
+     const bool ok = g_vblankCv.wait_for(lock, std::chrono::milliseconds(200), [&] { return g_vblanks >= next; });
+     if (!ok) return false;  // window not presenting (minimized?): use the timer
++    const uint64_t vblank = g_vblanks;
+     // Running late keeps the cadence from the current vblank instead of trying to catch up.
+-    next = std::max(next, g_vblanks) + perFlip;
++    next = std::max(next, vblank) + perFlip;
++    lock.unlock();
++    // The flip's time for the game's frame clock: the vblank's ideal time (anchor + index *
++    // refresh period), not when this thread woke up (~0.1 ms of jitter), so the game sees
++    // the exact frame deltas a console would. This doesn't measurably cure the 0/2 sim
++    // steps (camera snaps); those are game-side. Re-anchors when the real time strays
++    // more than 2 ms (a late frame, a missed vblank, a refresh-rate change).
++    if (slotNs) {
++        static double anchorNs = 0, anchorPeriodNs = 0;
++        static uint64_t anchorVblank = 0;
++        const double nowNs = double(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                                        std::chrono::steady_clock::now().time_since_epoch())
++                                        .count());
++        const double periodNs = 1e9 / refresh;
++        double ideal = anchorNs + double(vblank - anchorVblank) * periodNs;
++        if (anchorNs == 0 || periodNs != anchorPeriodNs || vblank < anchorVblank || std::abs(nowNs - ideal) > 2e6) {
++            anchorNs = ideal = nowNs;
++            anchorVblank = vblank;
++            anchorPeriodNs = periodNs;
++        }
++        *slotNs = static_cast<int64_t>(ideal);
++    }
+     return true;
+ }
+ 
+diff --git a/runtime/src/video/presenter.h b/runtime/src/video/presenter.h
+index 0bd27c6..ab99947 100644
+--- a/runtime/src/video/presenter.h
++++ b/runtime/src/video/presenter.h
+@@ -38,6 +38,14 @@ void PresentPixels(std::vector<uint8_t>& pixels, uint32_t width, uint32_t height
+ // at gameHz (e.g. every 2nd refresh for 30 fps on 60 Hz). Returns false when
+ // that doesn't divide evenly or the window isn't presenting; the caller then
+ // paces with a timer.
+-bool WaitForFlipSlot(double gameHz);
++bool WaitForFlipSlot(double gameHz, int64_t* slotNs = nullptr);
++
++// LBP3_PACING: what counts as a display refresh. vblank (default) = the window's DXGI
++// output; present = each SDL_RenderPresent returning (upstream); timer = no vsync, the
++// caller's 60 Hz timer grid.
++enum class Pacing { VBlank, Present, Timer };
++Pacing PacingMode();
++const char* PacingName();
++uint64_t VBlankCount();
+ 
+ }  // namespace video

@@ -1,0 +1,31 @@
+lock: acquired by netcode-cells
+32584 15096 
+[shadnet] signed in as Kistopawa: 2 friend(s), 1 request(s) received, 0 sent
+[shadnet] signed in as Kistopawa2: 2 friend(s), 0 request(s) received, 0 sent
+ready
+join_pressed 22:16:30
+j_f450: join pressed 22:16:41
+j_f450: allow 22:16:53 (waited 5 s)
+pod_start 22:17:05
+pod_end 22:19:08
+level_cmd 22:19:09
+level_play 22:19:40
+end 22:20:43
+=== cell f450
+join: in; host thread's slot 5 to 11 in 10.9 s; join block host 4.0 s, guest 5.5 s
+pod, host:  24 windows, flips per 5 s min 150; no step 182 of 3638 flips (5.0%), longest run 30, windows with a run of 30 or more: 2, of 8 to 29: 2; host waits over 50 ms 11, longest between two frames 1036 ms, catch-up frames 194; guest's INPUTS longest gap 3520 ms
+pod, guest: 23 windows, flips per 5 s min 50; no step 0 of 3238 flips (0.0%), longest run 0, windows with a run of 30 or more: 0, of 8 to 29: 0
+level start: happened; host's longest run with no step around it 26 flips; guest's 49 flips; guest's INPUTS longest gap 1853 ms
+level, host:  12 windows, flips per 5 s min 150; no step 4 of 1824 flips (0.2%), longest run 1, windows with a run of 30 or more: 0, of 8 to 29: 0; host waits over 50 ms 21, longest between two frames 68 ms, catch-up frames 20; guest's INPUTS longest gap 67 ms
+level, guest: 12 windows, flips per 5 s min 151; no step 31 of 1822 flips (1.7%), longest run 2, windows with a run of 30 or more: 0, of 8 to 29: 0
+host's connection to the guest:  budget 32768 to 54067 (min 32768), cuts 1; game RTT median 467 ms, link 451 ms, wrong in 0 of 44, negative samples 0; unacknowledged max 31, held max 0
+guest's connection to the host:  budget 16384 to 16384 (min 16384), cuts 0; game RTT median 444 ms, link 451 ms, wrong in 0 of 43, negative samples 0; unacknowledged max 14, held max 0
+link, host's side:  longest wait for a datagram 3519 ms; gaps 0 (asked again 0, given up 0), longest hold behind a gap 0 ms; path direct, LAN
+link, guest's side: longest wait for a datagram 536 ms; gaps 0 (asked again 0, given up 0), longest hold behind a gap 0 ms; path direct, LAN
+events: guest +56 s: test freeze: the frame thread stops for 1000 ms; guest +76 s: test freeze: the frame thread stops for 3500 ms; guest +96 s: test freeze: the frame thread stops for 1000 ms; guest +116 s: test freeze: the frame thread stops for 3500 ms
+freeze 1000 ms at +55 s: host's longest run with no step 15 flips, waits 2, guest's INPUTS longest gap 1011 ms, catch-up frames 28
+freeze 3500 ms at +75 s: host's longest run with no step 30 flips, waits 3, guest's INPUTS longest gap 3520 ms, catch-up frames 61
+freeze 1000 ms at +95 s: host's longest run with no step 22 flips, waits 1, guest's INPUTS longest gap 1022 ms, catch-up frames 29
+freeze 3500 ms at +116 s: host's longest run with no step 30 flips, waits 4, guest's INPUTS longest gap 3514 ms, catch-up frames 61
+ROW|f450|join ok|level ok|kick no
+lock: released by netcode-cells

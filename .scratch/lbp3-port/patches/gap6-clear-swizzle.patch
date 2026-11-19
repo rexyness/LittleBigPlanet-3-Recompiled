@@ -1,0 +1,15 @@
+# Gap 6: the Create sky's red/blue swap. Applies inside third_party/shadPS4 (base 4640726e).
+--- a/src/video_core/renderer_vulkan/liverpool_to_vk.cpp
++++ b/src/video_core/renderer_vulkan/liverpool_to_vk.cpp
+@@ -1154,7 +1154,10 @@
+         break;
+     }
+ 
+-    color.float32 = comp_swizzle.Apply(color.float32);
++    // The clear word is already in the colour buffer's channel order (the order its comp_swap
++    // gives), so it is not swizzled again: LBP3's Create sky (comp_swap Alternate) came out with
++    // red and blue swapped.
++    (void)comp_swizzle;
+     return {.color = color};
+ }
+ 

@@ -1,0 +1,27 @@
+lock: acquired by netcode-cells
+27780 35924 
+[shadnet] signed in as Kistopawa: 2 friend(s), 1 request(s) received, 0 sent
+[shadnet] signed in as Kistopawa2: 2 friend(s), 0 request(s) received, 0 sent
+ready
+join_pressed 22:00:56
+j_c1000_l0: join pressed 22:01:07
+j_c1000_l0: allow 22:01:21 (waited 5 s)
+pod_start 22:01:43
+pod_end 22:03:46
+level_cmd 22:03:47
+level_play 22:04:17
+end 22:05:21
+=== cell c1000_l0
+join: in; host thread's slot 5 to 11 in 21.1 s; join block host 8.0 s, guest 10.6 s
+pod, host:  23 windows, flips per 5 s min 150; no step 4 of 3488 flips (0.1%), longest run 1, windows with a run of 30 or more: 0, of 8 to 29: 0; host waits over 50 ms 1, longest between two frames 51 ms, catch-up frames 1; guest's INPUTS longest gap 52 ms
+pod, guest: 23 windows, flips per 5 s min 150; no step 0 of 3504 flips (0.0%), longest run 0, windows with a run of 30 or more: 0, of 8 to 29: 0
+level start: happened; host's longest run with no step around it 25 flips; guest's 84 flips; guest's INPUTS longest gap 3032 ms
+level, host:  12 windows, flips per 5 s min 150; no step 0 of 1823 flips (0.0%), longest run 0, windows with a run of 30 or more: 0, of 8 to 29: 0; host waits over 50 ms 2, longest between two frames 66 ms, catch-up frames 1; guest's INPUTS longest gap 42 ms
+level, guest: 11 windows, flips per 5 s min 150; no step 72 of 1674 flips (4.3%), longest run 2, windows with a run of 30 or more: 0, of 8 to 29: 0
+host's connection to the guest:  budget 32768 to 65536 (min 32768), cuts 0; game RTT median 1033 ms, link 1000 ms, wrong in 0 of 43, negative samples 0; unacknowledged max 34, held max 0
+guest's connection to the host:  budget 16384 to 16384 (min 16384), cuts 0; game RTT median 1000 ms, link 1000 ms, wrong in 0 of 43, negative samples 0; unacknowledged max 31, held max 0
+link, host's side:  longest wait for a datagram 273 ms; gaps 0 (asked again 0, given up 0), longest hold behind a gap 0 ms; path direct, LAN
+link, guest's side: longest wait for a datagram 199 ms; gaps 0 (asked again 0, given up 0), longest hold behind a gap 0 ms; path direct, LAN
+events: guest +200 s: catch-up loading screen: shown
+ROW|c1000_l0|join ok|level ok|kick no
+lock: released by netcode-cells
