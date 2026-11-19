@@ -381,7 +381,7 @@ void PageNews(App& a) {
         return;
     }
     Heading("What this build has");
-    if (a.manifest.empty()) Dim("(the feature list, best/README.md, isn't next to the game folder)");
+    if (a.manifest.empty()) Dim("(the feature list, .scratch/lbp3-port/best/README.md, isn't in the game folder)");
     for (const auto& [feature, sw] : a.manifest) {
         ImGui::Bullet();
         ImGui::TextWrapped("%s", feature.c_str());

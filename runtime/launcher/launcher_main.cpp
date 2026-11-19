@@ -353,7 +353,8 @@ void StartStats(App& a) {
 
 static std::vector<std::pair<std::string, std::string>> ReadManifest(const fs::path& root) {
     std::vector<std::pair<std::string, std::string>> out;
-    const fs::path f = root.parent_path() / "lbp3-pc" / ".scratch" / "lbp3-port" / "best" / "README.md";
+    // In the repo since the lbp3-pc notes moved in (2026-11-19); a package has no .scratch.
+    const fs::path f = root / ".scratch" / "lbp3-port" / "best" / "README.md";
     std::ifstream in(f);
     std::string line;
     bool in_table = false;
