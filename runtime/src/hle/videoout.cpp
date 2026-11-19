@@ -39,9 +39,14 @@ extern std::atomic<uint32_t> g_lbp3ImageCreates, g_lbp3ImageExpands, g_lbp3Image
 extern std::atomic<uint32_t> g_lbp3Refreshes, g_lbp3RefreshesCpu, g_lbp3FillClears, g_lbp3PreSyncs,
     g_lbp3PreSyncSkips;
 extern std::atomic<uint64_t> g_lbp3RefreshBytes, g_lbp3FillClearBytes, g_lbp3PreSyncBytes;
+extern std::atomic<uint64_t> g_lbp3WriteFaults, g_lbp3WindowPages;  // buffer_cache.cpp
+uint32_t Lbp3FaultWindowKib();                                        // LBP3_FAULT_WINDOW
 }
 namespace Core {
 extern std::atomic<uint64_t> g_lbp3ProtectFast, g_lbp3ProtectWalk;  // gpu/video_core_glue.cpp
+}
+namespace Vulkan {
+extern std::atomic<uint64_t> g_lbp3GpuFrames;  // vk_rasterizer.cpp: frames whose flip the GPU thread reached
 }
 
 namespace hle::kernel {
@@ -187,6 +192,12 @@ void PrintPerfLine() {
                  now.gfxBlockedWaits - last.gfxBlockedWaits, rel[0][0] - lastRel[0][0], rel[0][1] - lastRel[0][1],
                  rel[1][0] - lastRel[1][0], rel[1][1] - lastRel[1][1], rel[2][0] - lastRel[2][0],
                  rel[2][1] - lastRel[2][1], now.droppedDraws - last.droppedDraws);
+    // Background pipeline builds, only when something happened (its own line: the [perf] line's
+    // format stays as tools read it).
+    if (now.asyncSkipped != last.asyncSkipped || now.asyncWaited != last.asyncWaited)
+        std::fprintf(stderr, "[async] skipped %u draws while their pipeline was built; %u waited for theirs (%.0f ms)\n",
+                     now.asyncSkipped - last.asyncSkipped, now.asyncWaited - last.asyncWaited,
+                     (now.asyncWaitUs - last.asyncWaitUs) / 1000.0);
     last = now;
     for (int s = 0; s < 3; ++s)
         for (int k = 0; k < 2; ++k) lastRel[s][k] = rel[s][k];
@@ -208,6 +219,12 @@ void PrintPerfLine() {
     std::fprintf(stderr, "[protect] %llu fast, %llu walked\n",
                  static_cast<unsigned long long>(Core::g_lbp3ProtectFast.exchange(0)),
                  static_cast<unsigned long long>(Core::g_lbp3ProtectWalk.exchange(0)));
+    // Guest write faults in the window, and the pages the fault window unprotected ahead of them
+    // (LBP3_FAULT_WINDOW, perf/gfx_wait.md fix 2). Its own line: [protect]'s format stays.
+    std::fprintf(stderr, "[faults] %llu write faults, %llu pages unprotected ahead (window %u KiB)\n",
+                 static_cast<unsigned long long>(VideoCore::g_lbp3WriteFaults.exchange(0)),
+                 static_cast<unsigned long long>(VideoCore::g_lbp3WindowPages.exchange(0)),
+                 VideoCore::Lbp3FaultWindowKib());
     video::framegen::PrintStatus();  // nothing unless LBP3_FRAMEGEN=1
     gpu::split::Flush();
 }
@@ -280,6 +297,9 @@ int PS4_SYSV_ABI sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index,
         // GPU interrupts fire the game's sceGnmAddEqEvent registrations with that id.
         gpu::SetInterruptHandler([](uint32_t irq) {
             if (irq == kIrqGfxFlip) {
+                // The GPU thread has reached a frame's flip: the frame count the background
+                // pipeline builds' wait policy reads (vk_pipeline_cache.cpp AsyncPolicyWaits).
+                Vulkan::g_lbp3GpuFrames.fetch_add(1, std::memory_order_relaxed);
                 PendingFlip f{-1, 0, 0};
                 {
                     std::lock_guard pl(g_pendingMutex);

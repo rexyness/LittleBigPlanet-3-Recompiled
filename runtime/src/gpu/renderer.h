@@ -46,6 +46,10 @@ struct PerfCounters {
     uint32_t pipelineCompiles = 0;  // first-sight Vulkan pipelines (after boot's warm-up)
     uint64_t pipelineUs = 0;
     uint32_t droppedDraws = 0;      // draws with no pipeline (gap 15; "[gpu] dropped draw" lines)
+    // Background pipeline builds (LBP3_ASYNC_PIPELINES): draws skipped while their pipeline was
+    // built, and draws that waited for theirs instead (the wait policy, LBP3_ASYNC_POLICY).
+    uint32_t asyncSkipped = 0, asyncWaited = 0;
+    uint64_t asyncWaitUs = 0;
 };
 PerfCounters ReadPerfCounters();
 // Early releases per call site, totals since start: [0] the main thread's WaitIdle before a
