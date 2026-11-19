@@ -102,11 +102,11 @@ Tier 1 items 1, 2 and 4. New branches on top of Batch 1, so Batch 1 can be merge
 - **The default is the user's call:** the Pod poster against those waits.
 
 **Left to do (stopped at the user's request, a CPU-heavy job of theirs running):**
-1. The photo test under the default `all`. The capture wait runs before the policy check, so it should hold; `sb2photo` passed under `perframe`.
+1. ~~The photo test under the default `all`.~~ **PASS** on 2026-11-19 (`sb2photoall`). See the regression table's last row.
 2. ~~A screenshot comparison of `seth1` against `sb2`.~~ Done without a game run. See [the comparison](#screenshot-comparison-batch-1-against-batch-2) below.
    - No picture or brightness change at the run-to-run noise level in the scenes the regression shoots.
    - Home's floating card sits elsewhere in Batch 2. That's most likely animation phase, but it's open: check it with two Home shots and an `LBP3_F91=0` boot at the next game run.
-3. A ticket for `OnSubmit` never running (texture-cache GC, staging trim). Drafted and waiting for the user's go-ahead. The cause is the runtime's `sceGnmSubmitDone` stub; see [the wait policy](#the-wait-policy-item-2).
+3. ~~A ticket for `OnSubmit` never running (texture-cache GC, staging trim).~~ Filed as [#23](https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/23) on 2026-11-19. The cause is the runtime's `sceGnmSubmitDone` stub; see [the wait policy](#the-wait-policy-item-2).
 
 Both are pushed to the forks and not merged. Same worktrees as Batch 1.
 
@@ -166,7 +166,7 @@ Warm Needlepoint route, window off and on alternately, twice (`_tools/seth_fault
   - **The buffer cache's `TickFrame`: harmless here.** It only processes the GPU fault buffer, which is requested only for shaders that use DMA, and the runtime's shim turns DMA off (`runtime/shim/core/emulator_settings.h:30`).
     - That header is the one compiled: `runtime/cmake/shader_recompiler.cmake:41` puts `runtime/shim` before shadPS4's `src`, `video_core` inherits it, and shadPS4's `emulator_settings.cpp` isn't built.
   - **`ProcessDownloadImages`: covered.** `OnFence` runs it too, at every `EventWriteEop`, `EventWriteEos`, `ReleaseMem` and `WriteData` packet (`liverpool.cpp:896–1441`).
-- **That deserves a ticket of its own.**
+- **That's ticket [#23](https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/23).**
 - **Cold caches** (shader and NVIDIA driver), `_tools/seth_async_ab.sh sa4`, background builds on, one run each:
 
 | | Skip all (as `84e058af`) | perframe, streak 8 (sethlikepie's) | **perframe, streak 2 (default)** | geometry |
@@ -201,6 +201,24 @@ Warm Needlepoint route, window off and on alternately, twice (`_tools/seth_fault
 | nvlddmkm or Display events | none |
 | Photo, background builds on, cold caches | PASS: encoder line, capture readback, a 30,852-byte 640x360 JPEG that isn't black |
 | Clean-up | the clone's exe restored by both scripts (md5 `7edc135f…`); lock free; no marker or kept copy |
+| Photo under the default policy `all` (`sb2photoall`, after the regression; `seth-small\build\lbp3.exe` at `60d63ae` / `b0242a25`). Background builds on (`LBP3_ASYNC_PIPELINES=1`, 4 threads); empty shader and NVIDIA driver caches, which filled to 12 MB and 4.4 MB | **PASS** (see below) |
+
+`sb2photoall`, in detail:
+- **Checks:**
+  - encoder line;
+  - capture readback;
+  - a 30,996-byte 640×360 JPEG, mean (132, 190, 200): the Create level with Sackboy and the cyan sky.
+- **After the relaunch:** the photo's tile is in My Pictures.
+- **The log:**
+  - `LBP3_ASYNC_POLICY=all` confirmed.
+  - Draws were skipped while their pipelines built, as `all` does.
+  - One window had 14 draws wait 44 ms, consistent with the capture wait.
+  - No device-lost, stuck or invalid-sampler line.
+- **Clean-up:**
+  - exe restored (md5 `7edc135f…`);
+  - the user's saves returned, no marker or kept copy;
+  - lock free;
+  - the temporary cache folders removed.
 
 **Not shown:**
 - **F91's target**, the power-up wheel: the routes don't open it.
