@@ -29,6 +29,7 @@
 #include "ui/osk_model.h"
 #include "ui/osk_overlay.h"
 #include "ui/osk_testing.h"
+#include "ui/osk_words.h"
 
 using namespace ui::osk;
 
@@ -404,6 +405,115 @@ void RepeaterChecks() {
     CHECK_EQ(r.Update(true, 1470), 2);
     CHECK_EQ(r.Update(false, 1480), 0);
     CHECK_EQ(r.Update(true, 1490), 1);
+}
+
+// ---- Suggestions (ui/osk_words) ----
+
+const char* kTestList =
+    "# a small list for the checks\n"
+    "the\t1000\nthat\t900\nthey\t800\nthere\t700\nthis\t600\nthen\t500\nthem\t400\n"
+    "I\t5000\nI'm\t300\ndon't\t250\nSackboy\t50\nMonday\t40\nsack\t30\nsackcloth\t1\n"
+    "caf\xC3\xA9\t20\nco-op\t15\nsomething\t100\nso\t2000\nhello\t90\n";
+
+using Strings = std::vector<std::u16string>;
+
+void WordsChecks() {
+    std::printf("words\n");
+    // What a word is: letters (accents too), ' or - between letters, two letters or more;
+    // numbers, name tags and addresses aren't words.
+    CHECK(WordsIn(u"Hello, don't co-op lvl2 @sack www.example.com a I x2 café-au-lait 'quoted' end.") ==
+          (Strings{u"Hello", u"don't", u"co-op", u"café-au-lait", u"quoted", u"end"}));
+    CHECK(WordsIn(u"my_level 2nd -dash- re-") == (Strings{u"dash", u"re"}));
+    // The part a suggestion completes: up to the cursor, which is at the end of a word.
+    size_t at = 99;
+    CHECK(TypedPart(u"hel", 3) == u"hel");
+    CHECK(TypedPart(u"Hi there", 8, &at) == u"there");
+    CHECK_EQ(int(at), 3);
+    CHECK(TypedPart(u"sackboy", 4).empty());  // the middle of a word
+    CHECK(TypedPart(u"sack boy", 4) == u"sack");
+    CHECK(TypedPart(u"hello ", 6).empty());   // after a space
+    CHECK(TypedPart(u"don'", 4) == u"don'");
+    CHECK(TypedPart(u"'hel", 4) == u"hel");   // an opening quote isn't part of it
+    CHECK(TypedPart(u"@sa", 3).empty());
+    CHECK(TypedPart(u"lvl2ab", 6).empty());
+    CHECK(TypedPart(u"www.goo", 7).empty());
+    CHECK(TypedPart(u"", 0).empty());
+    // Capitals follow what's typed; a word written with a capital keeps it.
+    CHECK(FollowCase(u"sackboy", u"sa") == u"sackboy");
+    CHECK(FollowCase(u"sackboy", u"Sa") == u"Sackboy");
+    CHECK(FollowCase(u"sackboy", u"SAC") == u"SACKBOY");
+    CHECK(FollowCase(u"Sackboy", u"sa") == u"Sackboy");
+    CHECK(FollowCase(u"I'm", u"i") == u"I'm");
+    CHECK(FollowCase(u"café", u"CA") == u"CAFÉ");
+    CHECK(Lower(u"ÉİŸАΑ") == u"éiÿаα");
+
+    Words w;
+    w.LoadList(kTestList);
+    CHECK_EQ(int(w.listSize()), 19);
+    // The list alone: most common first, at most six, none longer than the room left, never
+    // what's already typed.
+    CHECK(w.Suggest(u"th", 100) == (Strings{u"the", u"that", u"they", u"there", u"this", u"then"}));
+    CHECK(w.Suggest(u"th", 4) == (Strings{u"the", u"that", u"they", u"this", u"then", u"them"}));
+    CHECK(w.Suggest(u"the", 100) == (Strings{u"they", u"there", u"then", u"them"}));
+    CHECK(w.Suggest(u"i", 100) == (Strings{u"I", u"I'm"}));
+    CHECK(w.Suggest(u"Th", 100)[0] == u"The");
+    CHECK(w.Suggest(u"CAF", 100) == (Strings{u"CAFÉ"}));
+    CHECK(w.Suggest(u"don’", 100) == (Strings{u"don't"}));
+    CHECK(w.Suggest(u"sa", 100) == (Strings{u"Sackboy", u"sack", u"sackcloth"}));
+    CHECK(w.Suggest(u"zz", 100).empty());
+    CHECK(w.Suggest(u"", 100).empty());
+    // Learned words first, most used first.
+    CHECK(w.Learn(u"", u"them them them they"));
+    CHECK(w.Suggest(u"th", 100) == (Strings{u"them", u"they", u"the", u"that", u"there", u"this"}));
+    // A word that isn't in the list: from its second use, as last typed.
+    CHECK(w.Learn(u"", u"thrumble"));
+    CHECK(w.Suggest(u"thr", 100).empty());
+    CHECK(w.Learn(u"", u"Thrumble"));
+    CHECK(w.Suggest(u"thr", 100) == (Strings{u"Thrumble"}));
+    // A list word is kept as the list spells it, whatever the capitals typed.
+    CHECK(w.Learn(u"", u"The"));
+    CHECK_EQ(int(w.LearnedCount(u"the")), 1);
+    CHECK(w.SaveLearned().find("\tthe\n") != std::string::npos);
+    CHECK(w.SaveLearned().find("\tThe\n") == std::string::npos);
+    // Only the words added to the text the keyboard opened with count.
+    CHECK(!w.Learn(u"My level about Sackboy", u"My level about Sackboy"));
+    CHECK(w.Learn(u"My level about Sackboy", u"My level about Sackboy and Sackboy"));
+    CHECK_EQ(int(w.LearnedCount(u"sackboy")), 1);
+    CHECK_EQ(int(w.LearnedCount(u"level")), 0);
+    CHECK_EQ(int(w.LearnedCount(u"and")), 1);  // not in the list: one use, counted but not suggested
+    CHECK(w.Suggest(u"an", 100).empty());
+    // The curly apostrophe is the straight one.
+    CHECK(w.Learn(u"", u"don’t"));
+    CHECK_EQ(int(w.LearnedCount(u"don't")), 1);
+
+    // The file: written most used first, read back the same.
+    const std::string saved = w.SaveLearned();
+    CHECK(saved.find("3\tthem\n") != std::string::npos);
+    CHECK(saved.find("2\tThrumble\n") != std::string::npos);
+    Words w2;
+    w2.LoadList(kTestList);
+    w2.LoadLearned(saved);
+    CHECK(w2.SaveLearned() == saved);
+    CHECK(w2.Suggest(u"th", 100) == w.Suggest(u"th", 100));
+    // A hand-edited file: a BOM, CRLF, comments, junk, a word listed twice, non-words.
+    Words w3;
+    w3.LoadList(kTestList);
+    w3.LoadLearned("\xEF\xBB\xBF# mine\r\n3\tthem\r\nbad line\r\n-1\tfoo\r\n2 Bunkum\r\n1\tx\r\n4\tthem\r\n\r\n5\tlvl2\r\n0\tzero\r\n");
+    CHECK_EQ(int(w3.learnedSize()), 2);
+    CHECK_EQ(int(w3.LearnedCount(u"them")), 7);
+    CHECK_EQ(int(w3.LearnedCount(u"bunkum")), 2);
+    CHECK(w3.Suggest(u"bu", 100) == (Strings{u"Bunkum"}));
+    // At most 10,000 learned words: the least used go first.
+    Words w4;
+    std::u16string many = u"favourite favourite ";
+    for (int i = 0; i < 10001; ++i) {
+        std::u16string word;
+        for (int n = i, k = 0; k < 4; ++k, n /= 26) word.push_back(char16_t(u'a' + n % 26));
+        many += word + u' ';
+    }
+    CHECK(w4.Learn(u"", many));
+    CHECK_EQ(int(w4.learnedSize()), int(Words::kMaxLearned));
+    CHECK_EQ(int(w4.LearnedCount(u"favourite")), 2);
 }
 
 // ---- Overlay ----
@@ -985,6 +1095,7 @@ int main(int argc, char** argv) {
     NavigationChecks();
     ModeChecks();
     RepeaterChecks();
+    WordsChecks();
     OverlayChecks();
     std::printf("%d checks, %d failed\n", g_checks, g_failures);
     SDL_Quit();
