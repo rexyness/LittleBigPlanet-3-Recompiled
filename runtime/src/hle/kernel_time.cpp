@@ -49,10 +49,36 @@ enum ClockId : int {
 constexpr int64_t kFileTimeToUnixEpoch = 116444736000000000LL;  // 100 ns units
 constexpr uint32_t kPageSize = 16 * 1024;
 
+// Windows 11 stops honouring a process's timer-resolution request while its window is minimised,
+// covered or otherwise invisible ("Windows does not guarantee a higher resolution than the default
+// system resolution", timeBeginPeriod's documentation). The 1 ms waits that rely on it (the game
+// host thread's epoll wait, audio pacing) would then sleep to the ~15.6 ms default tick, e.g. for a
+// co-op player who minimises the game. This opts out: PROCESS_POWER_THROTTLING_STATE {version 1,
+// control IGNORE_TIMER_RESOLUTION (4), state 0 = always honour it}, information class
+// ProcessPowerThrottling (4), looked up at run time as the SDK declares it only for newer targets.
+// Earlier Windows versions refuse the flag, which changes nothing. LBP3_TIMER_KEEP=0 leaves it out.
+// From sethlikepie's littlebigplanet3-pc 07cc7e7 (src/compat_win.c, GPL-2.0-or-later).
+void KeepTimerResolution() {
+    const char* env = std::getenv("LBP3_TIMER_KEEP");
+    if (env && env[0] == '0') {
+        std::fprintf(stderr, "[time] timer resolution: Windows 11's background throttling left on (LBP3_TIMER_KEEP=0)\n");
+        return;
+    }
+    struct { ULONG version, control, state; } throttle = {1, 4, 0};
+    using SetInfo = BOOL(WINAPI*)(HANDLE, int, LPVOID, DWORD);
+    const auto set = reinterpret_cast<SetInfo>(
+        reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetProcessInformation")));
+    const BOOL ok = set ? set(GetCurrentProcess(), 4, &throttle, sizeof(throttle)) : FALSE;
+    const DWORD err = ok ? 0 : (set ? GetLastError() : ERROR_PROC_NOT_FOUND);
+    std::fprintf(stderr, "[time] timer resolution: kept when the window is hidden (Windows 11): %s (error %lu)\n",
+                 ok ? "yes" : "refused, an older Windows", static_cast<unsigned long>(err));
+}
+
 const int64_t g_qpcFreq = [] {
     LARGE_INTEGER f;
     QueryPerformanceFrequency(&f);
     timeBeginPeriod(1);  // 1 ms sleep granularity, like a console
+    KeepTimerResolution();
     return f.QuadPart;
 }();
 const int64_t g_qpcStart = [] {
