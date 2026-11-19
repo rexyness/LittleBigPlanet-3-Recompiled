@@ -1,7 +1,9 @@
 # Which of the game netcode's own values does the port change?
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/6 (#6) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: grilling
-Status: open
+Status: moved to #6 (2026-11-19); was: open
 Blocked by: 03, 06, 16, 17, 34, 35
 Map: [Online co-op netcode](../map.md)
 

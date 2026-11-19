@@ -1,7 +1,9 @@
 # Does the frame time the host hands out explain its slow frames?
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/8 (#8) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: task
-Status: open
+Status: moved to #8 (2026-11-19); was: open
 Blocked by: 19
 Map: [Online co-op netcode](../map.md)
 

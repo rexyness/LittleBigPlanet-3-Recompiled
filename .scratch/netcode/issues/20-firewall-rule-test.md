@@ -1,7 +1,9 @@
 # Does an inbound Windows Firewall rule on both PCs open a direct path to the friend?
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/7 (#7) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: task
-Status: open
+Status: moved to #7 (2026-11-19); was: open
 Blocked by: none
 Map: [Online co-op netcode](../map.md)
 

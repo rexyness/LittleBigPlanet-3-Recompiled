@@ -1,7 +1,9 @@
 # Exposure: mid-tones too bright, emissive and bright things go flat white
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/20 (#20) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: research, then a fix if a bug is confirmed
-Status: parked (2026-11-12): waiting for the human's PS4 footage
+Status: moved to #20 (2026-11-19); was: parked (2026-11-12): waiting for the human's PS4 footage
 Blocked by: the game (the human is playing)
 Map: [LBP3 native port](../map.md). Reported by the human on 2026-11-12 while playing the 1440p build: "the game lighting exposure seems to be a bit too much in certain areas". They said it is not related to frame generation or the new resolution, and the 1080p captures agree (below).
 

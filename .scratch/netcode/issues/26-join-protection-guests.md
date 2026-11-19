@@ -1,7 +1,9 @@
 # Should join protection let two guests of one host connect?
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/9 (#9) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: grilling
-Status: open
+Status: moved to #9 (2026-11-19); was: open
 Blocked by: 18, 31
 Map: [Online co-op netcode](../map.md)
 

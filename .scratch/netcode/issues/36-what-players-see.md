@@ -1,7 +1,9 @@
 # What does a player see about their path?
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/13 (#13) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: grilling
-Status: open
+Status: moved to #13 (2026-11-19); was: open
 Blocked by: 07
 Map: [Online co-op netcode](../map.md)
 

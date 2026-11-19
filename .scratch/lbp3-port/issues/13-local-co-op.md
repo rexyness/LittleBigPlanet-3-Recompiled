@@ -1,7 +1,9 @@
 # Local co-op: up to four players with their own controllers on one PC
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/16 (#16) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: task
-Status: in progress (started 2026-11-11 evening, while the human plays milestone 3)
+Status: moved to #16 (2026-11-19); was: in progress (started 2026-11-11 evening, while the human plays milestone 3)
 Blocked by: none
 Map: [LBP3 native port](../map.md) (done; the human added local co-op to the offline finish line on 2026-11-11, and this build ticket closes it as gap 20 of the [spec](../spec.md))
 

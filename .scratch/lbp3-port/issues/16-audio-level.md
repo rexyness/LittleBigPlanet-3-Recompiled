@@ -1,7 +1,9 @@
 # Audio level: the game plays far too quietly on stereo speakers
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/19 (#19) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: task
-Status: in progress (fix built and tested offline 2026-11-12; in-game levels and the human's listen still to come)
+Status: moved to #19 (2026-11-19); was: in progress (fix built and tested offline 2026-11-12; in-game levels and the human's listen still to come)
 Blocked by: none
 Map: [LBP3 native port](../map.md) (done; reported by the human while playing the 1440p build on 2026-11-12: "the audio is hella low")
 

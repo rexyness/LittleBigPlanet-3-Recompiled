@@ -1,7 +1,9 @@
 # Does a shorter catch-up window hold under loss and bursts?
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/12 (#12) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: task
-Status: open
+Status: moved to #12 (2026-11-19); was: open
 Blocked by: none
 Map: [Online co-op netcode](../map.md)
 

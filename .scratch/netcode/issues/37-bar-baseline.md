@@ -1,7 +1,9 @@
 # Does today's build pass the bar's keep targets?
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/14 (#14) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: task
-Status: open
+Status: moved to #14 (2026-11-19); was: open
 Blocked by: 07
 Map: [Online co-op netcode](../map.md)
 

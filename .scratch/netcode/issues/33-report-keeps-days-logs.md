@@ -1,7 +1,9 @@
 # Keep the day's game logs for a friend's report
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/11 (#11) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: task
-Status: open
+Status: moved to #11 (2026-11-19); was: open
 Blocked by: none
 Map: [Online co-op netcode](../map.md)
 

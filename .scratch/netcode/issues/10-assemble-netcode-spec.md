@@ -1,7 +1,9 @@
 # Assemble the netcode spec
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/4 (#4) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: task
-Status: open
+Status: moved to #4 (2026-11-19); was: open
 Blocked by: 07, 08, 09, 14, 18, 26, 32, 36, 37, 38
 Map: [Online co-op netcode](../map.md)
 

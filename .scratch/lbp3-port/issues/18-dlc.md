@@ -1,7 +1,9 @@
 # DLC: the user's own add-on packs
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/21 (#21) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: build
-Status: done on branch `feat/addcont` (`092d4e5`, from `port` `6d212bc`, pushed to the fork); not merged into `port` yet. User launcher: `D:\Recomps\lbp3-wt\dlc\play_dlc.bat`.
+Status: moved to #21 (2026-11-19); was: done on branch `feat/addcont` (`092d4e5`, from `port` `6d212bc`, pushed to the fork); not merged into `port` yet. User launcher: `D:\Recomps\lbp3-wt\dlc\play_dlc.bat`.
 Map: [LBP3 native port](../map.md). The human asked "can we do dlc unlock here?" (2026-11-12). We support DLC the human owns: they said "I do have the dlc but they're in pkg format" (`D:\Recomps\ROMs\PS4\DLC`, 256 packages). Unlocking DLC that isn't owned is out of scope.
 
 ## Question

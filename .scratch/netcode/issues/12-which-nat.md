@@ -1,7 +1,9 @@
 # Which NAT gives the link a mapping per destination: the friend's, the host's or both?
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/5 (#5) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: task
-Status: open
+Status: moved to #5 (2026-11-19); was: open
 Blocked by: 19, 20
 Map: [Online co-op netcode](../map.md)
 

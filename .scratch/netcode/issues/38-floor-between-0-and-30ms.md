@@ -1,7 +1,9 @@
 # Does the one-frame floor hold through the bar's cell and between 0 and 30 ms of delay?
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/15 (#15) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: task
-Status: open
+Status: moved to #15 (2026-11-19); was: open
 Blocked by: 32
 Map: [Online co-op netcode](../map.md)
 

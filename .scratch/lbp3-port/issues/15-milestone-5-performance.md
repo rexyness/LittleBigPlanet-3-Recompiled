@@ -1,7 +1,9 @@
 # Milestone 5, performance: heavy levels over budget, and stalls
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/18 (#18) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: task
-Status: in progress (measuring; started 2026-11-11 evening while the human was away: "do amazing things my boy and don't stop")
+Status: moved to #18 (2026-11-19); was: in progress (measuring; started 2026-11-11 evening while the human was away: "do amazing things my boy and don't stop")
 Blocked by: none
 Map: [LBP3 native port](../map.md) (done; build ticket from the [spec](../spec.md), gap 10)
 

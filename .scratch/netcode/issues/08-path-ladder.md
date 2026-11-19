@@ -1,7 +1,9 @@
 # How do two players get a direct path, and what carries them when they can't?
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/2 (#2) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: grilling
-Status: open
+Status: moved to #2 (2026-11-19); was: open
 Blocked by: 02, 04, 11, 20
 Map: [Online co-op netcode](../map.md)
 

@@ -1,7 +1,9 @@
 # Milestone 3, the Prologue and the first world
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/17 (#17) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: task
-Status: in progress (the human has played through Titan Released; local co-op, ticket 13, closes with this milestone)
+Status: moved to #17 (2026-11-19); was: in progress (the human has played through Titan Released; local co-op, ticket 13, closes with this milestone)
 Blocked by: none
 Map: [LBP3 native port](../map.md) (done; this is the third build ticket from the [spec](../spec.md))
 

@@ -1,7 +1,9 @@
 # My Unlocks: LBP1/LBP2 content in LBP3
 
+> **Moved to GitHub:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/issues/22 (#22) on 2026-11-19. This file is the archive as of the move; work on the issue.
+
 Type: research, then a build (static analysis, then tested in game)
-Status: built 2026-11-12 on `feat/my-unlocks` `0c7200c` (pushed to the fork, not in `port`). `LBP3_MY_UNLOCKS=lbp1,lbp2` runs the game's own import offline, and it was tested on test saves. The user launcher is `D:\Recomps\lbp3-wt\unlocks\play_unlocks.bat`. (First answer, the same day: My Unlocks can't grant per item, its evidence is a server record, and LBP1/LBP2 DLC already goes through ticket 18's add-on path.)
+Status: moved to #22 (2026-11-19); was: built 2026-11-12 on `feat/my-unlocks` `0c7200c` (pushed to the fork, not in `port`). `LBP3_MY_UNLOCKS=lbp1,lbp2` runs the game's own import offline, and it was tested on test saves. The user launcher is `D:\Recomps\lbp3-wt\unlocks\play_unlocks.bat`. (First answer, the same day: My Unlocks can't grant per item, its evidence is a server record, and LBP1/LBP2 DLC already goes through ticket 18's add-on path.)
 Map: [LBP3 native port](../map.md). Follows [18](18-dlc.md). The human said My Unlocks unlocks their LBP1 and LBP2 content, and that it is greyed out because they aren't connected to PSN. They want that content unlocked "the same way the DLCs are". The boundary from ticket 18 still holds: grant only what the user's own packs or files show they own.
 
 ## Question
