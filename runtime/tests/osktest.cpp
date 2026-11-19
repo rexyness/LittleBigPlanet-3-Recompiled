@@ -516,6 +516,34 @@ void WordsChecks() {
     CHECK_EQ(int(w4.LearnedCount(u"favourite")), 2);
 }
 
+// The word list that ships (data\osk\words_en.txt, a folder above the build's exe), if it's there.
+void ShippedListChecks() {
+    std::printf("shipped word list\n");
+    const char* base = SDL_GetBasePath();
+    const std::filesystem::path path = std::filesystem::u8path(base ? base : "") / ".." / "data" / "osk" / "words_en.txt";
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        std::printf("  not found (%s): skipped\n", path.string().c_str());
+        return;
+    }
+    std::stringstream text;
+    text << in.rdbuf();
+    const uint64_t t0 = SDL_GetTicksNS();
+    Words w;
+    w.LoadList(text.str());
+    const double ms = double(SDL_GetTicksNS() - t0) / 1e6;
+    std::printf("  %zu words, loaded in %.1f ms\n", w.listSize(), ms);
+    CHECK_EQ(int(w.listSize()), 30000);
+    CHECK(ms < 200.0);
+    CHECK(!w.Suggest(u"th", 100).empty() && w.Suggest(u"th", 100)[0] == u"the");
+    CHECK(!w.Suggest(u"sackb", 100).empty() && w.Suggest(u"sackb", 100)[0] == u"Sackboy");
+    CHECK(!w.Suggest(u"mond", 100).empty() && w.Suggest(u"mond", 100)[0] == u"Monday");
+    CHECK(!w.Suggest(u"don'", 100).empty() && w.Suggest(u"don'", 100)[0] == u"don't");
+    CHECK(!w.Suggest(u"i", 100).empty() && w.Suggest(u"i", 100)[0] == u"I");
+    const Strings ma = w.Suggest(u"ma", 100);
+    CHECK(std::find(ma.begin(), ma.end(), u"may") != ma.end() || std::find(ma.begin(), ma.end(), u"man") != ma.end());
+}
+
 // The keyboard model with the test list's suggestions.
 Keyboard Suggesting(const Words& w, std::u16string text, uint32_t maxLength) {
     Keyboard kb(std::move(text), maxLength);
@@ -1393,6 +1421,7 @@ int main(int argc, char** argv) {
     ModeChecks();
     RepeaterChecks();
     WordsChecks();
+    ShippedListChecks();
     BarChecks();
     OverlayChecks();
     std::printf("%d checks, %d failed\n", g_checks, g_failures);
