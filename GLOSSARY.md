@@ -47,6 +47,27 @@ _Avoid_: system module, PRX (alone)
 **Imported library**:
 A PS4 system library the eboot or a game-shipped module links against and expects the runtime to provide.
 
+## The on-screen keyboard
+
+**On-screen keyboard**:
+The PS4-style text-entry panel the port draws over the game window whenever the game asks the player for text, played with the pad, the mouse or the PC keyboard.
+_Avoid_: OSK (in prose), IME, keyboard (alone, where the PC keyboard could be meant)
+
+**Prediction bar**:
+The row of the on-screen keyboard between the text field and the keys, where suggestions appear.
+
+**Suggestion**:
+A word offered in the prediction bar to finish the word the player is typing. The player's text changes only when they pick one; nothing is corrected or completed on its own.
+_Avoid_: autocomplete, autocorrect, prediction, candidate
+
+**Word list**:
+The common words, each ranked by how common it is, that suggestions come from before the player has taught the keyboard anything.
+_Avoid_: dictionary
+
+**Learned word**:
+A word the player has used, kept between game runs with the number of times they used it. A word is used when it appears in text the player confirms and was not already in the text the keyboard opened with; cancelled text teaches nothing.
+_Avoid_: user dictionary, history
+
 ## Online co-op
 
 **Online co-op**:
