@@ -213,6 +213,7 @@ std::int64_t NowUnix() { return static_cast<std::int64_t>(std::time(nullptr)); }
 static void LaunchWorker(Settings s, Paths p) {
     std::string note, error;
     RotateLogs(p);
+    AppendLauncherLog(p, AutoBackupSaves(p));  // never blocks Play
     EnvList extra;
     if (s.quit_menu) extra = QuitMenuSetup(p, &note);
     const EnvList env = GameEnvironment(s, p, extra);

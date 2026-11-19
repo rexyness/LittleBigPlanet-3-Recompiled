@@ -73,6 +73,14 @@ std::string BackupSaves(const Paths& p, const std::string& prefix, std::string* 
 // Backs the current saves up first, then replaces them with the backup. False with *error set if
 // anything went wrong (the current saves are then left as they were, or put back).
 bool RestoreBackup(const Paths& p, const Backup& b, std::string* error, std::string* safety_backup);
+// Before every Play: a copy of the saves named auto_<yyyyMMdd_HHmmss>, unless they are unchanged
+// since the newest automatic copy (same files, sizes and times); then the automatic copies beyond
+// `keep` are deleted, oldest first. Manual and before-restore copies are never deleted. Skipped
+// when there are no saves, while a test has the player's saves set aside, or while lbp3.exe runs.
+// Never blocks Play: returns a line for the launcher log. (sethlikepie's littlebigplanet3-pc
+// 07cc7e7 copies the saves before every start and keeps 10: scripts/save_backup.py.)
+constexpr int kAutoBackupsKept = 10;
+std::string AutoBackupSaves(const Paths& p, int keep = kAutoBackupsKept);
 
 // Rotates analysis\<base>_log.txt to .1 and .2 and keeps a copy of it, named by its last write,
 // in analysis\play_logs\ (as play_best.bat does).

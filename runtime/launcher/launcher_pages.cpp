@@ -184,6 +184,8 @@ void PageSaves(App& a) {
     Dim("%s", a.p.saves.string().c_str());
     const bool running = a.game_running, marker = a.marker;
     ImGui::Text("Last backup: %s", a.backups.empty() ? "none" : (When(a.backups.front().time) + "  (" + a.backups.front().name + ")").c_str());
+    Dim("Play also makes a copy (auto_...) when your saves changed since the last one; the newest %d are kept.",
+        kAutoBackupsKept);
     if (running) ImGui::TextColored(kWarn, "Close the game first: saves are only copied while it isn't running.");
     if (marker) ImGui::TextColored(kWarn, "A test run has your saves set aside right now; wait until it finishes.");
     ImGui::BeginDisabled(running || marker || a.shot_mode);
