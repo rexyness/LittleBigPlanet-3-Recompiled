@@ -10,9 +10,11 @@
 // Controls (the PS4's, as shadPS4's keyboard lays them out): d-pad or left stick = move,
 // Cross or a touch-pad click = press the key, Circle = cancel, R2 = done, Square =
 // backspace, Triangle = space, L2 = shift, L2+Triangle = symbols, L3 = accents,
-// L1/R1 = move the text cursor. Physical keys: typing, Backspace, Delete, Left/Right,
-// Home/End, Enter = done, Esc = cancel. Buttons and keys already held when the keyboard
-// opens are ignored until released.
+// L1/R1 = move the text cursor, right stick = move the keyboard around the window (the mouse
+// can drag it by the title row). Physical keys: typing, Backspace, Delete, Left/Right,
+// Home/End, Enter = done, Esc = cancel. Buttons, sticks and keys already held when the
+// keyboard opens are ignored until released. Where it was moved to is remembered (see
+// ui/osk_overlay.cpp); LBP3_OSK_PLAIN=1 turns that off for scripted tests.
 #pragma once
 #include <cstdint>
 #include <functional>

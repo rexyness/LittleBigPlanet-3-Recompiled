@@ -15,10 +15,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include <imgui.h>
+#include <windows.h>
 
 #include "hle/pad_types.h"
 #include "input/gamepad.h"
@@ -426,8 +430,151 @@ ps4::PadData g_pad{};
 void Pad(uint32_t buttons, int sx = 0, int sy = 0) {
     g_pad.buttons = buttons;
     g_pad.leftStick = {uint8_t(128 + sx), uint8_t(128 + sy)};
+    g_pad.rightStick = {128, 128};
     g_now += 16;
     Draw();
+}
+
+// The right stick (moves the panel), the left one centred.
+void PadR(uint32_t buttons, int rx, int ry) {
+    g_pad.buttons = buttons;
+    g_pad.leftStick = {128, 128};
+    g_pad.rightStick = {uint8_t(128 + rx), uint8_t(128 + ry)};
+    g_now += 16;
+    Draw();
+}
+
+// The mouse at (x, y) in the window; button: 0 = no change, 1 = left down, 2 = left up. One
+// frame after each event, so ImGui sees the move and the click separately.
+void Mouse(SDL_Window* w, float x, float y, int button = 0) {
+    SDL_Event e{};
+    e.type = SDL_EVENT_MOUSE_MOTION;
+    e.motion.windowID = SDL_GetWindowID(w);
+    e.motion.x = x;
+    e.motion.y = y;
+    HandleEvent(e);
+    Pad(0);
+    if (!button) return;
+    SDL_Event b{};
+    b.type = button == 1 ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
+    b.button.windowID = SDL_GetWindowID(w);
+    b.button.button = SDL_BUTTON_LEFT;
+    b.button.down = button == 1;
+    b.button.clicks = 1;
+    b.button.x = x;
+    b.button.y = y;
+    HandleEvent(b);
+    Pad(0);
+}
+
+void PlaceChecks(SDL_Window* window, const Request& req) {
+    std::printf("place\n");
+    float px = 0.f, py = 0.f, qx = 0.f, qy = 0.f;
+    // The right stick moves the panel, faster the further it's pushed, and stops at the edges.
+    testing::SetPlace(0.5f, 0.5f);
+    Answers a1;
+    Pad(0);
+    Show(req, Recorder(a1));
+    Pad(0);
+    for (int i = 0; i < 6; ++i) PadR(0, 127, 0);
+    testing::GetPlace(px, py);
+    CHECK(px > 0.55f && px < 0.62f);  // 1280x720: ~0.0128 of the room a 16 ms frame
+    CHECK(py == 0.5f);
+    PadR(0, 12, -12);  // inside the deadzone (0.13 of full tilt)
+    testing::GetPlace(qx, qy);
+    CHECK(qx == px && qy == py);
+    for (int i = 0; i < 200; ++i) PadR(0, 127, 127);
+    testing::GetPlace(px, py);
+    CHECK(px == 1.f && py == 1.f);
+    Pad(0);
+    Pad(ps4::PAD_CIRCLE);
+    CHECK_EQ(a1.count, 1);
+    // The next keyboard opens where the last was left; a stick held as it opens moves nothing
+    // until it has been let go.
+    Answers a2;
+    PadR(0, -127, 0);
+    Show(req, Recorder(a2));
+    PadR(0, -127, 0);
+    PadR(0, -127, 0);
+    testing::GetPlace(px, py);
+    CHECK(px == 1.f && py == 1.f);
+    Pad(0);
+    PadR(0, -127, 0);
+    PadR(0, -127, 0);
+    testing::GetPlace(px, py);
+    CHECK(px < 1.f && py == 1.f);
+    Pad(0);
+    Pad(ps4::PAD_CIRCLE);
+    // The mouse drags it by the title row. At 1280x720 the centred panel's corner is at
+    // (375, 184) and its title row is 38 px high.
+    testing::SetPlace(0.5f, 0.5f);
+    Answers a3;
+    Pad(0);
+    Show(req, Recorder(a3));
+    Pad(0);
+    Mouse(window, 400.f, 200.f);
+    Mouse(window, 400.f, 200.f, 1);
+    Mouse(window, 100.f, 50.f);
+    Mouse(window, 100.f, 50.f, 2);
+    testing::GetPlace(px, py);
+    CHECK(std::fabs(px - 75.f / 751.33f) < 0.01f);
+    CHECK(std::fabs(py - 34.f / 368.f) < 0.01f);
+    Mouse(window, 600.f, 600.f);  // released: it stays
+    testing::GetPlace(qx, qy);
+    CHECK(qx == px && qy == py);
+    CHECK_EQ(a3.count, 0);  // dragging answers nothing
+    Pad(ps4::PAD_CIRCLE);
+    Pad(0);
+
+    // The place lasts between runs: user\config\keyboard.ini, written when a keyboard closes,
+    // read by the first keyboard of a run; a hand-edited file is read as far as it makes sense.
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path old = fs::current_path();
+    const fs::path dir = fs::temp_directory_path() / ("osktest_files_" + std::to_string(GetCurrentProcessId()));
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    fs::current_path(dir);
+    testing::UseFiles(true);
+    testing::ForgetFiles();
+    testing::SetPlace(0.25f, 0.75f);
+    Answers a4;
+    Show(req, Recorder(a4));
+    Pad(0);
+    Pad(ps4::PAD_CIRCLE);
+    Pad(0);
+    std::ifstream ini("user\\config\\keyboard.ini");
+    std::stringstream body;
+    body << ini.rdbuf();
+    ini.close();
+    CHECK(body.str().find("x=0.2500\ny=0.7500\n") != std::string::npos);
+    CHECK(!fs::exists("user\\config\\keyboard.ini.tmp"));
+    testing::ForgetFiles();
+    testing::GetPlace(px, py);
+    CHECK(px == 0.5f && py == 0.5f);
+    Answers a5;
+    Show(req, Recorder(a5));
+    Pad(0);
+    testing::GetPlace(px, py);
+    CHECK(px == 0.25f && py == 0.75f);
+    Pad(ps4::PAD_CIRCLE);
+    Pad(0);
+    {
+        std::ofstream edit("user\\config\\keyboard.ini", std::ios::binary | std::ios::trunc);
+        edit << "\xEF\xBB\xBFjunk\r\n x=0.1 \r\ny=abc\r\nz=0.9\r\n";
+    }
+    testing::ForgetFiles();
+    Answers a6;
+    Show(req, Recorder(a6));
+    Pad(0);
+    testing::GetPlace(px, py);
+    CHECK(std::fabs(px - 0.1f) < 1e-6f && py == 0.5f);
+    Pad(ps4::PAD_CIRCLE);
+    Pad(0);
+    testing::UseFiles(false);
+    testing::ForgetFiles();
+    fs::current_path(old);
+    fs::remove_all(dir, ec);
 }
 
 std::u16string Text() {
@@ -458,6 +605,7 @@ void OverlayChecks() {
     CHECK(Available());
     testing::SetClock(Clock);
     testing::SetPad(&g_pad);
+    testing::UseFiles(false);  // nothing from or into this PC's user\config
     Draw();  // nothing up: no-op
     CHECK(!Visible());
 
@@ -644,6 +792,8 @@ void OverlayChecks() {
     Pad(0);
     CHECK(Text() == u"abc");
     Pad(ps4::PAD_CIRCLE);
+
+    PlaceChecks(window, req);
 
     testing::SetPad(nullptr);
     testing::SetClock(nullptr);

@@ -7,6 +7,10 @@
 // button, and a 10-column key grid; key colours, the selection highlight (a lighter key
 // with a white border) and the hotkey badges in each key's top-left corner come from there
 // too. Button and key icons are drawn as shapes.
+//
+// The panel can be moved (the right stick, or the mouse on the title row). Where it is, as a
+// fraction of the room it has to move in, carries over to the next keyboard and, through
+// user\config\keyboard.ini, to the next run, so a resized window keeps it in the same place.
 #include "ui/osk_overlay.h"
 
 #include <SDL3/SDL.h>
@@ -17,8 +21,12 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -60,6 +68,112 @@ uint64_t NowMs() { return g_testClock ? g_testClock() : SDL_GetTicks(); }
 constexpr uint64_t kBlinkMs = 530;
 constexpr int kStickThreshold = 64;  // of 128: a clear push
 constexpr int kStickCentre = 40;     // back inside this = released
+constexpr float kMoveSpeed = 900.f;  // 1080p pixels a second, the right stick at full tilt (as shadPS4)
+constexpr float kMoveDeadzone = 0.2f;
+constexpr uint64_t kMaxFrameMs = 50;  // a stall doesn't throw the panel across the screen
+
+// ---- Files (user\config) ----
+
+constexpr const char* kPlacePath = "user\\config\\keyboard.ini";
+
+// LBP3_OSK_PLAIN=1 (the scripted tests): the keyboard as it was before suggestions and the
+// remembered place, so runs don't depend on what this PC has learned and leave user\config alone.
+bool Plain() {
+    static const bool plain = [] {
+        const char* v = std::getenv("LBP3_OSK_PLAIN");
+        return v && *v && std::strcmp(v, "0") != 0;
+    }();
+    return plain;
+}
+
+bool g_useFiles = true;  // osktest turns it off
+bool FilesOn() { return g_useFiles && !Plain(); }
+
+std::optional<std::string> ReadFile(const char* path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return std::nullopt;
+    std::ostringstream s;
+    s << in.rdbuf();
+    std::string text = s.str();
+    if (text.rfind("\xEF\xBB\xBF", 0) == 0) text.erase(0, 3);  // a BOM from a hand edit
+    return text;
+}
+
+// Through a temporary file and a rename, so a crash mid-write never leaves half a file.
+bool WriteFile(const char* path, const std::string& text) {
+    std::error_code ec;
+    const std::filesystem::path p(path);
+    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    const std::filesystem::path tmp = p.string() + ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) return false;
+        out << text;
+        if (!out.flush()) return false;
+    }
+    std::filesystem::rename(tmp, p, ec);
+    if (ec) {
+        std::fprintf(stderr, "[osk] couldn't write %s: %s\n", path, ec.message().c_str());
+        std::filesystem::remove(tmp, ec);
+        return false;
+    }
+    return true;
+}
+
+// Each line of a small hand-editable file, without CR or surrounding blanks.
+template <typename Fn>
+void ForEachLine(std::string_view text, Fn&& fn) {
+    size_t at = 0;
+    while (at <= text.size()) {
+        size_t nl = text.find('\n', at);
+        if (nl == std::string_view::npos) nl = text.size();
+        std::string_view line = text.substr(at, nl - at);
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) line.remove_suffix(1);
+        while (!line.empty() && (line.front() == ' ' || line.front() == '\t')) line.remove_prefix(1);
+        fn(line);
+        at = nl + 1;
+    }
+}
+
+// ---- Where the panel is ----
+
+// 0 = against the left (top) edge, 1 = against the right (bottom), 0.5 = centred.
+struct Place {
+    float x = 0.5f, y = 0.5f;
+};
+Place g_place;
+bool g_placeLoaded = false, g_placeDirty = false;
+
+void LoadPlace() {
+    if (g_placeLoaded) return;
+    g_placeLoaded = true;
+    if (!FilesOn()) return;
+    const auto text = ReadFile(kPlacePath);
+    if (!text) return;
+    Place p;
+    ForEachLine(*text, [&](std::string_view line) {
+        if (line.size() < 3 || line[1] != '=' || (line[0] != 'x' && line[0] != 'y')) return;
+        const std::string value(line.substr(2));
+        char* end = nullptr;
+        const float v = std::strtof(value.c_str(), &end);
+        if (end == value.c_str() || !std::isfinite(v)) return;
+        (line[0] == 'x' ? p.x : p.y) = std::clamp(v, 0.f, 1.f);
+    });
+    g_place = p;
+    std::fprintf(stderr, "[osk] keyboard place %.3f,%.3f (%s)\n", p.x, p.y, kPlacePath);
+}
+
+void SavePlace() {
+    if (!g_placeDirty || !FilesOn()) return;
+    g_placeDirty = false;
+    char text[256];
+    std::snprintf(text, sizeof(text),
+                  "; Where the on-screen keyboard sits: 0 = against the left (top) edge, 1 = against the right\n"
+                  "; (bottom), 0.5 = centred. Delete this file to centre it again.\n"
+                  "x=%.4f\ny=%.4f\n",
+                  g_place.x, g_place.y);
+    WriteFile(kPlacePath, text);
+}
 
 struct Live {
     explicit Live(Pending p)
@@ -73,7 +187,13 @@ struct Live {
     Keyboard kb;
     // Pad: buttons held when the keyboard came up count only after a release.
     uint32_t ignore = 0, prev = 0;
-    bool stickIgnored = false;
+    bool stickIgnored = false, rightIgnored = false;
+    // The right stick this frame, deadzone applied (-1..1); Frame moves the panel by it.
+    float moveX = 0.f, moveY = 0.f;
+    uint64_t lastFrameMs = 0;
+    // The mouse holding the title row: the panel follows it.
+    bool dragging = false;
+    ImVec2 grab{};
     Repeater up, down, left, right, cross, square, triangle, l1, r1;
     bool l2Down = false, l2Combo = false, triangleCombo = false;
     // Physical keys held when it came up (the game's Confirm/Back) count only after a release.
@@ -103,6 +223,7 @@ bool ReadPad(ps4::PadData& pad) {
 
 void EndLive() {
     if (!g_live) return;
+    SavePlace();
     if (SDL_Window* w = host::Window()) SDL_StopTextInput(w);
     // The release of a click that answered comes after the keyboard is gone.
     host::ReleaseMouse();
@@ -118,6 +239,10 @@ void Rearm(Live& l) {
     l.prev = 0;
     l.stickIgnored = ok && (std::abs(int(pad.leftStick.x) - 128) > kStickCentre ||
                             std::abs(int(pad.leftStick.y) - 128) > kStickCentre);
+    l.rightIgnored = ok && (std::abs(int(pad.rightStick.x) - 128) > kStickCentre ||
+                            std::abs(int(pad.rightStick.y) - 128) > kStickCentre);
+    l.moveX = l.moveY = 0.f;
+    l.dragging = false;
     for (Repeater* r : {&l.up, &l.down, &l.left, &l.right, &l.cross, &l.square, &l.triangle, &l.l1, &l.r1}) r->Reset();
     l.l2Down = l.l2Combo = l.triangleCombo = false;
     const bool* keys = SDL_GetKeyboardState(nullptr);
@@ -127,6 +252,7 @@ void Rearm(Live& l) {
 
 void StartLive(Pending p) {
     host::EnsureImGui();
+    LoadPlace();
     g_live.emplace(std::move(p));
     Live& l = *g_live;
     Rearm(l);
@@ -203,6 +329,19 @@ bool PollPad() {
             }
         }
     }
+    // The right stick moves the panel, faster the further it's pushed; Frame applies it.
+    l.moveX = l.moveY = 0.f;
+    if (ok) {
+        const int rx = int(pad.rightStick.x) - 128, ry = int(pad.rightStick.y) - 128;
+        if (l.rightIgnored && std::abs(rx) <= kStickCentre && std::abs(ry) <= kStickCentre) l.rightIgnored = false;
+        const float fx = std::clamp(rx / 127.f, -1.f, 1.f), fy = std::clamp(ry / 127.f, -1.f, 1.f);
+        const float m = std::hypot(fx, fy);
+        if (!l.rightIgnored && m > kMoveDeadzone) {
+            const float k = std::min(1.f, (m - kMoveDeadzone) / (1.f - kMoveDeadzone)) / m;
+            l.moveX = fx * k;
+            l.moveY = fy * k;
+        }
+    }
     const uint64_t now = NowMs();
     Keyboard& kb = l.kb;
     if (int f = l.up.Update((b & ps4::PAD_UP) || sUp, now)) kb.Move(-1, 0, f == 2);
@@ -275,13 +414,39 @@ struct Geometry {
     std::vector<KeyBox> boxes;  // the drawn keys
 };
 
+float Scale(ImVec2 display) { return std::max(0.1f, std::min(display.x / 1920.f, display.y / 1080.f)); }
+
+ImVec2 PanelSize(const Keyboard& kb, float s) { return {793.f * s, (kb.multiline() ? 628.f : 528.f) * s}; }
+
+// The room the panel has to move in, in pixels (0 where it fills the window).
+ImVec2 FreeRoom(const Keyboard& kb, ImVec2 display) {
+    const ImVec2 size = PanelSize(kb, Scale(display));
+    return {std::max(0.f, display.x - size.x), std::max(0.f, display.y - size.y)};
+}
+
+// Puts the panel's top-left corner at `corner` (pixels), kept inside the window.
+void PlaceAt(const Keyboard& kb, ImVec2 display, ImVec2 corner) {
+    const ImVec2 room = FreeRoom(kb, display);
+    const Place before = g_place;
+    if (room.x > 0.f) g_place.x = std::clamp(corner.x / room.x, 0.f, 1.f);
+    if (room.y > 0.f) g_place.y = std::clamp(corner.y / room.y, 0.f, 1.f);
+    if (g_place.x != before.x || g_place.y != before.y) g_placeDirty = true;
+}
+
+ImVec2 Corner(const Keyboard& kb, ImVec2 display) {
+    const ImVec2 room = FreeRoom(kb, display);
+    return {room.x * g_place.x, room.y * g_place.y};
+}
+
 Geometry Compute(const Keyboard& kb, ImVec2 display) {
     Geometry g;
-    const float s = std::max(0.1f, std::min(display.x / 1920.f, display.y / 1080.f));
+    const float s = Scale(display);
     g.s = s;
     const bool multi = kb.multiline();
-    const float panelW = 793.f * s, panelH = (multi ? 628.f : 528.f) * s;
-    const float x = std::floor((display.x - panelW) * 0.5f), y = std::floor((display.y - panelH) * 0.5f);
+    const ImVec2 size = PanelSize(kb, s);
+    const float panelW = size.x, panelH = size.y;
+    const ImVec2 corner = Corner(kb, display);
+    const float x = std::floor(corner.x), y = std::floor(corner.y);
     g.panel = {{x, y}, {x + panelW, y + panelH}};
     const float labelH = 57.f * s, inputH = (multi ? 151.f : 50.f) * s, predictH = 53.f * s, closeW = 53.f * s;
     const float keysH = 316.f * s, padX = 26.f * s, padBottom = 26.f * s;
@@ -696,6 +861,8 @@ bool Poll(bool top) {
     Live& l = *g_live;
     if (!top) {
         l.wasTop = false;
+        l.moveX = l.moveY = 0.f;
+        l.dragging = false;
         return true;
     }
     if (!l.wasTop) {  // a system dialog over it just closed: its answering press isn't ours
@@ -762,8 +929,19 @@ void Frame(bool top, ImVec2 display) {
     g_fontKeys = host::KeyFont();
     const ImGuiIO& io = ImGui::GetIO();
 
-    // The mouse (top only): hovering selects (only when the pointer moves), a click presses.
     Live& l = *g_live;
+    // The right stick moves the panel by the time since the last frame.
+    const uint64_t frameMs = NowMs();
+    const float dt = l.lastFrameMs ? float(std::min(frameMs - l.lastFrameMs, kMaxFrameMs)) / 1000.f : 0.f;
+    l.lastFrameMs = frameMs;
+    if (top && dt > 0.f && (l.moveX != 0.f || l.moveY != 0.f)) {
+        const float step = kMoveSpeed * Scale(display) * dt;
+        const ImVec2 c = Corner(l.kb, display);
+        PlaceAt(l.kb, display, {c.x + l.moveX * step, c.y + l.moveY * step});
+    }
+
+    // The mouse (top only): hovering selects (only when the pointer moves), a click presses;
+    // the title row drags the panel.
     Geometry g = Compute(l.kb, display);
     const ImVec2 m = io.MousePos;
     const bool mouseValid = top && ImGui::IsMousePosValid(&m);
@@ -771,6 +949,19 @@ void Frame(bool top, ImVec2 display) {
     l.lastMouse = m;
     l.mouseSeen = true;
     const bool click = mouseValid && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    const Box titleRow{g.panel.min, {g.panel.max.x, g.input.min.y}};
+    if (click && titleRow.Contains(m)) {
+        l.dragging = true;
+        l.grab = {m.x - g.panel.min.x, m.y - g.panel.min.y};
+    }
+    if (l.dragging) {
+        if (mouseValid && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            PlaceAt(l.kb, display, {m.x - l.grab.x, m.y - l.grab.y});
+            g = Compute(l.kb, display);
+        } else {
+            l.dragging = false;
+        }
+    }
     const bool closeHover = mouseValid && g.close.Contains(m);
     int answer = -1;  // -1 none, 0 cancel, 1 confirm
     if (mouseValid) {
@@ -824,6 +1015,24 @@ bool WithKeyboard(const std::function<void(Keyboard&)>& fn) {
 void SetPad(const ps4::PadData* pad) { g_testPad = pad; }
 
 void SetClock(uint64_t (*nowMs)()) { g_testClock = nowMs; }
+
+void UseFiles(bool on) { g_useFiles = on; }
+
+void ForgetFiles() {
+    g_placeLoaded = false;
+    g_placeDirty = false;
+    g_place = Place{};
+}
+
+void GetPlace(float& x, float& y) {
+    x = g_place.x;
+    y = g_place.y;
+}
+
+void SetPlace(float x, float y) {
+    g_place = {std::clamp(x, 0.f, 1.f), std::clamp(y, 0.f, 1.f)};
+    g_placeDirty = true;
+}
 
 }  // namespace testing
 
