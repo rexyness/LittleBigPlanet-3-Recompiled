@@ -1,32 +1,26 @@
 """Builds data/osk/words_en.txt, the on-screen keyboard's English word list (GLOSSARY.md: word list).
 
-    python -I tools/osk_wordlist.py --frequency en_50k.txt --scowl scowl-2020.12.07 --blocklist en \
+    python -I tools/osk_wordlist.py --frequency en_50k.txt --scowl scowl-2020.12.07 \
         [--out data/osk/words_en.txt] [--size 30000] [--report]
-    python -I tools/osk_wordlist.py --hash WORD      the hash to add a word to EXTRA_BLOCK_SHA256
 
-Inputs (downloaded by hand, never committed; their SHA-256 is checked):
+Inputs (downloaded by hand, never committed; checked against the pinned versions):
   --frequency  hermitdave/FrequencyWords content/2018/en/en_50k.txt at 525f9b560de45753a5ea01069454e72e9aa541c6
                (word counts from OpenSubtitles 2018; content CC BY-SA 4.0, see that commit's README)
                https://raw.githubusercontent.com/hermitdave/FrequencyWords/525f9b560de45753a5ea01069454e72e9aa541c6/content/2018/en/en_50k.txt
   --scowl      SCOWL 2020.12.07, unpacked (Kevin Atkinson; MIT-like, see its Copyright file)
                https://downloads.sourceforge.net/project/wordlist/SCOWL/2020.12.07/scowl-2020.12.07.tar.gz
-               final/ gives the capitals of names; misc/ (offensive.1, offensive.2, profane.1) words to leave out
-  --blocklist  LDNOOBW List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words "en" at 4638b970cb8d9d82789564fcba1f4a1eb508ff1a
-               (CC BY 4.0), more words to leave out
-               https://raw.githubusercontent.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/4638b970cb8d9d82789564fcba1f4a1eb508ff1a/en
+               final/ gives the capitals of names
 
-What it does to the counts (the decisions behind it are in the commit that added this tool):
+What it does to the counts (the decisions behind it are in the commits that added and changed this tool):
   - The list is all lower case and splits contractions ("don" + "'t"): the fragments go, and the common
     contractions come back with a count taken from their fragment (CONTRACTIONS below).
   - Capitals: a word SCOWL knows only with a capital (Monday, London) gets it; "I" and its contractions too.
-  - Swear words and slurs are left out: SCOWL's offensive and profane lists (but for a few harmless
-    words in profane.3), LDNOOBW's single words with -s/-es (but for some ordinary words it lists for
-    another sense), anything containing the strongest swear words, and EXTRA_BLOCK_SHA256 below.
-  - LittleBigPlanet's own words are added (LBP_NAMES, LBP_WORDS).
+  - Nothing is left out for being rude: the list is the subtitles' words as they come.
+  - LittleBigPlanet's own words are added (LBP_NAMES, LBP_TOOLS, LBP_WORDS).
   - Only words in the keyboard's sense are kept (letters, ' or - between letters), the most common first.
 
---report prints what to look at before committing a new list: blocked words found as parts of kept words,
-the capitals of some words that are also names, and the top six suggestions for each letter.
+--report prints what to look at before committing a new list: the capitals of some words that are also
+names, and the top six suggestions for each letter.
 """
 import argparse
 import hashlib
@@ -36,7 +30,6 @@ import sys
 
 # The pinned inputs; a mismatch only warns (the output would differ from the committed list).
 FREQUENCY_SHA256 = "5351ff405b1126ef555791dd4d9798a48e3e9a501a9fc481a9da957752cfb458"
-BLOCKLIST_SHA256 = "af851ecef1d5f212caba17339b12ac39cc2fef7d78c74876f67237644fcee8bd"
 SCOWL_VERSION = "2020.12.07"
 
 WORD = re.compile(r"^[^\W\d_]+(?:['-][^\W\d_]+)*$")
@@ -120,89 +113,14 @@ def read_scowl(root):
     return lower, capital
 
 
-# The port's own additions are kept as hashes (the first 16 hex digits of the SHA-256 of the lower-case
-# word), so this public file doesn't spell out slurs; `--hash WORD` prints one to add.
-# The six strongest swear words, left out wherever they appear in a word ("...-up", "...hole"):
-# (length, hash) of each.
-STRONG_SHA256 = {
-    (4, "566f532d486c9477"),
-    (4, "6ac3c336e4094835"),
-    (4, "85fc17f7069acd39"),
-    (4, "c2c3b68b48832afd"),
-    (5, "9ae315a94e428a7e"),
-    (5, "d75a838dc758ba17"),
-}
-# 47 slurs, insults and mild swear words that neither list has (and their plurals and other forms),
-# found by reviewing a built list.
-EXTRA_BLOCK_SHA256 = {
-    "06a1d8bf7fc210de", "0dcc4d3364433181", "158869a97379229b", "1802d081455e60cd",
-    "1dc96d865058d53a", "24dce6a4da3fb576", "2b3240970c71346b", "3314b0999a53aafe",
-    "43b45d0f0863bdd8", "45cd3e1bb472d8e2", "5cb6ba4a9d88885c", "619bc82e0d200e4a",
-    "6e7727239c684e8b", "70a4ce3720ccf427", "70aafb4266950c0d", "7540bd4356952df4",
-    "819837a1df89760e", "82159dd02870c13e", "867d78976655050c", "886d51e97ad7931d",
-    "92a9bf818e7e0002", "a40ccba874d28799", "a821c62e8104f851", "affc875700667e07",
-    "b04a8a4006358447", "b601d5e9e6c9804e", "b9a365c4d2675d5f", "bbf8bb7863176009",
-    "bd331fb1d24298f5", "bdb1cc258d6976aa", "c1cabb6f6e431f9c", "ca05283dee355647",
-    "cc02032349c833ac", "ccff74c2d57f45d2", "d11215a13d66dbd3", "db10a7906121f4ea",
-    "dc52ab1c9ebf4574", "dd14a884ef303d84", "de44de95f1339e73", "de569a7f6852ba73",
-    "e9143a29033d9145", "f0288d013f92d92e", "f1a5fb56076acc84", "f9d0d9b18ae9033a",
-    "fa38a8d3e5b92744", "fb96c27642b4bd11", "ff454a8739cfe724",
-}
-
-
-def word_hash(word):
-    return hashlib.sha256(word.lower().encode("utf-8")).hexdigest()[:16]
-# SCOWL's milder profane.3 words are left out too, except these.
-MILD_KEEP = {"dickens", "dicker", "dickers", "fart", "farted", "farting", "farts"}
-# Ordinary words that LDNOOBW lists for another sense.
-NOT_BLOCKED = {"suck", "sucks", "sucked", "sucking", "sucker", "suckers", "escort", "escorts", "escorted",
-               "escorting", "snatch", "snatched", "snatching", "playboy", "hardcore", "domination", "skeeter",
-               "scat", "booby", "spunk", "poof", "spices"}
-
-
-def read_blocked(scowl_root, blocklist):
-    """The roots (for the report) and every word left out. SCOWL's lists carry their own inflections;
-    LDNOOBW's words get -s and -es."""
-    misc = pathlib.Path(scowl_root) / "misc"
-    roots, blocked = set(), set()
-    for name in ("offensive.1", "offensive.2", "profane.1", "profane.3"):
-        for w in (misc / name).read_text(encoding="latin-1").split():
-            w = w.lower()
-            if "'" in w or w in MILD_KEEP:
-                continue
-            roots.add(w)
-            blocked.add(w)
-    for line in pathlib.Path(blocklist).read_text(encoding="utf-8").splitlines():
-        w = line.strip().lower()
-        if w and " " not in w:
-            roots.add(w)
-            blocked.update({w, w + "s", w + "es"})
-    return roots, blocked - NOT_BLOCKED
-
-
-STRONG_BY_LENGTH = {}
-for _n, _h in STRONG_SHA256:
-    STRONG_BY_LENGTH.setdefault(_n, set()).add(_h)
-
-
-def is_blocked(word, blocked):
-    if word in blocked or word_hash(word) in EXTRA_BLOCK_SHA256:
-        return True
-    return any(word_hash(word[i:i + n]) in hashes
-               for n, hashes in STRONG_BY_LENGTH.items() for i in range(len(word) - n + 1))
-
-
 def build(args):
     if sha256(args.frequency) != FREQUENCY_SHA256:
         print(f"warning: {args.frequency} isn't the pinned en_50k.txt (sha256 differs)", file=sys.stderr)
-    if sha256(args.blocklist) != BLOCKLIST_SHA256:
-        print(f"warning: {args.blocklist} isn't the pinned LDNOOBW en (sha256 differs)", file=sys.stderr)
     version = pathlib.Path(args.scowl, "VERSION")
     if not version.exists() or SCOWL_VERSION not in version.read_text(encoding="latin-1"):
         print(f"warning: {args.scowl} isn't SCOWL {SCOWL_VERSION}", file=sys.stderr)
     counts = read_frequency(args.frequency)
     lower, capital = read_scowl(args.scowl)
-    roots, blocked = read_blocked(args.scowl, args.blocklist)
 
     # The fragments' counts feed the contractions; the n't stems' share of 't is taken out first.
     frag = {k: counts.get(k, 0) for k in ("'s", "'t", "'m", "'re", "'ll", "'ve", "'d")}
@@ -215,8 +133,6 @@ def build(args):
         if w in FRAGMENTS or w.startswith("'") or not WORD.match(w):
             continue
         if len(w) == 1 and w not in ("a", "i"):
-            continue
-        if is_blocked(w, blocked):
             continue
         form = "I" if w == "i" else (capital[w] if w not in lower and w in capital else w)
         words[w] = [form, c]
@@ -237,8 +153,7 @@ def build(args):
         elif words[w][0] != w and w not in (n.lower() for n in LBP_NAMES):
             words[w][0] = w
 
-    ranked = sorted(words.values(), key=lambda fc: (-fc[1], fc[0].lower()))[: args.size]
-    return ranked, roots, blocked
+    return sorted(words.values(), key=lambda fc: (-fc[1], fc[0].lower()))[: args.size]
 
 
 def write(ranked, out):
@@ -254,18 +169,8 @@ def write(ranked, out):
     print(f"wrote {out}: {len(ranked)} words")
 
 
-def report(ranked, roots):
+def report(ranked):
     forms = [f for f, _ in ranked]
-    print("\n== blocked roots found inside kept words (check none of these is offensive):")
-    hits = {}
-    for r in sorted(roots):
-        if len(r) < 3:
-            continue
-        found = [f for f in forms if r in f.lower() and f.lower() != r]
-        if found:
-            hits[r] = found[:8]
-    for r, found in hits.items():
-        print(f"  {r}: {', '.join(found)}")
     print("\n== capitals of words that are also names:")
     by = {f.lower(): f for f in forms}
     for w in ["may", "will", "mark", "bill", "rose", "march", "china", "turkey", "monday", "london", "john", "i",
@@ -277,21 +182,17 @@ def report(ranked, roots):
 
 
 def main():
-    if len(sys.argv) == 3 and sys.argv[1] == "--hash":
-        print(word_hash(sys.argv[2]))  # for EXTRA_BLOCK_SHA256 / STRONG_SHA256
-        return
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--frequency", required=True)
     p.add_argument("--scowl", required=True)
-    p.add_argument("--blocklist", required=True)
     p.add_argument("--out", default="data/osk/words_en.txt")
     p.add_argument("--size", type=int, default=30000)
     p.add_argument("--report", action="store_true")
     args = p.parse_args()
-    ranked, roots, _ = build(args)
+    ranked = build(args)
     write(ranked, args.out)
     if args.report:
-        report(ranked, roots)
+        report(ranked)
 
 
 if __name__ == "__main__":

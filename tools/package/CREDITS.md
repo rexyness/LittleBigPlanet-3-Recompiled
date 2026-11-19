@@ -19,8 +19,8 @@
 - **Refresh** (LittleBigRefresh) and **shadNet** (shadps4-emu): the community game server and PSN stand-in
   that online play connects to.
 - **The on-screen keyboard's word suggestions** use a word list adapted from **FrequencyWords** by Hermit Dave
-  (counts from the OpenSubtitles corpus via OPUS), with capitals and taboo words from **SCOWL** by Kevin Atkinson
-  and the **LDNOOBW** list (`data\osk\NOTICE.md`).
+  (counts from the OpenSubtitles corpus via OPUS), with capitals from **SCOWL** by Kevin Atkinson
+  (`data\osk\NOTICE.md`).
 - Libraries: SDL3, Dear ImGui, abseil, protobuf, LibreSSL, glslang, Vulkan headers, Vulkan Memory Allocator,
   fmt, sirit, Zydis, xbyak, xxHash, miniz, robin-map, magic_enum, half, Boost headers, Tracy, stb, nlohmann/json
   (licences in `licenses\`).

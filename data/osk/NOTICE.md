@@ -23,15 +23,13 @@ http://opus.nlpl.eu/OpenSubtitles2018.php (subtitles from www.opensubtitles.org)
 - The pieces of split contractions ("don", "'t", "'s") were removed, and the common contractions ("don't",
   "it's", "I'm") added back with counts estimated from those pieces.
 - Names were given their capitals ("Monday", "London", "I") using SCOWL (below).
-- Swear words and slurs were left out, using SCOWL's lists of taboo words, the LDNOOBW list (below) and a
-  short list of the port's own.
 - Words from LittleBigPlanet were added ("Sackboy", "Oddsock", "Popit", "Velociporter").
 - Only the 30,000 most common words were kept.
 
-## Lists used to make it
+## List used to make it
 
-**SCOWL** (Spell Checker Oriented Word Lists) 2020.12.07, http://wordlist.aspell.net/, was used for the capitals
-and the taboo words. Its whole copyright file, with the notices of the lists SCOWL draws on, is
+**SCOWL** (Spell Checker Oriented Word Lists) 2020.12.07, http://wordlist.aspell.net/, was used for the
+capitals. Its whole copyright file, with the notices of the lists SCOWL draws on, is
 `SCOWL-Copyright.txt` beside this file; its main notice:
 
 > Copyright 2000-2018 by Kevin Atkinson
@@ -41,7 +39,3 @@ and the taboo words. Its whole copyright file, with the notices of the lists SCO
 > that the above copyright notice appears in all copies and that both that copyright notice and this
 > permission notice appear in supporting documentation. Kevin Atkinson makes no representations about the
 > suitability of this array for any purpose. It is provided "as is" without express or implied warranty.
-
-**LDNOOBW**, the List of Dirty, Naughty, Obscene, and Otherwise Bad Words,
-https://github.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words (CC BY 4.0), was used only
-to leave words out; none of its text is in `words_en.txt`.
