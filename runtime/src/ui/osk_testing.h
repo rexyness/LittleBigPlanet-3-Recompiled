@@ -3,6 +3,7 @@
 #pragma once
 #include <cstdint>
 #include <functional>
+#include <string_view>
 
 #include "hle/pad_types.h"
 #include "ui/osk_model.h"
@@ -23,5 +24,11 @@ void ForgetFiles();
 // Where the panel is: 0..1 across the room it has to move in (0.5 = centred).
 void GetPlace(float& x, float& y);
 void SetPlace(float x, float y);
+// A word list ("word<TAB>count" lines) instead of data\osk's, which also turns suggestions on
+// with UseFiles(false); nullptr goes back to data\osk. Learned words start empty again.
+void SetWordList(const char* utf8);
+uint32_t LearnedCount(std::u16string_view word);
+// The centre of a suggestion in the prediction bar as last drawn; false if there's none.
+bool SuggestionCentre(size_t index, float& x, float& y);
 
 }  // namespace ui::osk::testing

@@ -3,8 +3,8 @@
 // keyboard, its id) is under g_mutex; everything else belongs to the presenter thread.
 //
 // The look follows the PS4 keyboard as shadPS4 measured it (ime_kb_layout.cpp): a 793x528
-// panel at 1080p with a title row, the text field, an empty prediction bar with a close
-// button, and a 10-column key grid; key colours, the selection highlight (a lighter key
+// panel at 1080p with a title row, the text field, the prediction bar (word suggestions) with a
+// close button, and a 10-column key grid; key colours, the selection highlight (a lighter key
 // with a white border) and the hotkey badges in each key's top-left corner come from there
 // too. Button and key icons are drawn as shapes.
 //
@@ -34,6 +34,7 @@
 #include "input/gamepad.h"
 #include "ui/osk_model.h"
 #include "ui/osk_testing.h"
+#include "ui/osk_words.h"
 #include "ui/overlay.h"
 #include "ui/overlay_layers.h"
 
@@ -49,6 +50,7 @@ struct Pending {
     uint64_t stamp = 0;  // show order among all overlay layers
     Request request;
     AnswerFn onAnswer;
+    std::u16string opening;  // the text it first opened with: only words added to it are learned
 };
 
 std::mutex g_mutex;
@@ -89,7 +91,7 @@ bool Plain() {
 bool g_useFiles = true;  // osktest turns it off
 bool FilesOn() { return g_useFiles && !Plain(); }
 
-std::optional<std::string> ReadFile(const char* path) {
+std::optional<std::string> ReadFile(const std::filesystem::path& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return std::nullopt;
     std::ostringstream s;
@@ -175,15 +177,118 @@ void SavePlace() {
     WriteFile(kPlacePath, text);
 }
 
+// ---- Suggestions ----
+
+constexpr const char* kLearnedPath = "user\\config\\learned_words.txt";
+constexpr const char* kListFile = "data\\osk\\words_en.txt";
+
+Words g_words;
+bool g_listLoaded = false, g_learnedLoaded = false;
+std::optional<std::string> g_testList;  // osktest's list, instead of data\osk
+
+// LBP3_OSK_SUGGEST=off: the launcher's "Word suggestions" switch turned off. No suggestions,
+// nothing learned.
+bool SuggestOff() {
+    static const bool off = [] {
+        const char* v = std::getenv("LBP3_OSK_SUGGEST");
+        return v && (_stricmp(v, "off") == 0 || std::strcmp(v, "0") == 0);
+    }();
+    return off;
+}
+
+bool SuggestionsOn() { return g_testList.has_value() || (FilesOn() && !SuggestOff()); }
+
+// The word list ships beside lbp3.exe (data\osk); in a build folder it's one level up, in the
+// checkout. The game folder (the working folder) is the last place looked.
+void LoadWords() {
+    if (!g_listLoaded) {
+        g_listLoaded = true;
+        if (g_testList) {
+            g_words.LoadList(*g_testList);
+        } else {
+            std::vector<std::filesystem::path> places;
+            if (const char* base = SDL_GetBasePath()) {
+                const std::filesystem::path exe = std::filesystem::u8path(base);
+                places.push_back(exe / kListFile);
+                places.push_back(exe / ".." / kListFile);
+            }
+            places.push_back(kListFile);
+            const uint64_t t0 = SDL_GetTicks();
+            bool found = false;
+            for (const auto& p : places) {
+                const auto text = ReadFile(p);
+                if (!text) continue;
+                g_words.LoadList(*text);
+                std::fprintf(stderr, "[osk] word list: %zu words from %s (%llu ms)\n", g_words.listSize(),
+                             p.lexically_normal().string().c_str(), static_cast<unsigned long long>(SDL_GetTicks() - t0));
+                found = true;
+                break;
+            }
+            if (!found) std::fprintf(stderr, "[osk] no word list (%s): suggestions come from learned words only\n", kListFile);
+        }
+    }
+    if (!g_learnedLoaded) {
+        g_learnedLoaded = true;
+        if (FilesOn()) {
+            if (const auto text = ReadFile(kLearnedPath)) g_words.LoadLearned(*text);
+            std::fprintf(stderr, "[osk] %zu learned words (%s)\n", g_words.learnedSize(), kLearnedPath);
+        }
+    }
+}
+
+void LogMode() {
+    static bool logged = false;
+    if (logged) return;
+    logged = true;
+    if (Plain()) {
+        std::fprintf(stderr, "[osk] plain keyboard (LBP3_OSK_PLAIN): no suggestions, nothing learned, place not kept\n");
+    } else if (SuggestOff()) {
+        std::fprintf(stderr, "[osk] word suggestions off (LBP3_OSK_SUGGEST=off)\n");
+    }
+}
+
+// The prediction bar's layout, in 1080p units: the suggestions side by side from the left, the
+// first with the R3 badge in front of it.
+constexpr float kBarText = 26.f, kBarPad = 18.f, kBarMinSlot = 70.f, kBarMargin = 8.f, kBarBadgeGap = 8.f;
+constexpr float kBarWidth = 740.f;
+float g_barScale = 1.f;  // the last frame's scale: the bar is fitted for it
+float HotkeyWidth(const char* hotkey, float s);
+
+// Each suggestion's slot, in pixels at scale s.
+std::vector<float> SlotWidths(const std::vector<std::u16string>& words, float s) {
+    std::vector<float> out;
+    for (size_t i = 0; i < words.size(); ++i) {
+        const std::string u8 = Utf8(words[i]);
+        float w = g_font ? g_font->CalcTextSizeA(kBarText * s, 1e9f, 0.f, u8.c_str()).x : 0.f;
+        w = std::max(kBarMinSlot * s, w + kBarPad * 2.f * s);
+        if (i == 0) w += HotkeyWidth("R3", s) + kBarBadgeGap * s;
+        out.push_back(w);
+    }
+    return out;
+}
+
+// As many suggestions as fit in the bar (all of them before the fonts exist).
+void FitBar(std::vector<std::u16string>& words) {
+    if (!g_font) return;
+    const float s = g_barScale;
+    const std::vector<float> widths = SlotWidths(words, s);
+    float x = kBarMargin * s;
+    size_t n = 0;
+    while (n < widths.size() && x + widths[n] <= (kBarWidth - kBarMargin) * s) x += widths[n++];
+    words.resize(n);
+}
+
 struct Live {
     explicit Live(Pending p)
         : id(p.id), stamp(p.stamp), request(std::move(p.request)), onAnswer(std::move(p.onAnswer)),
-          kb(request.text, request.maxLength, request.multiline) {}
+          opening(std::move(p.opening)), kb(request.text, request.maxLength, request.multiline) {}
 
     uint64_t id, stamp;
     bool wasTop = true;  // false while a newer overlay (a system dialog) has the input
     Request request;
     AnswerFn onAnswer;
+    std::u16string opening;
+    bool learn = false;  // suggestions are on for this one: confirming it teaches words
     Keyboard kb;
     // Pad: buttons held when the keyboard came up count only after a release.
     uint32_t ignore = 0, prev = 0;
@@ -252,9 +357,21 @@ void Rearm(Live& l) {
 
 void StartLive(Pending p) {
     host::EnsureImGui();
+    g_font = host::Font();  // the bar measures its suggestions with it
+    g_fontKeys = host::KeyFont();
+    LogMode();
     LoadPlace();
     g_live.emplace(std::move(p));
     Live& l = *g_live;
+    if (SuggestionsOn() && !l.request.password) {
+        LoadWords();
+        l.learn = true;
+        l.kb.SetSuggester([](std::u16string_view typed, size_t room) {
+            std::vector<std::u16string> words = g_words.Suggest(typed, room);
+            FitBar(words);
+            return words;
+        });
+    }
     Rearm(l);
     if (SDL_Window* w = host::Window()) SDL_StartTextInput(w);
     std::fprintf(stderr, "[osk] keyboard #%llu up: %s, up to %u, text %s\n", static_cast<unsigned long long>(l.id),
@@ -284,6 +401,9 @@ void Finish(bool confirmed) {
     ui::osk::Answer answer;
     answer.confirmed = confirmed;
     if (confirmed) answer.text = g_live->kb.text();
+    // Confirmed text teaches the words added to what the keyboard opened with.
+    if (confirmed && g_live->learn && g_words.Learn(g_live->opening, answer.text) && FilesOn())
+        WriteFile(kLearnedPath, g_words.SaveLearned());
     AnswerFn fn = std::move(g_live->onAnswer);
     const uint64_t id = g_live->id;
     bool current;
@@ -362,8 +482,8 @@ bool PollPad() {
     // Cross (or a touch-pad click) presses the selected key; editing keys repeat when held.
     if (int f = l.cross.Update(b & (ps4::PAD_CROSS | ps4::PAD_TOUCH_PAD), now)) {
         const Action a = kb.selected()->action;
-        const bool repeats =
-            a == Action::Backspace || a == Action::Space || a == Action::ArrowLeft || a == Action::ArrowRight;
+        const bool repeats = !kb.inBar() && (a == Action::Backspace || a == Action::Space || a == Action::ArrowLeft ||
+                                             a == Action::ArrowRight);
         if ((f == 1 || repeats) && kb.Activate() == Outcome::Done) {
             l.prev = b;
             Finish(true);
@@ -390,6 +510,7 @@ bool PollPad() {
         l.l2Down = false;
     }
     if (pressed(ps4::PAD_L3)) kb.ToggleSpecials();
+    if (pressed(ps4::PAD_R3)) kb.Pick(0);  // the first suggestion
     l.prev = b;
     return true;
 }
@@ -412,7 +533,9 @@ struct Geometry {
     float s = 1.f;  // 1080p units -> pixels
     Box panel, title, input, predict, close, keys;
     std::vector<KeyBox> boxes;  // the drawn keys
+    std::vector<Box> slots;     // the suggestions in the prediction bar
 };
+Geometry g_lastGeometry;  // for the test hooks
 
 float Scale(ImVec2 display) { return std::max(0.1f, std::min(display.x / 1920.f, display.y / 1080.f)); }
 
@@ -456,6 +579,11 @@ Geometry Compute(const Keyboard& kb, ImVec2 display) {
     const float py = y + labelH + inputH + gapV;
     g.predict = {{x, py}, {x + 740.f * s, py + predictH}};
     g.close = {{x + panelW - closeW, py}, {x + panelW, py + predictH}};
+    float sx = g.predict.min.x + kBarMargin * s;
+    for (float w : SlotWidths(kb.suggestions(), s)) {
+        g.slots.push_back({{std::round(sx), g.predict.min.y}, {std::round(sx + w), g.predict.max.y}});
+        sx += w;
+    }
     const float ky = py + predictH + gapV;
     g.keys = {{x + padX, ky}, {x + panelW - padX, ky + keysH}};
 
@@ -537,14 +665,15 @@ void DrawIcon(ImDrawList* dl, ImVec2 c, float d, Icon icon, ImU32 col, float t) 
 }
 
 // A hotkey hint ("L2", "R2", "TRI", "L2+TRI"...) in a dark badge at the key's top-left.
-void DrawHotkey(ImDrawList* dl, const Box& key, const char* hotkey, float s) {
-    if (!hotkey || !*hotkey) return;
-    struct Part {
-        std::string text;
-        bool icon = false;
-        Icon which = Icon::Triangle;
-    };
-    std::vector<Part> parts;  // words are text, TRI/SQR are icons, joined by '+'
+struct HotkeyPart {
+    std::string text;
+    bool icon = false;
+    Icon which = Icon::Triangle;
+};
+
+// Words are text, TRI/SQR are icons, joined by '+'.
+std::vector<HotkeyPart> HotkeyParts(const char* hotkey) {
+    std::vector<HotkeyPart> parts;
     const std::string h = hotkey;
     size_t at = 0;
     for (;;) {
@@ -561,19 +690,39 @@ void DrawHotkey(ImDrawList* dl, const Box& key, const char* hotkey, float s) {
         parts.push_back({"+"});
         at = plus + 1;
     }
-    const float size = std::max(8.f, 16.f * s);
-    const float iconW = size * 0.78f;
-    float w = 0.f;
-    for (const Part& p : parts) w += p.icon ? iconW : TextSize(g_font, size, p.text.c_str()).x;
-    const float padX = std::max(2.f, size * 0.3f), padY = std::max(1.f, size * 0.08f);
-    const ImVec2 bmin{key.min.x + std::max(3.f, 4.f * s), key.min.y + std::max(2.f, 3.f * s)};
-    const ImVec2 bmax{bmin.x + w + padX * 2.f, bmin.y + size + padY * 2.f};
+    return parts;
+}
+
+struct HotkeyMetrics {
+    float size, iconW, textW, padX, padY;
+    ImVec2 Badge() const { return {textW + padX * 2.f, size + padY * 2.f}; }
+};
+
+HotkeyMetrics MeasureHotkey(const std::vector<HotkeyPart>& parts, float s) {
+    HotkeyMetrics m{};
+    m.size = std::max(8.f, 16.f * s);
+    m.iconW = m.size * 0.78f;
+    for (const HotkeyPart& p : parts) m.textW += p.icon ? m.iconW : (g_font ? TextSize(g_font, m.size, p.text.c_str()).x : 0.f);
+    m.padX = std::max(2.f, m.size * 0.3f);
+    m.padY = std::max(1.f, m.size * 0.08f);
+    return m;
+}
+
+float HotkeyWidth(const char* hotkey, float s) { return MeasureHotkey(HotkeyParts(hotkey), s).Badge().x; }
+float HotkeyHeight(const char* hotkey, float s) { return MeasureHotkey(HotkeyParts(hotkey), s).Badge().y; }
+
+// A hotkey hint ("L2", "R2", "TRI", "L2+TRI"...) in a dark badge with its top-left at bmin.
+void DrawHotkeyAt(ImDrawList* dl, ImVec2 bmin, const char* hotkey, float s) {
+    const std::vector<HotkeyPart> parts = HotkeyParts(hotkey);
+    const HotkeyMetrics hm = MeasureHotkey(parts, s);
+    const float size = hm.size, iconW = hm.iconW, padX = hm.padX;
+    const ImVec2 bmax{bmin.x + hm.Badge().x, bmin.y + hm.Badge().y};
     const float round = std::max(2.f, size * 0.24f);
     dl->AddRectFilled(bmin, bmax, IM_COL32(10, 10, 10, 140), round);
     dl->AddRect(bmin, bmax, IM_COL32(92, 92, 92, 110), round, 1.f);
     float x = bmin.x + padX;
     const float cy = (bmin.y + bmax.y) * 0.5f;
-    for (const Part& p : parts) {
+    for (const HotkeyPart& p : parts) {
         if (p.icon) {
             DrawIcon(dl, {x + iconW * 0.5f, cy}, iconW * 0.92f, p.which, kHotkeyText, std::max(1.f, 1.4f * s));
             x += iconW;
@@ -582,6 +731,12 @@ void DrawHotkey(ImDrawList* dl, const Box& key, const char* hotkey, float s) {
             x += TextSize(g_font, size, p.text.c_str()).x;
         }
     }
+}
+
+// The badge in a key's top-left corner.
+void DrawHotkey(ImDrawList* dl, const Box& key, const char* hotkey, float s) {
+    if (!hotkey || !*hotkey) return;
+    DrawHotkeyAt(dl, {key.min.x + std::max(3.f, 4.f * s), key.min.y + std::max(2.f, 3.f * s)}, hotkey, s);
 }
 
 void DrawShiftArrow(ImDrawList* dl, ImVec2 c, float extent, bool filled, bool capsBar, ImU32 col, float t) {
@@ -801,15 +956,37 @@ void DrawPanel(Live& l, const Geometry& g, ImVec2 display, bool closeHover) {
 
     DrawTextField(dl, l, g, now);
 
-    // The prediction bar (no suggestions here) and the close button.
+    // The prediction bar and the close button. The suggestions sit side by side, the selected
+    // one lit like a key, the first with the R3 badge in front of it.
     dl->AddRectFilled(g.predict.min, g.predict.max, kPreedit);
     dl->AddLine({g.panel.min.x, g.predict.min.y}, {g.panel.max.x, g.predict.min.y}, kLine);
     dl->AddLine({g.panel.min.x, g.predict.max.y}, {g.panel.max.x, g.predict.max.y}, kLine);
+    const auto& words = kb.suggestions();
+    for (size_t i = 0; i < g.slots.size() && i < words.size(); ++i) {
+        const Box& slot = g.slots[i];
+        const bool sel = kb.barIndex() == int(i);
+        if (sel) {
+            dl->AddRectFilled(slot.min, slot.max, Lighter(kPreedit, 0.11f));
+            dl->AddRect(slot.min, slot.max, kSelectedBorder, 0.f, std::max(2.f, 3.f * s));
+        } else if (i + 1 < g.slots.size()) {
+            dl->AddLine({slot.max.x, slot.min.y + 12.f * s}, {slot.max.x, slot.max.y - 12.f * s}, kLine);
+        }
+        float tx = slot.min.x + kBarPad * s;
+        if (i == 0) {
+            const float bh = HotkeyHeight("R3", s);
+            DrawHotkeyAt(dl, {tx, std::round(slot.Centre().y - bh * 0.5f)}, "R3", s);
+            tx += HotkeyWidth("R3", s) + kBarBadgeGap * s;
+        }
+        const std::string u8 = Utf8(words[i]);
+        const float size = kBarText * s;
+        const ImVec2 ts = TextSize(g_font, size, u8.c_str());
+        dl->AddText(g_font, size, {tx, slot.min.y + (slot.Size().y - ts.y) * 0.5f}, kText, u8.c_str());
+    }
     dl->AddRectFilled(g.close.min, g.close.max, closeHover ? Lighter(kKeyFunction, 0.11f) : kKeyFunction);
     dl->AddLine(g.close.min, {g.close.min.x, g.close.max.y}, kLine);
     DrawIcon(dl, g.close.Centre(), g.close.Size().y * 0.46f, Icon::Circle, kText, std::max(1.5f, 2.2f * s));
 
-    const KeySpec* sel = kb.selected();
+    const KeySpec* sel = kb.inBar() ? nullptr : kb.selected();
     for (const KeyBox& kbx : g.boxes)
         if (kbx.key != sel) DrawKey(dl, kb, kbx, false, l.request, s);
     for (const KeyBox& kbx : g.boxes)  // the selected key last, so its border sits on top
@@ -828,7 +1005,8 @@ uint64_t Show(Request request, AnswerFn onAnswer) {
     const uint64_t id = g_nextId++;
     std::fprintf(stderr, "[osk] keyboard #%llu requested: %s, up to %u\n", static_cast<unsigned long long>(id),
                  Quoted(request.title).c_str(), request.maxLength);
-    g_pending = Pending{id, host::NextStamp(), std::move(request), std::move(onAnswer)};
+    std::u16string opening = request.text;
+    g_pending = Pending{id, host::NextStamp(), std::move(request), std::move(onAnswer), std::move(opening)};
     g_current = id;
     return id;
 }
@@ -890,6 +1068,7 @@ bool Event(const SDL_Event& e) {
         case SDLK_RIGHT: kb.CursorRight(); break;
         case SDLK_HOME: kb.CursorHome(); break;
         case SDLK_END: kb.CursorEnd(); break;
+        case SDLK_TAB: kb.Pick(0); break;  // the first suggestion
         case SDLK_UP:
             if (kb.multiline()) kb.CursorUp();
             break;
@@ -927,6 +1106,7 @@ void Frame(bool top, ImVec2 display) {
     if (!g_live) return;
     g_font = host::Font();
     g_fontKeys = host::KeyFont();
+    g_barScale = Scale(display);
     const ImGuiIO& io = ImGui::GetIO();
 
     Live& l = *g_live;
@@ -965,6 +1145,12 @@ void Frame(bool top, ImVec2 display) {
     const bool closeHover = mouseValid && g.close.Contains(m);
     int answer = -1;  // -1 none, 0 cancel, 1 confirm
     if (mouseValid) {
+        for (size_t i = 0; i < g.slots.size(); ++i) {  // a suggestion: hover selects it, a click picks it
+            if (!g.slots[i].Contains(m)) continue;
+            if (moved || click) l.kb.SelectSuggestion(i);
+            if (click) l.kb.Pick(i);
+            break;
+        }
         for (const KeyBox& kbx : g.boxes) {
             if (!kbx.box.Contains(m)) continue;
             if (moved || click) l.kb.Select(kbx.key->row, kbx.key->col);
@@ -984,6 +1170,7 @@ void Frame(bool top, ImVec2 display) {
         l.blinkFrom = now;
     }
     g = Compute(l.kb, display);  // the page may have changed
+    g_lastGeometry = g;
     DrawPanel(l, g, display, closeHover);
 }
 
@@ -993,7 +1180,7 @@ void Reset() {
     if (!g_live) return;
     Request r = g_live->request;
     r.text = g_live->kb.text();
-    Pending p{g_live->id, g_live->stamp, std::move(r), std::move(g_live->onAnswer)};
+    Pending p{g_live->id, g_live->stamp, std::move(r), std::move(g_live->onAnswer), g_live->opening};
     EndLive();
     std::lock_guard lock(g_mutex);
     if (!g_pending && g_current.load() == p.id) g_pending = std::move(p);
@@ -1022,6 +1209,28 @@ void ForgetFiles() {
     g_placeLoaded = false;
     g_placeDirty = false;
     g_place = Place{};
+    g_words = Words{};
+    g_listLoaded = g_learnedLoaded = false;
+}
+
+void SetWordList(const char* utf8) {
+    if (utf8) {
+        g_testList = utf8;
+    } else {
+        g_testList.reset();
+    }
+    g_words = Words{};
+    g_listLoaded = g_learnedLoaded = false;
+}
+
+uint32_t LearnedCount(std::u16string_view word) { return g_words.LearnedCount(word); }
+
+bool SuggestionCentre(size_t index, float& x, float& y) {
+    if (index >= g_lastGeometry.slots.size()) return false;
+    const ImVec2 c = g_lastGeometry.slots[index].Centre();
+    x = c.x;
+    y = c.y;
+    return true;
 }
 
 void GetPlace(float& x, float& y) {

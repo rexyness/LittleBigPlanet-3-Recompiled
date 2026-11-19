@@ -11,10 +11,13 @@
 // Cross or a touch-pad click = press the key, Circle = cancel, R2 = done, Square =
 // backspace, Triangle = space, L2 = shift, L2+Triangle = symbols, L3 = accents,
 // L1/R1 = move the text cursor, right stick = move the keyboard around the window (the mouse
-// can drag it by the title row). Physical keys: typing, Backspace, Delete, Left/Right,
-// Home/End, Enter = done, Esc = cancel. Buttons, sticks and keys already held when the
-// keyboard opens are ignored until released. Where it was moved to is remembered (see
-// ui/osk_overlay.cpp); LBP3_OSK_PLAIN=1 turns that off for scripted tests.
+// can drag it by the title row). Word suggestions (ui/osk_words.h) fill the prediction bar:
+// up from the top row goes into it, R3 (or Tab) picks the first, a click picks any. Physical
+// keys: typing, Backspace, Delete, Left/Right, Home/End, Tab, Enter = done, Esc = cancel.
+// Buttons, sticks and keys already held when the keyboard opens are ignored until released.
+// Where it was moved to and the words the player used are remembered in user\config (see
+// ui/osk_overlay.cpp). LBP3_OSK_SUGGEST=off (the launcher's switch) turns suggestions and
+// learning off; LBP3_OSK_PLAIN=1 (scripted tests) turns off everything that's remembered too.
 #pragma once
 #include <cstdint>
 #include <functional>

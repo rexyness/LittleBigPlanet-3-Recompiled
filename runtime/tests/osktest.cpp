@@ -685,6 +685,20 @@ void Pad(uint32_t buttons, int sx = 0, int sy = 0) {
     Draw();
 }
 
+std::u16string Text() {
+    std::u16string t;
+    testing::WithKeyboard([&](Keyboard& kb) { t = kb.text(); });
+    return t;
+}
+
+SDL_Event KeyEvent(SDL_EventType type, SDL_Keycode key, bool repeat = false) {
+    SDL_Event e{};
+    e.type = type;
+    e.key.key = key;
+    e.key.repeat = repeat;
+    return e;
+}
+
 // The right stick (moves the panel), the left one centred.
 void PadR(uint32_t buttons, int rx, int ry) {
     g_pad.buttons = buttons;
@@ -715,6 +729,127 @@ void Mouse(SDL_Window* w, float x, float y, int button = 0) {
     b.button.y = y;
     HandleEvent(b);
     Pad(0);
+}
+
+void TypeText(const char* utf8) {
+    SDL_Event e{};
+    e.type = SDL_EVENT_TEXT_INPUT;
+    e.text.text = utf8;
+    HandleEvent(e);
+}
+
+Strings Bar() {
+    Strings s;
+    testing::WithKeyboard([&](Keyboard& kb) { s = kb.suggestions(); });
+    return s;
+}
+
+void SuggestionChecks(SDL_Window* window) {
+    std::printf("suggestions\n");
+    testing::SetWordList(kTestList);
+    Request req;
+    req.title = u"Enter Your Message";
+    req.maxLength = 96;
+    // R3 picks the first suggestion.
+    Answers a1;
+    Pad(0);
+    Show(req, Recorder(a1));
+    Pad(0);
+    TypeText("th");
+    CHECK(Bar() == (Strings{u"the", u"that", u"they", u"there", u"this", u"then"}));
+    Pad(ps4::PAD_R3);
+    CHECK(Text() == u"the ");
+    Pad(0);
+    // Up from the top row into the bar, right, Cross picks; the selection is back on the key.
+    TypeText("th");
+    testing::WithKeyboard([](Keyboard& kb) { kb.Select(0, 2); });
+    Pad(ps4::PAD_UP);
+    bool inBar = false;
+    testing::WithKeyboard([&](Keyboard& kb) { inBar = kb.inBar(); });
+    CHECK(inBar);
+    Pad(0);
+    Pad(ps4::PAD_LEFT);  // wraps to the last
+    Pad(0);
+    Pad(ps4::PAD_CROSS);
+    CHECK(Text() == u"the then ");
+    int row = -1;
+    testing::WithKeyboard([&](Keyboard& kb) {
+        inBar = kb.inBar();
+        row = kb.row();
+    });
+    CHECK(!inBar);
+    CHECK_EQ(row, 0);
+    Pad(0);
+    // Tab picks the first; a habit space after it is swallowed.
+    TypeText("he");
+    CHECK(HandleEvent(KeyEvent(SDL_EVENT_KEY_DOWN, SDLK_TAB)));
+    TypeText(" ");
+    CHECK(Text() == u"the then hello ");
+    // A click on a suggestion picks it.
+    TypeText("so");
+    Pad(0);
+    float x = 0.f, y = 0.f;
+    CHECK(testing::SuggestionCentre(0, x, y));
+    Mouse(window, x, y);
+    Mouse(window, x, y, 1);
+    Mouse(window, x, y, 2);
+    CHECK(Text() == u"the then hello something ");
+    // Confirmed: its words are learned.
+    Pad(ps4::PAD_R2);
+    CHECK(a1.confirmed);
+    CHECK_EQ(int(testing::LearnedCount(u"then")), 1);
+    CHECK_EQ(int(testing::LearnedCount(u"something")), 1);
+    Pad(0);
+    // Learned words come first.
+    Answers a2;
+    Show(req, Recorder(a2));
+    Pad(0);
+    TypeText("th");
+    CHECK(Bar() == (Strings{u"the", u"then", u"that", u"they", u"there", u"this"}));
+    // Cancelled: nothing learned.
+    TypeText("em");
+    Pad(ps4::PAD_CIRCLE);
+    CHECK(!a2.confirmed);
+    CHECK_EQ(int(testing::LearnedCount(u"them")), 0);
+    Pad(0);
+    // Words already in the text it opened with aren't counted again.
+    Request edit = req;
+    edit.text = u"hello there";
+    Answers a3;
+    Show(edit, Recorder(a3));
+    Pad(0);
+    TypeText(" again");
+    Pad(ps4::PAD_R2);
+    CHECK_EQ(int(testing::LearnedCount(u"hello")), 1);
+    CHECK_EQ(int(testing::LearnedCount(u"there")), 0);
+    CHECK_EQ(int(testing::LearnedCount(u"again")), 1);
+    Pad(0);
+    // A password field: no suggestions, nothing learned.
+    Request pw = req;
+    pw.password = true;
+    Answers a4;
+    Show(pw, Recorder(a4));
+    Pad(0);
+    TypeText("th");
+    CHECK(Bar().empty());
+    Pad(ps4::PAD_R3);  // nothing to pick
+    CHECK(Text() == u"th");
+    Pad(ps4::PAD_R2);
+    CHECK_EQ(int(testing::LearnedCount(u"th")), 0);
+    Pad(0);
+    // Only as many as fit in the bar.
+    testing::SetWordList(
+        "internationalization\t10\ninternationalisation\t9\ninterconnectedness\t8\ninterdisciplinary\t7\n"
+        "intercontinental\t6\ninterchangeability\t5\n");
+    Answers a5;
+    Show(req, Recorder(a5));
+    Pad(0);
+    TypeText("inter");
+    const size_t shown = Bar().size();
+    CHECK(shown >= 1 && shown < 6);
+    Pad(ps4::PAD_CIRCLE);
+    Pad(0);
+    testing::SetWordList(nullptr);  // off again (no files)
 }
 
 void PlaceChecks(SDL_Window* window, const Request& req) {
@@ -786,6 +921,7 @@ void PlaceChecks(SDL_Window* window, const Request& req) {
     fs::create_directories(dir);
     fs::current_path(dir);
     testing::UseFiles(true);
+    testing::SetWordList(kTestList);
     testing::ForgetFiles();
     testing::SetPlace(0.25f, 0.75f);
     Answers a4;
@@ -821,24 +957,32 @@ void PlaceChecks(SDL_Window* window, const Request& req) {
     CHECK(std::fabs(px - 0.1f) < 1e-6f && py == 0.5f);
     Pad(ps4::PAD_CIRCLE);
     Pad(0);
+    // The learned words too: user\config\learned_words.txt, written when text is confirmed.
+    Answers a7;
+    Show(req, Recorder(a7));
+    Pad(0);
+    TypeText(" hel");
+    Pad(ps4::PAD_R3);
+    Pad(ps4::PAD_R2);
+    Pad(0);
+    std::ifstream learned("user\\config\\learned_words.txt");
+    std::stringstream words;
+    words << learned.rdbuf();
+    learned.close();
+    CHECK(words.str().find("1\thello\n") != std::string::npos);
+    testing::ForgetFiles();
+    CHECK_EQ(int(testing::LearnedCount(u"hello")), 0);
+    Answers a8;
+    Show(req, Recorder(a8));
+    Pad(0);
+    CHECK_EQ(int(testing::LearnedCount(u"hello")), 1);
+    Pad(ps4::PAD_CIRCLE);
+    Pad(0);
+    testing::SetWordList(nullptr);
     testing::UseFiles(false);
     testing::ForgetFiles();
     fs::current_path(old);
     fs::remove_all(dir, ec);
-}
-
-std::u16string Text() {
-    std::u16string t;
-    testing::WithKeyboard([&](Keyboard& kb) { t = kb.text(); });
-    return t;
-}
-
-SDL_Event KeyEvent(SDL_EventType type, SDL_Keycode key, bool repeat = false) {
-    SDL_Event e{};
-    e.type = type;
-    e.key.key = key;
-    e.key.repeat = repeat;
-    return e;
 }
 
 void OverlayChecks() {
@@ -1044,6 +1188,7 @@ void OverlayChecks() {
     Pad(ps4::PAD_CIRCLE);
 
     PlaceChecks(window, req);
+    SuggestionChecks(window);
 
     testing::SetPad(nullptr);
     testing::SetClock(nullptr);
@@ -1080,6 +1225,7 @@ int Shots(const char* dir) {
         const char* name;
         void (*setup)(Keyboard&);
         const char16_t* text;
+        float placeX = 0.5f, placeY = 0.5f;  // where the panel sits
     };
     const State states[] = {
         {"lower", [](Keyboard&) {}, u""},
@@ -1105,6 +1251,14 @@ int Shots(const char* dir) {
              const KeySpec* d = KeyAt(kb.layout(), 5, 8);
              if (d) kb.Select(d->row, d->col);
          }, u"An extremely long level name that does not fit in the text field at all, so it scrolls"},
+        // Word suggestions (the test list): the bar, the selection in it, and the panel moved.
+        {"suggest", [](Keyboard& kb) { kb.Select(2, 4); }, u"Hello th"},
+        {"suggestbar", [](Keyboard& kb) {
+             kb.Select(0, 3);
+             kb.Move(-1, 0);
+             kb.Move(0, 1);
+         }, u"Hello th"},
+        {"corner", [](Keyboard& kb) { kb.Select(2, 4); }, u"I'm at the s", 0.f, 1.f},
     };
     const int sizes[][2] = {{1280, 720}, {1920, 1080}};
     int written = 0;
@@ -1123,7 +1277,10 @@ int Shots(const char* dir) {
         idle.leftStick = idle.rightStick = {128, 128};
         testing::SetPad(&idle);
         testing::SetClock(Clock);
+        testing::UseFiles(false);
+        testing::SetWordList(kTestList);
         for (const State& st : states) {
+            testing::SetPlace(st.placeX, st.placeY);
             Request req;
             req.title = u"Level Name";
             req.text = st.text;
