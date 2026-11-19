@@ -1,5 +1,5 @@
 # saves.sh: sourced by the test scripts after they cd to the clone.
-#   . /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline
+#   . /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline
 # The tests start from a fixed baseline, analysis/savedata_thruster_on (the human's test level
 # with one Thruster firing, as of 2026-11-10 08:20). The human's own saves have moved on since,
 # so a run first keeps the current saves aside (analysis/savedata_human_kept) and puts them back

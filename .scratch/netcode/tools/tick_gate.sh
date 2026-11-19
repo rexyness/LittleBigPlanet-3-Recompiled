@@ -5,7 +5,7 @@
 # the worktree's exe is put there for the run and the clone's own put back at the end, by any path. Runs
 # under the game lock, on a copy of the shader cache, and never while another lbp3.exe is running.
 p=$1; src=$2
-T=/d/Recomps/lbp3-pc/.scratch/lbp3-port/tools; S="$(cd $T && pwd -W)"
+T=/d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools; S="$(cd $T && pwd -W)"
 cd /d/Recomps/lbp3-recompiled || exit 1
 . $T/game_lock.sh
 OWNER=netcode-gate

@@ -19,8 +19,8 @@
 #   t_m2v_backup.sh <tag> [NAME=value ...]
 cd /d/Recomps/lbp3-recompiled || exit 1
 tag=$1; shift
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline || exit 1
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/m2_lib.sh
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline || exit 1
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/m2_lib.sh
 log="analysis/m2_${tag}_out.txt"; : > "$log"
 note() { echo "$*"; echo "$*" >> "$log"; }
 S=user/savedata/CUSA00473

@@ -15,8 +15,8 @@
 #   t13_coop.sh <tag> [NAME=value ...]      (NAME=value: environment for the game, both cases)
 cd /d/Recomps/lbp3-recompiled || exit 1
 tag=$1; shift
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/saves.sh; saves_keep
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/m2_lib.sh
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/saves.sh; saves_keep
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/m2_lib.sh
 log="analysis/m2_${tag}_out.txt"; : > "$log"
 note() { echo "$*"; echo "$*" >> "$log"; }
 fails=0

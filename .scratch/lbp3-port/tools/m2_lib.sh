@@ -40,7 +40,7 @@ save_settle() {
 #   human_restore     put the kept copy back, clear the marker
 # The rest of user/savedata (guests' profiles and anything else) is kept and put back whole, by
 # saves.sh's others_* helpers.
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/saves.sh
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/saves.sh
 human_keep() {
   taskkill //f //im lbp3.exe >/dev/null 2>&1; sleep 1
   if [ -d analysis/savedata_human_kept ]; then echo "saves: reusing the kept copy"
@@ -63,6 +63,6 @@ human_restore() {
 # Picture of the game with its dialog windows on top (PrintWindow of each window, composed at their
 # screen positions; never shows other applications). Never grab the screen itself: it would show
 # whatever covers the game, the human's own windows included.
-dshot() { powershell -NoProfile -ExecutionPolicy Bypass -File D:/Recomps/lbp3-pc/.scratch/lbp3-port/tools/capture_dialog.ps1 -Out "analysis/screenshots/m2_$1.png"; }
+dshot() { powershell -NoProfile -ExecutionPolicy Bypass -File D:/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/capture_dialog.ps1 -Out "analysis/screenshots/m2_$1.png"; }
 # The [ime]/[jpeg]/[dialog]/[modal] lines logged after stderr line $1.
 m2v_lines() { tail -n +"$(($1 + 1))" analysis/remote_stderr.txt | grep -E '^\[(ime|jpeg|dialog|modal)\]|^\[stub\] libSce(Ime|Jpeg|MsgDialog|SaveDataDialog|CommonDialog|GameCustomData)'; }

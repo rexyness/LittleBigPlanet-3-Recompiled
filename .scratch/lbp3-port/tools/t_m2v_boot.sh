@@ -5,8 +5,8 @@
 #   t_m2v_boot.sh <tag> [reference stdout] [NAME=value ...]
 cd /d/Recomps/lbp3-recompiled || exit 1
 tag=$1; ref=${2:-analysis/m2v_port_stdout_ref.txt}; shift 2
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline || exit 1
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/m2_lib.sh
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline || exit 1
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/m2_lib.sh
 launch "$@"; sleep 28
 shot "${tag}_pod"
 cmdq 'cross\nwait 2000\nsquare\nwait 2500\n'; sleep 6

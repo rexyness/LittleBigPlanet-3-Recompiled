@@ -7,7 +7,7 @@
 cd /d/Recomps/lbp3-recompiled || exit 1
 tag=$1; shift
 out=analysis/intro_stalls; mkdir -p "$out"
-tools=/d/Recomps/lbp3-pc/.scratch/lbp3-port/tools
+tools=/d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools
 rm -f "$out/stop_$tag"
 python -I $tools/intro_drive.py stamp "$out/${tag}_stamped.txt" --stop-file "$out/stop_$tag" --max-s 400 &
 stamper=$!

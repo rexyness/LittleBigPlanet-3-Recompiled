@@ -4,7 +4,7 @@
 # Each run restores analysis/savedata_thruster_on and keeps the Thruster as loaded (firing).
 S="$(cd "$(dirname "$0")" && pwd -W)"  # this tools folder (D:/ form, for PowerShell)
 cd /d/Recomps/lbp3-recompiled || exit 1
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/saves.sh; saves_keep  # each run starts from the baseline; the human's saves come back on exit
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/saves.sh; saves_keep  # each run starts from the baseline; the human's saves come back on exit
 for spec in "$@"; do
   name=${spec%%:*}; rest=${spec#*:}; runs=${rest%%:*}; vars=${rest#*:}
   [ "$vars" = "-" ] && vars=""

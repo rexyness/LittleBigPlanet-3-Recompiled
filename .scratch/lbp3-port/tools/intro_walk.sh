@@ -17,7 +17,7 @@ drive=""
 while [ $# -gt 0 ] && [ "$1" != "--" ]; do drive="$drive '$1'"; shift; done
 [ "$1" = "--" ] && shift
 out=analysis/intro_stalls; mkdir -p "$out"
-tools=/d/Recomps/lbp3-pc/.scratch/lbp3-port/tools
+tools=/d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools
 taskkill //f //im lbp3.exe >/dev/null 2>&1; sleep 1; rm -f analysis/input_cmd.txt
 . $tools/saves.sh; saves_keep; saves_baseline || exit 1
 powershell -NoProfile -Command "Set-Location D:\\Recomps\\lbp3-recompiled; & .\\tools\\remote_start.ps1 LBP3_TRACE_SIM=1 LBP3_PACE_LOG=1 $*" >/dev/null || exit 1

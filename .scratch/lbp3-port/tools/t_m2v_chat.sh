@@ -8,8 +8,8 @@
 cd /d/Recomps/lbp3-recompiled || exit 1
 tag=$1; shift
 TEXT=${CHAT:-hello}
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline || exit 1
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/m2_lib.sh
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline || exit 1
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/m2_lib.sh
 launch "$@"; sleep 28; cmdq 'cross\nwait 2000\nsquare\nwait 2500\n'; sleep 6
 cmdq 'square 200\n'; sleep 25; shot "${tag}_level"
 cmdq 'square 250\nwait 1500\nleft 250\nwait 600\ndown 250\nwait 800\n'; sleep 4.5; shot "${tag}_textchat"

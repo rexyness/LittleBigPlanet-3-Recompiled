@@ -11,7 +11,7 @@ log=analysis/remote_stderr.txt
 at=60; extra=""
 [ "$SYNC" = 1 ] && { at=90; extra="LBP3_TRACE_SYNC=1"; }
 taskkill //f //im lbp3.exe >/dev/null 2>&1; sleep 1; rm -f analysis/input_cmd.txt
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline
 powershell -NoProfile -Command "Set-Location D:\\Recomps\\lbp3-recompiled; & .\\tools\\remote_start.ps1 LBP3_PACE_LOG=1 $extra $*" >/dev/null || exit 1
 n=0
 until grep -q "^\\[video\\] $at frames flipped" "$log" 2>/dev/null || [ $n -ge 900 ]; do sleep 0.1; n=$((n + 1)); done

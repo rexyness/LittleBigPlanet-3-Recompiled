@@ -24,8 +24,8 @@ tag=$1; shift
 EXE=${OSK_EXE:-build/lbp3.exe}
 [ -f "$EXE" ] || { echo "no game build at $EXE"; exit 1; }
 NAME="osk ok"
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline || exit 1
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/m2_lib.sh
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline || exit 1
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/m2_lib.sh
 log="analysis/m2_${tag}_out.txt"; : > "$log"
 note() { echo "$*"; echo "$*" >> "$log"; }
 fails=0

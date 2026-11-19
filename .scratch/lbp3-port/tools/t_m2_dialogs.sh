@@ -10,8 +10,8 @@
 # lines (sceImeDialogGetStatus and sceCommonDialogInitialize left out).
 cd /d/Recomps/lbp3-recompiled || exit 1
 tag=$1; what=$2; shift 2
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline || exit 1
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/m2_lib.sh
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline || exit 1
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/m2_lib.sh
 S=user/savedata/CUSA00473
 damage() {
   f=$(ls "$S/$1/00000001/$2"* 2>/dev/null | sort -V | tail -1)

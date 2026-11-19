@@ -12,8 +12,8 @@
 cd /d/Recomps/lbp3-recompiled || exit 1
 tag=$1; shift
 NAME=${NEWNAME:-M2 Test Level}
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline || exit 1
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/m2_lib.sh
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline || exit 1
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/m2_lib.sh
 log="analysis/m2_${tag}_out.txt"; : > "$log"
 note() { echo "$*"; echo "$*" >> "$log"; }
 to_name_field() {  # pause menu -> Edit Details -> the name field highlighted

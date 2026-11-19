@@ -11,8 +11,8 @@
 #   t_m2_photo.sh <tag> [NAME=value ...]
 cd /d/Recomps/lbp3-recompiled || exit 1
 tag=$1; shift
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline || exit 1
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/m2_lib.sh
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline || exit 1
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/m2_lib.sh
 edit_now() {
   launch "$@"; sleep 28
   cmdq 'cross\nwait 2000\nsquare\nwait 2500\n'; sleep 6

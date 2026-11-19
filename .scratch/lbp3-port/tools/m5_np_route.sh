@@ -18,9 +18,9 @@ cd /d/Recomps/lbp3-recompiled || exit 1
 tag=$1; shift
 HOLD=${HOLD:-40}
 EXE=${M5_EXE:-build/lbp3.exe}
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/saves.sh; saves_keep
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/saves.sh; saves_keep
 SAVES_BASELINE=analysis/savedata_story_20261111 saves_baseline || exit 1
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/m2_lib.sh
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/m2_lib.sh
 launch_exe() {  # as tools/remote_start.ps1, with any lbp3.exe (paths in mixed form)
   taskkill //f //im lbp3.exe >/dev/null 2>&1; sleep 1; rm -f analysis/input_cmd.txt
   exe_m=$(cygpath -m "$(realpath "$EXE")"); root_m=$(cygpath -m "$PWD")

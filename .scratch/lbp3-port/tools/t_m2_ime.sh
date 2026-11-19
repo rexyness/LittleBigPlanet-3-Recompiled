@@ -10,8 +10,8 @@
 # polled every frame from boot, so it is left out); screenshots m2_<tag>_*.png.
 cd /d/Recomps/lbp3-recompiled || exit 1
 tag=$1; route=$2; shift 2
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline || exit 1
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/m2_lib.sh
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline || exit 1
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/m2_lib.sh
 launch "$@"; sleep 28
 cmdq 'cross\nwait 2000\nsquare\nwait 2500\n'; sleep 6
 cmdq 'square 200\n'; sleep 25            # Home opens on Create: Edit Now

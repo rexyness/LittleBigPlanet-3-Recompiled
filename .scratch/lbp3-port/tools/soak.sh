@@ -19,7 +19,7 @@
 cd /d/Recomps/lbp3-recompiled || exit 1
 tag=$1; mins=$2; shift 2
 keep=${KEEPALIVE:-60}; kcmd=${KEEPALIVE_CMD:-r1 150}; every=${SHOT_EVERY:-60}
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/saves.sh; saves_keep  # the human's current saves come back on exit
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/saves.sh; saves_keep  # the human's current saves come back on exit
 restore() { saves_baseline; }
 # The start inputs are timed, and once (2026-11-10) they left the game on the Pod's Home menu.
 # So the start screenshot must show the bright Create sky (mean grey level above 120 in the

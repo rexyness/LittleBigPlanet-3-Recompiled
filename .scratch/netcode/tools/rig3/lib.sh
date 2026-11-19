@@ -9,7 +9,7 @@ A=/d/Recomps/lbp3-wt/coop/A; B=/d/Recomps/lbp3-wt/coop/B; C=/d/Recomps/lbp3-wt/c
 # A private copy of the exe, so that a build in the lane it comes from isn't blocked by a running game.
 EXE_SRC="${EXE_SRC:-/d/Recomps/lbp3-wt/res/build}"
 OWNER=${OWNER:-netcode-rig3}
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/game_lock.sh
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/game_lock.sh
 # cmdq <root> '<remote input lines with \n>' (LBP3_REMOTE_INPUT, runtime/src/input/gamepad_sdl.cpp)
 cmdq() { r=$1; n=0; while [ -f "$r/analysis/input_cmd.txt" ] && [ $n -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
   printf "$2" > "$r/analysis/input_cmd.tmp" && mv -f "$r/analysis/input_cmd.tmp" "$r/analysis/input_cmd.txt"; }

@@ -13,8 +13,8 @@
 #   t_m2v_photo.sh <tag> [NAME=value ...]
 cd /d/Recomps/lbp3-recompiled || exit 1
 tag=$1; shift
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline || exit 1
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/m2_lib.sh
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_baseline || exit 1
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/m2_lib.sh
 edit_now() { launch "$@"; sleep 28; cmdq 'cross\nwait 2000\nsquare\nwait 2500\n'; sleep 6; cmdq 'square 200\n'; sleep 25; }
 echo "$tag: saves before: $(saves_ls | tr '\n' ' ')"
 edit_now "$@"; shot "${tag}_level"
@@ -43,4 +43,4 @@ saves_return
 grep -h 'Rejecting invalid S#\|stuck\|device lost\|\[jpeg\] decoded\|capture job code differs' analysis/m2_${tag}_?_stderr.txt | sort | uniq -c | sed "s/^/$tag warnings: /"
 v=FAIL; grep -q '^\[jpeg\] encoded 640x360 BGRA, ratio 70 (quality 73)' "analysis/m2_${tag}_1_stderr.txt" && v=PASS; echo "$tag check encoder line: $v"
 v=FAIL; grep -q ' 3 read back' "analysis/m2_${tag}_1_stderr.txt" && v=PASS; echo "$tag check capture readback: $v"
-python /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/photo_check.py "analysis/m2_${tag}_testsaves" "analysis/screenshots/m2_${tag}_photo" | sed "s/^/$tag /"
+python /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/photo_check.py "analysis/m2_${tag}_testsaves" "analysis/screenshots/m2_${tag}_photo" | sed "s/^/$tag /"

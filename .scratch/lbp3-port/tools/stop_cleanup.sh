@@ -34,7 +34,7 @@ for b in build/lbp3.exe.*_bak; do
   fi
 done
 if [ -d analysis/savedata_human_kept ]; then
-  . /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/m2_lib.sh
+  . /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/m2_lib.sh
   human_restore
 fi
 [ -d analysis/savedata_human_kept.guests ] && rmdir analysis/savedata_human_kept.guests 2>/dev/null &&

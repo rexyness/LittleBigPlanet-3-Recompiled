@@ -4,7 +4,7 @@
 # [stub] lines (stub builds; sceImeDialogGetStatus and sceCommonDialogInitialize are left out,
 # every run calls them) and [ime]/[jpeg]/[dialog]/[modal] lines (builds with the libraries).
 cd /d/Recomps/lbp3-recompiled || exit 1
-. /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/m2_lib.sh
+. /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/m2_lib.sh
 n0=$(wc -l < analysis/remote_stderr.txt)
 cmdq "$3"; sleep "$2"
 shot "$1"

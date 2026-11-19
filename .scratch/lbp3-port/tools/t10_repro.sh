@@ -11,7 +11,7 @@ frames() { grep -o '^\[video\] [0-9]* frames flipped' analysis/remote_stderr.txt
 taskkill //f //im lbp3.exe >/dev/null 2>&1; sleep 1; rm -f analysis/input_cmd.txt
 # RESTORE=<dir>: start from a saved copy of user/savedata/CUSA00473.
 # Run alone, it keeps the human's saves aside first and puts them back on exit (saves.sh).
-if [ -n "$RESTORE" ]; then . /d/Recomps/lbp3-pc/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_mark_test || exit 1; rm -rf user/savedata/CUSA00473 && cp -r "$RESTORE" user/savedata/CUSA00473 || exit 1; fi
+if [ -n "$RESTORE" ]; then . /d/Recomps/lbp3-recompiled/.scratch/lbp3-port/tools/saves.sh; saves_keep; saves_mark_test || exit 1; rm -rf user/savedata/CUSA00473 && cp -r "$RESTORE" user/savedata/CUSA00473 || exit 1; fi
 powershell -NoProfile -Command "Set-Location D:\\Recomps\\lbp3-recompiled; & .\\tools\\remote_start.ps1 $*" || exit 1
 sleep 28
 cmdq 'cross\nwait 2000\nsquare\nwait 2500\n'; sleep 6
