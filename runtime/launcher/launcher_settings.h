@@ -62,6 +62,7 @@ struct Settings {
     bool motion_filter = true;
     bool tilt_keys = true;
     bool mouse_touch = false;
+    bool word_suggestions = true;  // the on-screen keyboard's; false = LBP3_OSK_SUGGEST=off (none, nothing learned)
     // display and sound
     std::string display;       // LBP3_DISPLAY: empty = where Windows puts it, "2" = the 2nd display, "165hz"
     std::string window_mode = "windowed";  // LBP3_WINDOW: windowed, borderless or fullscreen

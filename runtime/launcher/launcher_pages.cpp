@@ -746,6 +746,13 @@ void PageControls(App& a) {
         Toggle("The mouse as the touch pad", &s.mouse_touch, "F7 captures and releases the mouse; click = touch; the wheel pinches.");
     }
     EndCard();
+    if (BeginCard("osk", ImVec2(0, 0), false)) {
+        Heading("On-screen keyboard");
+        Toggle("Word suggestions", &s.word_suggestions,
+               "Words appear above the keys as you type; R3 or Tab picks the first. It learns the words you use. "
+               "The right stick moves the keyboard.");
+    }
+    EndCard();
     const fs::path ini = a.p.root / "user" / "config" / "input.ini";
     if (!c.loaded) {
         c.config = InputConfig::Load(ini);

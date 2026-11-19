@@ -8,6 +8,11 @@ param([Parameter(ValueFromRemainingArguments = $true)][string[]]$EnvVars)
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
 $env:LBP3_REMOTE_INPUT = "1"
+# Scripted runs get the plain on-screen keyboard (no word suggestions, nothing learned, its place not
+# kept), so what a run types and where its presses land don't depend on this PC's learned words. Pass
+# LBP3_OSK_PLAIN=0 to test the suggestions.
+$setPlain = -not $env:LBP3_OSK_PLAIN
+if ($setPlain) { $env:LBP3_OSK_PLAIN = "1" }
 $exeArgs = @("--run", "--skip-intro")
 $exeArgs += @($EnvVars | Where-Object { $_ -like "--*" })
 $EnvVars = @($EnvVars | Where-Object { $_ -and $_ -notlike "--*" })
@@ -27,4 +32,5 @@ $p = Start-Process -FilePath "$root\build\lbp3.exe" `
 $env:LBP3_REMOTE_INPUT = $null
 foreach ($kv in $EnvVars) { Remove-Item -Path ("env:" + ($kv -split "=", 2)[0]) -ErrorAction SilentlyContinue }
 if ($setDisplay) { $env:LBP3_DISPLAY = $null }
+if ($setPlain) { $env:LBP3_OSK_PLAIN = $null }
 Write-Host "started pid $($p.Id)"

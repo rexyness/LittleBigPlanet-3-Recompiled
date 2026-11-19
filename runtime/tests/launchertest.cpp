@@ -89,12 +89,17 @@ static void TestIni() {
     a.motion_filter = false;
     a.tilt_keys = false;
     a.mouse_touch = true;
+    a.word_suggestions = false;
     a.online = true;
     a.online_server = "play.example.org";
     a.online_name = "Sack_boy-1";
     const Settings b = FromIni(ToIni(a));
     CHECK(ToIni(a) == ToIni(b));
     CHECK(b.build == Build::Best && b.cache == CacheChoice::Shared && b.res == "1920x1080" && b.pipeline_threads == 4);
+    CHECK(!b.word_suggestions && Settings{}.word_suggestions);
+    // word suggestions: on unless switched off
+    CHECK(!EnvMap(Settings{}).count("LBP3_OSK_SUGGEST"));
+    CHECK(EnvMap(a).count("LBP3_OSK_SUGGEST") && EnvMap(a).at("LBP3_OSK_SUGGEST") == "off");
     CHECK(b.async_shaders == AsyncShaders::Always && Settings{}.async_shaders == AsyncShaders::Online);
     // background shader builds: each value survives the file; an older file's 0 (the old default,
     // never a choice) becomes online once, its 1 stays always; a current file's 0 sticks
