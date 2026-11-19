@@ -209,6 +209,22 @@ int main() {
     // 16:9 sizes never touch the aspect sites.
     CHECK(!Find(e4k, 0x3fdbc0) && !Find(e720, 0x1060a04));
 
+    // ---- the Garlic pool: the game's 1698 MB up to 1440p, then sethlikepie's +320 MiB per extra
+    // 1080p of pixels in 2 MiB steps (scripts/patches.py heap_extra_mib) ----
+    CHECK(core::res::PoolMb({1280, 720}) == 0 && core::res::PoolMb(Lbp3Res::kNative) == 0);
+    CHECK(core::res::PoolMb(Lbp3Res::k1440) == 0 && core::res::PoolMb({2560, 1080}) == 0);
+    // (Values from seth's formula in Python.)
+    CHECK(core::res::PoolMb({3840, 2160}) == 2658);  // 3 extra frames: +960
+    CHECK(core::res::PoolMb({3440, 1440}) == 2144);  // 1.389 extra: 444.4 MiB, up to +446
+    CHECK(core::res::PoolMb({3840, 1080}) == 2018);  // exactly 1 extra: +320
+    CHECK(core::res::PoolMb({3840, 1600}) == 2328);  // +630
+    CHECK(core::res::PoolMb({4480, 1260}) == 2250);  // +552
+    CHECK(core::res::PoolMb({7680, 4320}) == 3072);  // capped
+    for (const Size& l : kList) {
+        const uint32_t mb = core::res::PoolMb(l);
+        CHECK(mb == 0 || (mb > 1698 && mb <= 3072 && mb % 2 == 0));
+    }
+
     // ---- shader literals (the same mapping) ----
     using Lbp3Res::LiteralSize;
     for (const uint32_t v : {1920u, 1080u, 960u, 540u, 480u, 270u, 3840u, 2160u, 7680u, 4320u})

@@ -52,6 +52,15 @@ inline const std::vector<uint8_t> kSplitExpect = {0xc5, 0xfa, 0x10, 0x53, 0x08, 
 // The game's Garlic pool size instruction in FUN_0005bed0 (LBP3_RES_POOL_MB).
 constexpr uint64_t kPoolSite = 0x5bf55;
 
+// The Garlic pool for `size` in MB, or 0 to keep the game's 1,698 MB. Above 2560x1440's pixel
+// count it's 1,698 MB plus 320 MiB per extra 1920x1080 of pixels, rounded up to 2 MiB
+// (sethlikepie's "heap:320" rule, littlebigplanet3-pc 07cc7e7; 2,658 MB at 3840x2160), at most
+// 3,072. Up to 1440p the game's pool fits with room (LocalRenderTargets 635 MB at 1440p,
+// perf/res1440_experiment.md), and direct memory is committed when mapped, so it's left alone
+// there. A margin for the larger sizes, not a measured need: 4K has loaded without it.
+// LBP3_RES_POOL_MB overrides it.
+uint32_t PoolMb(Lbp3Res::Size size);
+
 // Patches eboot.bin for LBP3_RES (nothing when unset, 1080 or unusable).
 void Apply(Module& m);
 
