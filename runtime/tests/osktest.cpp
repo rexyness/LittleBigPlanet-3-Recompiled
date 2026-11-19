@@ -1006,7 +1006,23 @@ void PlaceChecks(SDL_Window* window, const Request& req) {
     CHECK_EQ(int(testing::LearnedCount(u"hello")), 1);
     Pad(ps4::PAD_CIRCLE);
     Pad(0);
+    // With no list injected, the overlay finds the one beside the build (data\osk, a folder above
+    // the exe), as the game does; the working folder here is the temporary one.
     testing::SetWordList(nullptr);
+    testing::ForgetFiles();
+    const char* base = SDL_GetBasePath();
+    if (fs::exists(fs::u8path(base ? base : "") / ".." / "data" / "osk" / "words_en.txt")) {
+        Answers a9;
+        Show(req, Recorder(a9));
+        Pad(0);
+        TypeText(" th");
+        const Strings shipped = Bar();
+        CHECK(!shipped.empty() && shipped[0] == u"the");
+        Pad(ps4::PAD_CIRCLE);
+        Pad(0);
+    } else {
+        std::printf("  no data\\osk beside the build: the overlay's own list search skipped\n");
+    }
     testing::UseFiles(false);
     testing::ForgetFiles();
     fs::current_path(old);
