@@ -516,6 +516,146 @@ void WordsChecks() {
     CHECK_EQ(int(w4.LearnedCount(u"favourite")), 2);
 }
 
+// The keyboard model with the test list's suggestions.
+Keyboard Suggesting(const Words& w, std::u16string text, uint32_t maxLength) {
+    Keyboard kb(std::move(text), maxLength);
+    kb.SetSuggester([&w](std::u16string_view typed, size_t room) { return w.Suggest(typed, room); });
+    return kb;
+}
+
+void BarChecks() {
+    std::printf("prediction bar\n");
+    Words w;
+    w.LoadList(kTestList);
+    Keyboard kb = Suggesting(w, u"", 40);
+    CHECK(kb.suggestions().empty());
+    CHECK(kb.Type(u"th"));
+    CHECK(kb.suggestions() == (Strings{u"the", u"that", u"they", u"there", u"this", u"then"}));
+    // Up from the top row goes into the bar, onto the first suggestion.
+    CHECK(kb.Select(0, 3));
+    kb.Move(-1, 0);
+    CHECK(kb.inBar());
+    CHECK_EQ(kb.barIndex(), 0);
+    kb.Move(0, 1);
+    CHECK_EQ(kb.barIndex(), 1);
+    kb.Move(0, -1);
+    kb.Move(0, -1);  // a fresh press wraps
+    CHECK_EQ(kb.barIndex(), 5);
+    kb.Move(0, 1, true);  // a held one stops at the end
+    CHECK_EQ(kb.barIndex(), 5);
+    kb.Move(-1, 0);  // up does nothing
+    CHECK_EQ(kb.barIndex(), 5);
+    kb.Move(1, 0);  // down: back to the key it came from
+    CHECK(!kb.inBar());
+    CHECK_EQ(kb.row(), 0);
+    CHECK_EQ(kb.col(), 3);
+    // Cross picks: the word replaces what's typed, a space follows, the selection goes back.
+    kb.Move(-1, 0);
+    kb.Move(0, 1);
+    CHECK(kb.Activate() == Outcome::None);
+    CHECK(kb.text() == u"that ");
+    CHECK_EQ(int(kb.cursor()), 5);
+    CHECK(!kb.inBar());
+    CHECK_EQ(kb.row(), 0);
+    CHECK_EQ(kb.col(), 3);
+    CHECK(kb.suggestions().empty());
+    // With an empty bar, up from the top row wraps to the bottom as before.
+    kb.Move(-1, 0);
+    CHECK(!kb.inBar());
+    CHECK_EQ(kb.row(), 5);
+
+    // Punctuation straight after a pick goes before its space; a space out of habit is
+    // swallowed, once; anything else ends that.
+    Keyboard p = Suggesting(w, u"", 40);
+    p.Type(u"hel");
+    CHECK(p.Pick(0));
+    CHECK(p.text() == u"hello ");
+    CHECK(p.Type(u"."));
+    CHECK(p.text() == u"hello. ");
+    CHECK_EQ(int(p.cursor()), 7);
+    p.Space();
+    CHECK(p.text() == u"hello. ");
+    p.Space();
+    CHECK(p.text() == u"hello.  ");
+    Keyboard q = Suggesting(w, u"", 40);
+    q.Type(u"hel");
+    q.Pick(0);
+    q.Type(u" ");  // the PC keyboard's space bar
+    CHECK(q.text() == u"hello ");
+    q.Type(u"x");
+    q.Type(u".");
+    CHECK(q.text() == u"hello x.");
+    Keyboard keyPunct = Suggesting(w, u"", 40);
+    keyPunct.Type(u"hel");
+    keyPunct.Pick(0);
+    keyPunct.Backspace();  // deletes the space only
+    CHECK(keyPunct.text() == u"hello");
+    keyPunct.Type(u".");
+    CHECK(keyPunct.text() == u"hello.");
+    // A space already after the word: no second one, the cursor steps over it.
+    Keyboard mid = Suggesting(w, u"hel world", 40);
+    mid.CursorHome();
+    for (int i = 0; i < 3; ++i) mid.CursorRight();
+    CHECK(mid.suggestions() == (Strings{u"hello"}));
+    CHECK(mid.Pick(0));
+    CHECK(mid.text() == u"hello world");
+    CHECK_EQ(int(mid.cursor()), 6);
+    // No room for the space: the word alone. No room for the word: not offered.
+    Keyboard full = Suggesting(w, u"", 5);
+    full.Type(u"hel");
+    CHECK(full.Pick(0));
+    CHECK(full.text() == u"hello");
+    full.Type(u".");
+    CHECK(full.text() == u"hello");
+    Keyboard tight = Suggesting(w, u"", 4);
+    tight.Type(u"hel");
+    CHECK(tight.suggestions().empty());
+    // The cursor inside a word: nothing to suggest.
+    Keyboard inside = Suggesting(w, u"", 40);
+    inside.Type(u"sackboy");
+    for (int i = 0; i < 3; ++i) inside.CursorLeft();
+    CHECK(inside.suggestions().empty());
+    // Capitals follow what's typed; a pick ends a one-letter shift.
+    Keyboard caps = Suggesting(w, u"", 40);
+    caps.Type(u"Hel");
+    caps.Shift();
+    CHECK(caps.caseState() == Case::Upper);
+    caps.Pick(0);
+    CHECK(caps.text() == u"Hello ");
+    CHECK(caps.caseState() == Case::Lower);
+    // The bar changing under the selection: it stays in the bar on the first suggestion, and
+    // goes back to the key when the bar empties.
+    Keyboard ch = Suggesting(w, u"", 40);
+    ch.Type(u"th");
+    ch.Select(0, 4);
+    ch.Move(-1, 0);
+    ch.Move(0, 1);
+    ch.Move(0, 1);
+    CHECK_EQ(ch.barIndex(), 2);
+    ch.Type(u"e");
+    CHECK(ch.suggestions() == (Strings{u"they", u"there", u"then", u"them"}));
+    CHECK_EQ(ch.barIndex(), 0);
+    ch.Backspace();
+    ch.Backspace();
+    ch.Backspace();
+    CHECK(ch.suggestions().empty());
+    CHECK(!ch.inBar());
+    CHECK_EQ(ch.row(), 0);
+    CHECK_EQ(ch.col(), 4);
+    // The mouse: hovering a suggestion selects it, a key takes the selection back.
+    ch.Type(u"th");
+    CHECK(ch.SelectSuggestion(1));
+    CHECK_EQ(ch.barIndex(), 1);
+    CHECK(!ch.SelectSuggestion(9));
+    CHECK(ch.Select(1, 0));
+    CHECK(!ch.inBar());
+    // No suggester: never any.
+    Keyboard none(u"", 40);
+    none.Type(u"th");
+    CHECK(none.suggestions().empty());
+    CHECK(!none.Pick(0));
+}
+
 // ---- Overlay ----
 
 uint64_t g_now = 1000;
@@ -1096,6 +1236,7 @@ int main(int argc, char** argv) {
     ModeChecks();
     RepeaterChecks();
     WordsChecks();
+    BarChecks();
     OverlayChecks();
     std::printf("%d checks, %d failed\n", g_checks, g_failures);
     SDL_Quit();
