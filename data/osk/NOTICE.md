@@ -13,9 +13,8 @@ of the port is free software under the GNU GPL (see `licenses\` in a package, `L
 
 It is adapted from **FrequencyWords** by Hermit Dave, https://github.com/hermitdave/FrequencyWords, the file
 `content/2018/en/en_50k.txt` at commit `525f9b560de45753a5ea01069454e72e9aa541c6`, whose content is licensed
-CC BY-SA 4.0. Its counts come from the **OpenSubtitles 2018** corpus: subtitles from
-http://www.opensubtitles.org/, prepared by OPUS (P. Lison and J. Tiedemann, 2016, *OpenSubtitles2016:
-Extracting Large Parallel Corpora from Movie and TV Subtitles*, LREC 2016), http://opus.nlpl.eu/.
+CC BY-SA 4.0. Its counts come from the **OpenSubtitles 2018** corpus as tokenized by OPUS,
+http://opus.nlpl.eu/OpenSubtitles2018.php (subtitles from www.opensubtitles.org).
 
 ## What was changed
 
@@ -26,13 +25,14 @@ Extracting Large Parallel Corpora from Movie and TV Subtitles*, LREC 2016), http
 - Names were given their capitals ("Monday", "London", "I") using SCOWL (below).
 - Swear words and slurs were left out, using SCOWL's lists of taboo words, the LDNOOBW list (below) and a
   short list of the port's own.
-- Words from LittleBigPlanet were added ("Sackboy", "Oddsock", "Popit").
+- Words from LittleBigPlanet were added ("Sackboy", "Oddsock", "Popit", "Velociporter").
 - Only the 30,000 most common words were kept.
 
 ## Lists used to make it
 
 **SCOWL** (Spell Checker Oriented Word Lists) 2020.12.07, http://wordlist.aspell.net/, was used for the capitals
-and the taboo words. Its notice:
+and the taboo words. Its whole copyright file, with the notices of the lists SCOWL draws on, is
+`SCOWL-Copyright.txt` beside this file; its main notice:
 
 > Copyright 2000-2018 by Kevin Atkinson
 >

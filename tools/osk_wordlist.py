@@ -70,8 +70,11 @@ CONTRACTIONS = {
 # Names from the game, always written with a capital, ranked like a common word (the 1000th), each a
 # little below the one before it.
 LBP_NAMES = ["Sackboy", "Sackgirl", "Sackbot", "Sackbots", "Oddsock", "Newton", "Bunkum", "Ziggurat", "Manglewood",
-             "LittleBigPlanet", "LBP", "Popit", "Velociporter", "Pumpinator", "Grabinator", "Creatinator",
-             "Paintinator", "Controlinator", "Collectabell", "Collectabells"]
+             "LittleBigPlanet", "LBP", "Popit"]
+# The game's tools and collectables, also with a capital but ranked like the 10,000th word, so they come
+# up once a few letters are typed rather than pushing out everyday words ("ve" -> very, vehicle...).
+LBP_TOOLS = ["Velociporter", "Pumpinator", "Grabinator", "Creatinator", "Paintinator", "Controlinator",
+             "Collectabell", "Collectabells"]
 # Create-mode words in lower case, added if missing, ranked like the 5000th word.
 LBP_WORDS = ["checkpoint", "checkpoints", "scoreboard", "microchip", "microchips", "sequencer", "sequencers",
              "emitter", "emitters", "toggle", "swoop", "pod"]
@@ -223,10 +226,11 @@ def build(args):
             words[form.lower()] = [form, max(c, words.get(form.lower(), [None, 0])[1])]
 
     ranked = sorted(words.values(), key=lambda fc: (-fc[1], fc[0].lower()))
-    at1000, at5000 = ranked[999][1], ranked[4999][1]
-    for i, name in enumerate(LBP_NAMES):  # in the order listed: Sackboy before Sackbot
-        old = words.get(name.lower(), [name, 0])
-        words[name.lower()] = [name, max(old[1], at1000 - i)]
+    at1000, at5000, at10000 = ranked[999][1], ranked[4999][1], ranked[9999][1]
+    for names, at in ((LBP_NAMES, at1000), (LBP_TOOLS, at10000)):
+        for i, name in enumerate(names):  # in the order listed: Sackboy before Sackbot
+            old = words.get(name.lower(), [name, 0])
+            words[name.lower()] = [name, max(old[1], at - i)]
     for w in LBP_WORDS:
         if w not in words:
             words[w] = [w, at5000]

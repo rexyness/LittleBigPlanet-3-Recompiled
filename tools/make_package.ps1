@@ -67,7 +67,7 @@ Copy-Item build\lbp3.exe, build\LBP3Launcher.exe, build\SDL3.dll $stage
 Copy-Item tools\nid_names.txt "$stage\tools\"
 # The on-screen keyboard's word list (CC BY-SA 4.0) and its notice, read from data\osk beside lbp3.exe.
 New-Item -ItemType Directory -Force "$stage\data\osk" | Out-Null
-Copy-Item data\osk\words_en.txt, data\osk\NOTICE.md "$stage\data\osk\"
+Copy-Item data\osk\words_en.txt, data\osk\NOTICE.md, data\osk\SCOWL-Copyright.txt "$stage\data\osk\"
 foreach ($dll in "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "msvcp140_atomic_wait.dll",
                  "vcruntime140.dll", "vcruntime140_1.dll") {
     if (Test-Path "$($crt.FullName)\$dll") { Copy-Item "$($crt.FullName)\$dll" $stage }
