@@ -17,6 +17,7 @@
 #include <thread>
 
 #include "core/log_stamp.h"
+#include "net/p2p_lbppc.h"
 
 namespace net::p2p {
 namespace {
@@ -29,6 +30,7 @@ constexpr uint8_t kMagic[4] = {'L', '3', 'P', '1'};
 enum : uint8_t { kHello = 1, kAck = 2, kData = 3, kPing = 4, kPong = 5, kBye = 6, kData2 = 7, kData3 = 8, kNack = 9 };
 constexpr uint8_t kCapData3 = 1;     // HELLO capability: DATA3 / NACK
 constexpr uint8_t kCapExactMath = 2;  // HELLO capability: the game runs the exact maths (Config::exactMath)
+constexpr uint8_t kCapLbppc = 4;      // HELLO capability: the LBPPC co-op mode (Config::lbppc)
 constexpr size_t kHistory = 256;     // DATA3 payloads kept for a NACK
 constexpr int kCopies = 2;           // earlier payloads carried in each DATA3
 constexpr size_t kMaxDatagram = 1200;  // copies only while a DATA3 stays this small
@@ -137,6 +139,12 @@ struct Link::Impl {
         uint8_t caps = 0;     // the peer link's capabilities (HELLO / ACK)
         uint32_t epoch = 0;   // the peer's epoch for this connection: a new one means it set it up again
         uint32_t myEpoch = 0; // ours for it (new each time we set the connection up)
+        // An LBPPC player (Config::lbppc, net/p2p_lbppc.h): everything to it goes in LBPPC's protocol.
+        bool lb = false;
+        bool lbRelay = false;          // something of its came through the relay: all goes that way now
+        bool lbEstablishedSent = false;
+        uint32_t lbId = 0;             // our connection id for it (their from/to conn fields)
+        Clock::time_point lbLastActivation{};
         struct Item {
             uint16_t srcVport, dstVport;
             std::vector<uint8_t> data;
@@ -214,6 +222,8 @@ struct Link::Impl {
     bool stunAnswered = false;
     std::set<std::string> refusedLogged;
     std::set<std::string> mathRefusedLogged;
+    std::set<std::string> modeRefusedLogged;
+    uint32_t nextLbId = 1;  // LBPPC connection ids
     std::mt19937 rng{std::random_device{}()};  // connection epochs
     uint64_t testCounter = 0;    // the Config::test* settings (the link's thread only)
     struct Delayed {
@@ -254,6 +264,7 @@ struct Link::Impl {
         return p.direct.Valid() && now - p.lastDirect < kDirectFresh;
     }
     bool SendsRelayed(const Peer& p, Clock::time_point now) const {
+        if (p.lb) return (p.lbRelay || !p.direct.Valid()) && cfg.server.Valid() && p.relayTo.Valid();
         return (cfg.path == Config::Path::Relay && cfg.server.Valid() && p.relayTo.Valid()) || !DirectFresh(p, now);
     }
     // 'L' the peer's LAN address, 'P' another direct one, 'R' the relay.
@@ -278,8 +289,23 @@ struct Link::Impl {
     }
     // Lock held. Directly when the peer's packets come directly, else through the relay.
     void SendToPeer(Peer& p, const std::vector<uint8_t>& b, Clock::time_point now) {
-        if (b.size() >= 5 && b[4] < 10) ++p.win.tx[b[4]];
+        if (b.size() >= 5 && std::memcmp(b.data(), kMagic, 4) == 0 && b[4] < 10) ++p.win.tx[b[4]];
         p.win.txBytes += b.size();
+        if (p.lb) {
+            // An LBPPC player knows us by where our packets come from, and goes through the relay for
+            // good once it has (net/p2p_lbppc.h): one way only, the relay once it has been used.
+            if (SendsRelayed(p, now)) {
+                SendRelayed(p.relayTo, b);
+                ++stats.sentRelayed;
+            } else if (p.direct.Valid()) {
+                SendRaw(p.direct, b);
+                ++stats.sentDirect;
+            } else if (!p.candidates.empty()) {
+                SendRaw(p.candidates.front(), b);
+                ++stats.sentDirect;
+            }
+            return;
+        }
         if (cfg.path == Config::Path::Relay && cfg.server.Valid() && p.relayTo.Valid()) {
             SendRelayed(p.relayTo, b);
             ++stats.sentRelayed;
@@ -309,10 +335,40 @@ struct Link::Impl {
         lan.ip = cfg.reportLan ? lanIp : 0;
         lan.port = localPort;
         PutEndpoint(b, lan);
-        b.push_back(uint8_t((cfg.data3 ? kCapData3 : 0) | (cfg.exactMath ? kCapExactMath : 0)));
+        b.push_back(uint8_t((cfg.data3 ? kCapData3 : 0) | (cfg.exactMath ? kCapExactMath : 0) | (cfg.lbppc ? kCapLbppc : 0)));
         const auto it = peers.find(to);
         Put32(b, it != peers.end() ? it->second.myEpoch : 1);
         return b;
+    }
+
+    // LBPPC's packets (net/p2p_lbppc.h), framed for the wire. Microseconds of our steady clock: a
+    // Check's nonce and an echo's time come back unchanged.
+    static uint64_t LbNowUs(Clock::time_point now) {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count());
+    }
+    std::vector<uint8_t> LbHandshake(const Peer& p, uint8_t kind, uint64_t nonce = 0) const {
+        lbppc::Handshake h;
+        h.kind = kind;
+        h.from = cfg.self;
+        h.to = p.name;
+        h.fromConn = p.lbId;
+        h.mappedAddr = external.ip;  // as LBPPC fills it: our public IP, port 0
+        h.nonce = nonce;
+        return lbppc::Signaling(lbppc::Encode(h));
+    }
+    std::vector<uint8_t> LbControl(const Peer& p, uint8_t kind, uint16_t reason = 0) const {
+        lbppc::Control c;
+        c.kind = kind;
+        c.from = cfg.self;
+        c.to = p.name;
+        c.fromConn = p.lbId;
+        c.mappedAddr = external.ip;
+        c.reason = reason;
+        return lbppc::Signaling(lbppc::Encode(c));
+    }
+    // Lock held: a peer's LBPPC connection id, once.
+    void LbEnsureId(Peer& p) {
+        if (!p.lbId) p.lbId = nextLbId++;
     }
 
     // Lock held: a new connection's state (a fresh epoch, so the other side starts counting again).
@@ -470,6 +526,11 @@ struct Link::Impl {
         if (relayed) {
             ++p.win.relayedHeard;
             p.relayTo = src;
+            if (p.lb && !p.lbRelay) {
+                p.lbRelay = true;
+                std::fprintf(stderr, "[p2p] %s %s (LBPPC): through the relay from now on, as it does\n",
+                             core::Stamp().text, p.name.c_str());
+            }
         } else {
             AddCandidate(p, src);
             ++p.win.directHeard;
@@ -594,9 +655,14 @@ struct Link::Impl {
             p.activeAt = Clock::now();
             if (p.local) events.push_back({Event::Established, p.name, 0});
             else events.push_back({Event::PeerActivated, p.name, 0});
-            std::fprintf(stderr, "[p2p] %s: connected (%s, game address %s) at %s, %lld ms after it began\n", p.name.c_str(),
-                         p.direct.Valid() ? "direct" : "relayed", ToString(p.gameAddr).c_str(), core::Stamp().text,
-                         static_cast<long long>(Ms(Clock::now() - p.started)));
+            std::fprintf(stderr, "[p2p] %s: connected (%s%s, game address %s) at %s, %lld ms after it began\n", p.name.c_str(),
+                         p.lb ? "an LBPPC player, " : "",
+                         (p.lb ? !SendsRelayed(p, Clock::now()) : p.direct.Valid()) ? "direct" : "relayed",
+                         ToString(p.gameAddr).c_str(), core::Stamp().text, static_cast<long long>(Ms(Clock::now() - p.started)));
+        }
+        if (p.lb && !p.lbEstablishedSent) {
+            p.lbEstablishedSent = true;
+            SendToPeer(p, LbControl(p, lbppc::kEstablished), Clock::now());
         }
         if (p.local && p.remote && !p.mutualFired) {
             p.mutualFired = true;
@@ -665,7 +731,156 @@ struct Link::Impl {
         HandlePeerPacketNow(d, n, src, relayed, now);
     }
 
+    // Lock held: the peer speaks LBPPC's protocol from now on (Config::lbppc).
+    void LbBecome(Peer& p, const Endpoint& src) {
+        if (!p.lb) {
+            p.lb = true;
+            p.caps = 0;  // no DATA3: LBPPC has no such thing
+            std::fprintf(stderr, "[p2p] %s %s is an LBPPC player: its protocol from now on\n", core::Stamp().text,
+                         p.name.c_str());
+        }
+        LbEnsureId(p);
+        if (!p.gameAddr.Valid()) p.gameAddr = src;
+    }
+
+    // The link's thread: a packet in LBPPC's frame (net/p2p_lbppc.h). Only with Config::lbppc.
+    void HandleLbppc(const uint8_t* d, size_t n, const Endpoint& src, bool relayed, Clock::time_point now) {
+        const lbppc::Parsed f = lbppc::Parse(d, n);
+        if (f.kind == lbppc::Parsed::None) return;
+        std::lock_guard lk(m);
+        ++stats.received;
+        if (f.kind == lbppc::Parsed::Data) {
+            // The game's datagram: the sender is whoever its packets come from.
+            Peer* p = PeerFrom(src, relayed);
+            if (!p || !p->lb || !Carries(*p)) {
+                if (++stats.dataUnknown <= 10)
+                    std::fprintf(stderr, "[p2p] an LBPPC game datagram from %s%s, from no connected LBPPC player: dropped\n",
+                                 ToString(src).c_str(), relayed ? " (relayed)" : "");
+                return;
+            }
+            Heard(*p, src, relayed, now, 0xFF, n);
+            if (++stats.dataReceived <= 5 || stats.dataReceived % 3000 == 0)
+                std::fprintf(stderr, "[p2p] game datagram %llu from %s (%zu bytes, %s, LBPPC)\n",
+                             static_cast<unsigned long long>(stats.dataReceived), p->name.c_str(), f.len,
+                             relayed ? "relayed" : "direct");
+            NoteDelivered(*p, f.len, now);
+            if (sink) sink(p->gameAddr, f.srcVport, f.dstVport, f.body, f.len);
+            return;
+        }
+        const uint8_t type = lbppc::TypeOf(f.body, f.len);
+        if (type == lbppc::kEchoPing || type == lbppc::kEchoPong) {
+            // Only for the round trip; they carry no online ID.
+            Peer* p = PeerFrom(src, relayed);
+            if (!p || !p->lb) return;
+            Heard(*p, src, relayed, now, 0xFF, n);
+            const lbppc::Echo e = lbppc::DecodeEcho(f.body);
+            if (type == lbppc::kEchoPing) {
+                Reply(src, relayed, lbppc::Signaling(lbppc::Encode(lbppc::Echo{lbppc::kEchoPong, e.connId, e.timeUs})));
+            } else if (LbNowUs(now) >= e.timeUs) {
+                p->rttUs = static_cast<int>(std::min<uint64_t>(LbNowUs(now) - e.timeUs, 10'000'000));
+                p->winRtt.push_back(p->rttUs);
+                ++p->win.pongs;
+            }
+            return;
+        }
+        if (type == lbppc::kControl) {
+            const lbppc::Control c = lbppc::DecodeControl(f.body);
+            if (c.to != cfg.self || c.from.empty() || c.from == cfg.self) return;
+            auto it = peers.find(c.from);
+            switch (c.kind) {
+            case lbppc::kActivationRequest: {
+                if (c.reason == lbppc::kOurMarker) return;  // one of ours: its HELLO is the way in
+                if (it != peers.end() && it->second.state == State::Closing) {
+                    peers.erase(it);  // its last connection is still closing: start afresh
+                    it = peers.end();
+                }
+                if (it != peers.end() && !it->second.lb && it->second.state == State::Active) return;  // ours, in HELLOs
+                // LBPPC's join check, and ours: a friend, or a player this game asked for itself.
+                const bool asked = it != peers.end() && it->second.local;
+                if (!asked && (!cfg.mayConnect || !cfg.mayConnect(c.from))) {
+                    ++stats.refused;
+                    if (refusedLogged.insert(c.from).second)
+                        std::fprintf(stderr, "[p2p] refused a connection from %s (not a friend; an LBPPC player)\n",
+                                     c.from.c_str());
+                    return;
+                }
+                if (it == peers.end()) {
+                    NewPeer(c.from, now).state = State::Pending;
+                    it = peers.find(c.from);
+                }
+                Peer& p = it->second;
+                LbBecome(p, src);
+                p.remote = true;
+                Heard(p, src, relayed, now, 0xFF, n);
+                Reply(src, relayed, LbControl(p, lbppc::kActivationAck));
+                if (p.state == State::Active) SetActive(p);  // already up: the activation is mutual now
+                return;
+            }
+            case lbppc::kActivationAck: {
+                // An LBPPC host has a connection for us now; the handshake (our Offers) follows.
+                if (it == peers.end() || !it->second.local || (!it->second.lb && it->second.state == State::Active))
+                    return;
+                Peer& p = it->second;
+                LbBecome(p, src);
+                p.remote = true;
+                Heard(p, src, relayed, now, 0xFF, n);
+                if (p.state == State::Active) SetActive(p);
+                return;
+            }
+            case lbppc::kEstablished: {
+                // It is connected, so its Check was answered by us: so are we.
+                if (it == peers.end() || !it->second.lb || it->second.state == State::Closing) return;
+                Heard(it->second, src, relayed, now, 0xFF, n);
+                SetActive(it->second);
+                return;
+            }
+            case lbppc::kClose: {
+                // As our BYE (both a terminate and a deactivate end it for the game).
+                if (it == peers.end() || !it->second.lb || it->second.state == State::Closing) return;
+                Peer& p = it->second;
+                if (p.state == State::Active || p.local) events.push_back({Event::Dead, c.from, kErrorPeerGone});
+                std::fprintf(stderr, "[p2p] %s %s: left (LBPPC Close, reason %u)\n", core::Stamp().text, c.from.c_str(),
+                             c.reason);
+                if (p.state == State::Active && cfg.lingerMs > 0) StartClosing(p, now);
+                else peers.erase(it);
+                return;
+            }
+            default:
+                return;
+            }
+        }
+        if (type == lbppc::kHandshake) {
+            const lbppc::Handshake h = lbppc::DecodeHandshake(f.body);
+            if (h.to != cfg.self || h.from.empty() || h.from == cfg.self) return;
+            auto it = peers.find(h.from);
+            if (it == peers.end() || it->second.state == State::Closing) return;  // as LBPPC: no connection, no answer
+            Peer& p = it->second;
+            if (!p.lb) {
+                // A reply to our opening from an LBPPC host (its ActivationAck may have been lost).
+                if (!(p.local && p.state == State::Pending)) return;
+                LbBecome(p, src);
+                p.remote = true;
+            }
+            Heard(p, src, relayed, now, 0xFF, n);
+            switch (h.kind) {
+            case lbppc::kOffer: Reply(src, relayed, LbHandshake(p, lbppc::kAccept)); break;
+            case lbppc::kAccept: Reply(src, relayed, LbHandshake(p, lbppc::kCheck, LbNowUs(now))); break;
+            case lbppc::kCheck: Reply(src, relayed, LbHandshake(p, lbppc::kCheckAck, h.nonce)); break;
+            case lbppc::kCheckAck:
+                // Our Check answered: connected.
+                if (LbNowUs(now) >= h.nonce) p.rttUs = static_cast<int>(std::min<uint64_t>(LbNowUs(now) - h.nonce, 10'000'000));
+                SetActive(p);
+                break;
+            default: break;
+            }
+        }
+    }
+
     void HandlePeerPacketNow(const uint8_t* d, size_t n, const Endpoint& src, bool relayed, Clock::time_point now) {
+        if (cfg.lbppc && n >= 6 && d[0] == lbppc::kMarker) {
+            HandleLbppc(d, n, src, relayed, now);
+            return;
+        }
         if (n < 5 || std::memcmp(d, kMagic, 4) != 0) return;
         const uint8_t type = d[4];
         std::lock_guard lk(m);
@@ -689,7 +904,21 @@ struct Link::Impl {
                                  from.c_str(), peerExact ? "runs" : "doesn't run", cfg.exactMath ? "does" : "doesn't");
                 return;
             }
+            // Both games must simulate alike: our LBPPC co-op mode changes how (Config::lbppc).
+            const bool peerLb = n >= kHelloLen + 5 && (d[kHelloLen] & kCapLbppc);
+            if (peerLb != cfg.lbppc) {
+                ++stats.refused;
+                if (modeRefusedLogged.insert(from).second)
+                    std::fprintf(stderr,
+                                 "[p2p] refused a connection with %s: %s the LBPPC co-op mode on and %s, so their "
+                                 "worlds would drift apart. Both players need the same setting (the launcher's "
+                                 "\"Play with LBPPC players\").\n",
+                                 from.c_str(), peerLb ? "it has" : "it doesn't have",
+                                 cfg.lbppc ? "this game has" : "this game doesn't");
+                return;
+            }
             auto it = peers.find(from);
+            if (it != peers.end() && it->second.lb) return;  // an LBPPC player: not ours to answer in HELLOs
             if (it != peers.end() && it->second.state == State::Closing) {
                 // A new connection from a player whose last one is still closing: start afresh.
                 if (type == kAck) return;
@@ -1042,8 +1271,14 @@ struct Link::Impl {
                 Peer& p = it->second;
                 if (p.state == State::Pending) {
                     if (Ms(now - p.started) > cfg.timeoutMs) {
-                        events.push_back({Event::Dead, p.name, kErrorUnreachable});
-                        std::fprintf(stderr, "[p2p] %s: no answer in %d s\n", p.name.c_str(), cfg.timeoutMs / 1000);
+                        if (p.local) {
+                            events.push_back({Event::Dead, p.name, kErrorUnreachable});
+                            std::fprintf(stderr, "[p2p] %s: no answer in %d s\n", p.name.c_str(), cfg.timeoutMs / 1000);
+                        } else {
+                            // An LBPPC player asked for a connection and never finished it: the game never heard of it.
+                            std::fprintf(stderr, "[p2p] %s (LBPPC): its connection never came up in %d s\n", p.name.c_str(),
+                                         cfg.timeoutMs / 1000);
+                        }
                         it = peers.erase(it);
                         continue;
                     }
@@ -1055,9 +1290,28 @@ struct Link::Impl {
                     }
                     if (now - p.lastHello >= std::chrono::milliseconds(cfg.resendMs)) {
                         p.lastHello = now;
-                        const auto hello = Hello(kHello, p.name);
-                        for (const Endpoint& c : p.candidates) SendRaw(c, hello);
-                        if (Ms(now - p.started) >= cfg.relayAfterMs && p.relayTo.Valid()) SendRelayed(p.relayTo, hello);
+                        const bool relayToo = Ms(now - p.started) >= cfg.relayAfterMs && p.relayTo.Valid();
+                        std::vector<std::vector<uint8_t>> out;
+                        if (!p.lb) out.push_back(Hello(kHello, p.name));
+                        if (cfg.lbppc) {
+                            // LBPPC's opening as well, in case it is an LBPPC player (net/p2p_lbppc.h): an
+                            // ActivationRequest (ours: marked) each time until an LBPPC answer comes (LBPPC
+                            // sends one, and again when it turns to the relay; more are harmless: each is
+                            // answered), then every 2 s; and the handshake's Offer each time, as LBPPC's own
+                            // side sends it until connected.
+                            LbEnsureId(p);
+                            if (p.local && (!p.lb || p.lbLastActivation == Clock::time_point{} ||
+                                            now - p.lbLastActivation >= std::chrono::seconds(2))) {
+                                p.lbLastActivation = now;
+                                out.push_back(LbControl(p, lbppc::kActivationRequest, lbppc::kOurMarker));
+                            }
+                            out.push_back(LbHandshake(p, lbppc::kOffer));
+                        }
+                        for (const auto& b : out) {
+                            if (!(p.lb && p.lbRelay))
+                                for (const Endpoint& c : p.candidates) SendRaw(c, b);
+                            if ((relayToo || (p.lb && p.lbRelay)) && p.relayTo.Valid()) SendRelayed(p.relayTo, b);
+                        }
                     }
                 } else if (p.state == State::Closing) {
                     if (!p.hold.empty()) Deliver3(p, now);
@@ -1093,7 +1347,13 @@ struct Link::Impl {
                                          static_cast<long long>(Ms(now - p.lastRx)), p.hold.size());
                         }
                     }
-                    if (now - p.lastPing >= std::chrono::milliseconds(cfg.keepaliveMs)) {
+                    if (p.lb && now - p.lastPing >= std::chrono::milliseconds(cfg.keepaliveMs)) {
+                        // LBPPC's echo ping, as it sends one each second (only for the round trip).
+                        p.lastPing = now;
+                        SendToPeer(p, lbppc::Signaling(lbppc::Encode(lbppc::Echo{lbppc::kEchoPing, p.lbId, nowUs})), now);
+                        ++p.win.pings;
+                    }
+                    if (!p.lb && now - p.lastPing >= std::chrono::milliseconds(cfg.keepaliveMs)) {
                         p.lastPing = now;
                         const auto ping = Ping(kPing, nowUs);
                         SendToPeer(p, ping, now);
@@ -1248,6 +1508,10 @@ void Link::Stop() {
     if (I.sock != INVALID_SOCKET) {
         for (auto& [name, p] : I.peers) {
             if (p.state != State::Active || I.cfg.testNoBye) continue;
+            if (p.lb) {
+                I.SendToPeer(p, I.LbControl(p, lbppc::kClose, 0), Clock::now());  // reason 0: terminate
+                continue;
+            }
             auto b = Header(kBye);
             PutId(b, I.cfg.self);
             PutId(b, name);
@@ -1291,7 +1555,7 @@ void Link::Activate(const std::string& peer) {
                 p.mutualFired = true;
                 I.events.push_back({Event::Mutual, peer, 0});
             }
-            I.SendToPeer(p, I.Hello(kHello, peer), Clock::now());
+            if (!p.lb) I.SendToPeer(p, I.Hello(kHello, peer), Clock::now());
         }
     }
 }
@@ -1304,10 +1568,14 @@ void Link::Terminate(const std::string& peer) {
     const auto now = Clock::now();
     const bool active = it->second.state == State::Active;
     if (active && !I.cfg.testNoBye) {
-        auto b = Header(kBye);
-        PutId(b, I.cfg.self);
-        PutId(b, peer);
-        I.SendToPeer(it->second, b, now);
+        if (it->second.lb) {
+            I.SendToPeer(it->second, I.LbControl(it->second, lbppc::kClose, 0), now);
+        } else {
+            auto b = Header(kBye);
+            PutId(b, I.cfg.self);
+            PutId(b, peer);
+            I.SendToPeer(it->second, b, now);
+        }
     }
     // The game's last datagrams (and the peer's) still pass for a while (Config::lingerMs).
     if (active && I.cfg.lingerMs > 0) I.StartClosing(it->second, now);
@@ -1330,6 +1598,7 @@ PeerInfo Link::Info(const std::string& peer) const {
     info.state = p.state;
     info.gameAddr = p.gameAddr;
     info.relayed = I.SendsRelayed(p, Clock::now());
+    info.lbppc = p.lb;
     info.rttUs = p.rttUs;
     info.locallyActivated = p.local;
     info.peerActivated = p.remote;
@@ -1405,6 +1674,16 @@ bool Link::SendData(const Endpoint& gameAddr, uint16_t srcVport, uint16_t dstVpo
         return false;
     }
     Impl::Peer& peer = it->second;
+    if (peer.lb) {
+        // An LBPPC player: the game's datagram in the PS4's own frame, nothing added (net/p2p_lbppc.h).
+        const auto now = Clock::now();
+        if (++I.stats.dataSent <= 5 || I.stats.dataSent % 3000 == 0)
+            std::fprintf(stderr, "[p2p] game datagram %llu to %s (%zu bytes, %s, LBPPC)\n",
+                         static_cast<unsigned long long>(I.stats.dataSent), name.c_str(), len,
+                         Impl::PathName(I.PathOf(peer, now)));
+        I.SendToPeer(peer, lbppc::Frame(srcVport, dstVport, static_cast<const uint8_t*>(data), len), now);
+        return true;
+    }
     if (I.UseData3(peer)) {
         const uint32_t seq = peer.seq3++;
         const auto* p = static_cast<const uint8_t*>(data);

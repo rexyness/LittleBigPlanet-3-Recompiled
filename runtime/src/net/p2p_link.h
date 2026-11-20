@@ -10,7 +10,8 @@
 //     "SMRL" 03 [sender's IPv4][port] packet; only between endpoints that have sent STUN pings.
 // Between players (directly or relayed), our own packets: "L3P1", a type, then
 //   HELLO 1 / ACK 2: from[16] to[16] ext IPv4[4] ext port[2] LAN IPv4[4] LAN port[2], then (since
-//            v0.1.1; older links ignore it) capabilities[1] (1: DATA3, 2: exact maths, since v0.1.3)
+//            v0.1.1; older links ignore it) capabilities[1] (1: DATA3, 2: exact maths, since v0.1.3;
+//            4: the LBPPC co-op mode, Config::lbppc)
 //            and the connection's epoch[4]
 //            (new each time the sender sets up the connection: a new one restarts DATA3's counting)
 //   DATA 3:  src vport[2] dst vport[2] sender[4] payload (the game's datagram; sender: a hash of
@@ -23,6 +24,8 @@
 //            dst vport[2] length[2] payload. Used when both links have it (HELLO capabilities).
 //   NACK 9:  from[16] first seq[4] count[2]: please send these DATA3 again
 // (all big-endian / network order).
+// With Config::lbppc, LBPPC's packets as well (net/p2p_lbppc.h): a player who answers in them is an
+// LBPPC player, and everything to them goes in their protocol.
 //
 // A connection: Activate(peer) asks the server where the peer is (the resolve callback), then sends
 // HELLO to every address it knows for them (the server's, then the LAN address the peer reports),
@@ -90,6 +93,12 @@ struct Config {
     // connection with a player whose game differs is refused: their worlds would drift apart ("The
     // game diverged"). A link from before v0.1.3 sends no such capability: its game has no exact maths.
     bool exactMath = false;
+    // The LBPPC co-op mode (LBP3_LBPPC_COOP=1, net/p2p_lbppc.h): the link also speaks LBPPC's protocol,
+    // so players on LBPPC can join us and we them, and this game simulates as LBPPC's does. HELLO and
+    // ACK say so (capability 4), and a connection between two of our players whose modes differ is
+    // refused: their worlds would drift apart. With LBPPC's players there is no gap-free delivery
+    // (they have none), and once anything of theirs comes through the relay it all goes that way.
+    bool lbppc = false;
     // Tests, on incoming game datagrams: drop `testLossBurst` out of every `testLossEvery`; hold every
     // `testLateEvery`th back 50 ms (its successors overtake it); handle every `testDupEvery`th twice.
     int testLossEvery = 0, testLossBurst = 1, testLateEvery = 0, testDupEvery = 0;
@@ -124,6 +133,7 @@ struct PeerInfo {
     State state = State::None;
     Endpoint gameAddr;
     bool relayed = false;
+    bool lbppc = false;  // an LBPPC player (Config::lbppc): its protocol, no gap-free delivery
     int rttUs = 0;
     bool locallyActivated = false, peerActivated = false;
     // The session log's counts for this connection so far (the [p2p-win] lines print them per 5 s).

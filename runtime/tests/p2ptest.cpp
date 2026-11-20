@@ -14,6 +14,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -21,6 +22,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -237,6 +239,382 @@ bool CaptureSend(uint32_t ip, uint16_t port, uint16_t sv, uint16_t dv, const voi
     g_captured.data.assign(static_cast<const char*>(d), n);
     return true;
 }
+
+// --- An LBPPC player, as its signaling handler and transport run (LBPPC cb4cbe7:
+// gpu/bbnet/vendor/shadps4/core/libraries/np/signaling_handler.cpp, np_signaling/np_signaling_state.h,
+// core/net/p2p_codec.cpp, core/net/p2p_transport.cpp; GPL-2.0-or-later). Its packets are built from
+// these packed structs the way LBPPC builds them (memcpy of a little-endian struct), not from our
+// net/p2p_lbppc.h, so a misread offset there fails here. Timings scaled down as PlayerConfig's.
+#pragma pack(push, 1)
+struct LbEcho {
+    uint8_t magic[4] = {'S', 'H', 'A', 'D'};
+    uint8_t type = 0;
+    uint32_t conn_id = 0;
+    uint64_t ts = 0;
+};
+static_assert(sizeof(LbEcho) == 17);
+struct LbHandshake {
+    uint8_t magic[4] = {'S', 'H', 'A', 'D'};
+    uint8_t type = 0x07;
+    uint8_t kind = 0;
+    uint8_t online_id_from[16]{};
+    uint8_t online_id_to[16]{};
+    uint32_t from_conn_id = 0;
+    uint32_t to_conn_id = 0;
+    uint32_t mapped_addr = 0;
+    uint16_t mapped_port = 0;
+    uint16_t reserved = 0;
+    uint64_t nonce = 0;
+};
+static_assert(sizeof(LbHandshake) == 0x3e);
+struct LbControl {
+    uint8_t magic[4] = {'S', 'H', 'A', 'D'};
+    uint8_t type = 0x10;
+    uint8_t kind = 0;
+    uint8_t online_id_from[16]{};
+    uint8_t online_id_to[16]{};
+    uint32_t from_conn_id = 0;
+    uint32_t mapped_addr = 0;
+    uint16_t mapped_port = 0;
+    uint16_t reason = 0;
+};
+static_assert(sizeof(LbControl) == 0x32);
+#pragma pack(pop)
+
+struct LbppcMock {
+    enum class St { Inactive, SendingOffer, WaitOffer, ConnCheck, SendingAccept, WaitAccept, Established };
+    struct Transport {
+        std::string id;
+        Endpoint addr;
+        St state = St::Inactive;
+        bool local = false, peerActivated = false, relayedSet = false, deadFired = false;
+        uint32_t connId = 0;
+        int64_t handshakeStart = 0, lastSend = 0, lastPeerRx = 0, lastPing = 0;
+        int pongs = 0;
+    };
+    std::string self;
+    Endpoint server, ext;
+    std::vector<std::string> friends;
+    SOCKET sock = INVALID_SOCKET;
+    std::thread thread;
+    std::atomic<bool> stop{false};
+    std::mutex m;
+    std::map<std::string, Transport> transports;
+    std::set<uint32_t> relayedIps;  // LBPPC's per-IP relay (p2p_transport.cpp UseRelayFor)
+    uint32_t nextConn = 1;
+    // What arrived: game datagrams (vports, payload, the raw packet), and control packets by kind.
+    struct Got {
+        uint16_t sv, dv;
+        std::string data;
+        std::vector<uint8_t> raw;
+        Endpoint from;
+    };
+    std::vector<Got> got;
+    std::vector<LbControl> controls;
+    int closes = 0, refused = 0, relayedIn = 0;
+    int64_t lastStun = 0;
+
+    static int64_t NowUs() {
+        return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    static void SetId(uint8_t* dst, const std::string& id) { std::memcpy(dst, id.data(), std::min<size_t>(id.size(), 16)); }
+    static std::string Id(const uint8_t* p) { return std::string(reinterpret_cast<const char*>(p), strnlen(reinterpret_cast<const char*>(p), 16)); }
+
+    bool Start(const std::string& name, const Endpoint& srv, std::vector<std::string> fr) {
+        self = name;
+        server = srv;
+        friends = std::move(fr);
+        sock = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (::bind(sock, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0) return false;
+        DWORD timeout = 10;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+        BOOL off = FALSE;
+        DWORD ret = 0;
+        WSAIoctl(sock, _WSAIOW(IOC_VENDOR, 12), &off, sizeof(off), nullptr, 0, &ret, nullptr, nullptr);
+        thread = std::thread([this] { Run(); });
+        return true;
+    }
+    void Stop() {
+        stop = true;
+        if (thread.joinable()) thread.join();
+        closesocket(sock);
+    }
+    void Raw(const Endpoint& to, const std::vector<uint8_t>& b) {
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = to.ip;
+        a.sin_port = htons(to.port);
+        ::sendto(sock, reinterpret_cast<const char*>(b.data()), int(b.size()), 0, reinterpret_cast<sockaddr*>(&a), sizeof(a));
+    }
+    // The transport's send: through the relay to an IP marked relayed, else directly.
+    void SendTo(const Endpoint& to, const std::vector<uint8_t>& packet) {
+        if (relayedIps.contains(to.ip)) {
+            std::vector<uint8_t> r{'S', 'M', 'R', 'L', 2};
+            const auto* ip = reinterpret_cast<const uint8_t*>(&to.ip);
+            r.insert(r.end(), ip, ip + 4);
+            r.push_back(uint8_t(to.port >> 8));
+            r.push_back(uint8_t(to.port));
+            r.insert(r.end(), packet.begin(), packet.end());
+            Raw(server, r);
+        } else {
+            Raw(to, packet);
+        }
+    }
+    static std::vector<uint8_t> Frame(uint16_t sv, uint16_t dv, const void* body, size_t n) {
+        std::vector<uint8_t> b{0xFF, 0x83, uint8_t(sv >> 8), uint8_t(sv), uint8_t(dv >> 8), uint8_t(dv)};
+        const auto* p = static_cast<const uint8_t*>(body);
+        b.insert(b.end(), p, p + n);
+        return b;
+    }
+    template <class T>
+    void Signal(const Endpoint& to, const T& pkt) { SendTo(to, Frame(0xFFFF, 0xFFFF, &pkt, sizeof(pkt))); }
+    LbControl MakeControl(const Transport& t, uint8_t kind) {
+        LbControl c;
+        c.kind = kind;
+        c.from_conn_id = t.connId;
+        SetId(c.online_id_from, self);
+        SetId(c.online_id_to, t.id);
+        c.mapped_addr = ext.ip;
+        return c;
+    }
+    LbHandshake MakeHandshake(const Transport& t, uint8_t kind) {
+        LbHandshake h;
+        h.kind = kind;
+        h.from_conn_id = t.connId;
+        SetId(h.online_id_from, self);
+        SetId(h.online_id_to, t.id);
+        h.mapped_addr = ext.ip;
+        return h;
+    }
+    void SendHandshake(Transport& t, const LbHandshake& h) {
+        t.lastSend = NowUs();
+        if (!t.handshakeStart) t.handshakeStart = t.lastSend;
+        Signal(t.addr, h);
+    }
+    // StartTransportHandshakeInitiator.
+    void Initiate(Transport& t) {
+        uint8_t kind = 1;
+        switch (t.state) {
+        case St::SendingAccept: kind = 2; break;
+        case St::WaitOffer: t.state = St::SendingOffer; kind = 1; break;
+        case St::ConnCheck: kind = 3; break;
+        case St::SendingOffer:
+        case St::WaitAccept: kind = 1; break;
+        case St::Established: return;
+        default: t.state = St::SendingOffer; kind = 1; break;
+        }
+        LbHandshake h = MakeHandshake(t, kind);
+        if (kind == 3) h.nonce = uint64_t(NowUs());
+        SendHandshake(t, h);
+    }
+    void Establish(Transport& t) {
+        if (t.state == St::Established) return;
+        t.state = St::Established;
+        Signal(t.addr, MakeControl(t, 4));
+    }
+    // The game activates a connection to `id`, whom the server reports at `at`.
+    void Activate(const std::string& id, const Endpoint& at) {
+        std::lock_guard lk(m);
+        Transport& t = transports[id];
+        t.id = id;
+        t.addr = at;
+        t.local = true;
+        t.connId = nextConn++;
+        Signal(t.addr, MakeControl(t, 1));
+        Initiate(t);
+    }
+    void Close(const std::string& id) {
+        std::lock_guard lk(m);
+        auto it = transports.find(id);
+        if (it == transports.end()) return;
+        LbControl c = MakeControl(it->second, 3);
+        c.reason = 0;
+        Signal(it->second.addr, c);
+        transports.erase(it);
+    }
+    bool Established(const std::string& id) {
+        std::lock_guard lk(m);
+        auto it = transports.find(id);
+        return it != transports.end() && it->second.state == St::Established;
+    }
+    bool SendData(const std::string& id, const std::string& data) {
+        std::lock_guard lk(m);
+        auto it = transports.find(id);
+        if (it == transports.end() || it->second.state != St::Established) return false;
+        SendTo(it->second.addr, Frame(3658, 3658, data.data(), data.size()));
+        return true;
+    }
+    size_t Count() {
+        std::lock_guard lk(m);
+        return got.size();
+    }
+    void HandleControl(const LbControl& c, const Endpoint& from) {
+        const std::string fromId = Id(c.online_id_from);
+        if (Id(c.online_id_to) != self) return;
+        controls.push_back(c);
+        auto it = transports.find(fromId);
+        if (c.kind == 1) {  // ActivationRequest: the join check (friends, or one we asked for)
+            const bool listed = std::find(friends.begin(), friends.end(), fromId) != friends.end();
+            const bool ours = it != transports.end() && it->second.local;
+            if (!listed && !ours) {
+                ++refused;
+                return;
+            }
+            Transport& t = transports[fromId];
+            if (!t.connId) t.connId = nextConn++;
+            t.id = fromId;
+            t.peerActivated = true;
+            t.addr = from;
+            if (t.state == St::Inactive) t.state = St::WaitOffer;
+            Signal(t.addr, MakeControl(t, 2));
+        } else if (it == transports.end()) {
+            return;
+        } else if (c.kind == 2) {  // ActivationAck: its mapped address, our port
+            it->second.peerActivated = true;
+            if (c.mapped_addr) it->second.addr.ip = c.mapped_addr;
+        } else if (c.kind == 3) {
+            ++closes;
+            transports.erase(it);
+        }
+    }
+    void HandleHandshake(const LbHandshake& h, const Endpoint& from) {
+        auto it = transports.find(Id(h.online_id_from));
+        if (it == transports.end()) return;
+        Transport& t = it->second;
+        t.lastPeerRx = NowUs();
+        if (h.kind == 1) {
+            t.addr = from;
+            t.peerActivated = true;
+            if (t.state != St::Established) t.state = St::SendingAccept;
+            SendHandshake(t, MakeHandshake(t, 2));
+        } else if (h.kind == 2) {
+            t.peerActivated = true;
+            t.addr = from;
+            if (t.state == St::SendingOffer || t.state == St::WaitAccept || t.state == St::SendingAccept ||
+                t.state == St::WaitOffer) {
+                t.state = St::ConnCheck;
+                LbHandshake r = MakeHandshake(t, 3);
+                r.nonce = uint64_t(NowUs());
+                SendHandshake(t, r);
+            }
+        } else if (h.kind == 3) {
+            LbHandshake r = MakeHandshake(t, 4);
+            r.nonce = h.nonce;
+            SendHandshake(t, r);
+            if (t.state == St::SendingAccept || t.state == St::WaitOffer) t.state = St::ConnCheck;
+        } else if (h.kind == 4) {
+            Establish(t);
+        }
+    }
+    void HandlePacket(const uint8_t* d, int n, Endpoint from) {
+        static const uint8_t stun[6] = {0xFF, 0x83, 0xFF, 0xFF, 0xFF, 0xFF};
+        if (from == server) {
+            if (n == 12 && std::memcmp(d, stun, 6) == 0) {
+                std::memcpy(&ext.ip, d + 6, 4);
+                ext.port = uint16_t(d[10] << 8 | d[11]);
+                return;
+            }
+            if (n > 11 && std::memcmp(d, "SMRL", 4) == 0 && d[4] == 3) {
+                std::memcpy(&from.ip, d + 5, 4);
+                from.port = uint16_t(d[9] << 8 | d[10]);
+                relayedIps.insert(from.ip);  // answer the way it came
+                ++relayedIn;
+                d += 11;
+                n -= 11;
+            } else {
+                return;
+            }
+        }
+        if (n < 6 || d[0] != 0xFF || d[1] != 0x83) return;  // their codec: anything else is dropped
+        const uint16_t sv = uint16_t(d[2] << 8 | d[3]), dv = uint16_t(d[4] << 8 | d[5]);
+        const uint8_t* b = d + 6;
+        const size_t len = size_t(n) - 6;
+        if (sv == 0xFFFF && dv == 0xFFFF) {
+            if (len < 5 || std::memcmp(b, "SHAD", 4) != 0) return;
+            if (len == sizeof(LbControl) && b[4] == 0x10) {
+                LbControl c;
+                std::memcpy(&c, b, sizeof(c));
+                HandleControl(c, from);
+            } else if (len == sizeof(LbEcho) && b[4] == 0x05) {
+                LbEcho e;
+                std::memcpy(&e, b, sizeof(e));
+                LbEcho pong;
+                pong.type = 0x06;
+                pong.conn_id = e.conn_id;
+                pong.ts = e.ts;
+                Signal(from, pong);
+            } else if (len == sizeof(LbEcho) && b[4] == 0x06) {
+                for (auto& [id, t] : transports)
+                    if (t.connId == reinterpret_cast<const LbEcho*>(b)->conn_id) ++t.pongs;
+            } else if (len == sizeof(LbHandshake) && b[4] == 0x07) {
+                LbHandshake h;
+                std::memcpy(&h, b, sizeof(h));
+                HandleHandshake(h, from);
+            }
+            return;
+        }
+        got.push_back({sv, dv, std::string(reinterpret_cast<const char*>(b), len), std::vector<uint8_t>(d, d + n), from});
+    }
+    // StepPendingConnections and the echo pings, with PlayerConfig's timings (100 ms, 300 ms, 2 s).
+    void Step() {
+        const int64_t now = NowUs();
+        if (now - lastStun > 200'000) {
+            lastStun = now;
+            std::vector<uint8_t> b{0xFF, 0x83, 0xFF, 0xFF, 0xFF, 0xFF, 0x01};
+            uint8_t id[16]{};
+            SetId(id, self);
+            b.insert(b.end(), id, id + 16);
+            const uint32_t lan = MakeEndpoint("127.0.0.1", 0).ip;
+            const auto* ip = reinterpret_cast<const uint8_t*>(&lan);
+            b.insert(b.end(), ip, ip + 4);
+            Raw(server, b);
+        }
+        for (auto it = transports.begin(); it != transports.end();) {
+            Transport& t = it->second;
+            if (t.state == St::Established) {
+                if (now - t.lastPing > 100'000) {
+                    t.lastPing = now;
+                    LbEcho e;
+                    e.type = 0x05;
+                    e.conn_id = t.connId;
+                    e.ts = uint64_t(now);
+                    Signal(t.addr, e);
+                }
+                ++it;
+                continue;
+            }
+            if (t.state == St::Inactive) {
+                ++it;
+                continue;
+            }
+            if (t.handshakeStart && now - t.handshakeStart > 2'000'000) {
+                it = transports.erase(it);  // timeout: DEAD to its game
+                continue;
+            }
+            if (!t.relayedSet && t.handshakeStart && t.lastPeerRx < t.handshakeStart && now - t.handshakeStart > 300'000) {
+                t.relayedSet = true;
+                relayedIps.insert(t.addr.ip);
+                if (t.local) Signal(t.addr, MakeControl(t, 1));  // the peer may have missed it
+            }
+            if (!t.lastSend || now - t.lastSend >= 100'000) Initiate(t);
+            ++it;
+        }
+    }
+    void Run() {
+        uint8_t buf[2048];
+        while (!stop) {
+            sockaddr_in from{};
+            int fl = sizeof(from);
+            const int n = ::recvfrom(sock, reinterpret_cast<char*>(buf), sizeof(buf), 0, reinterpret_cast<sockaddr*>(&from), &fl);
+            std::lock_guard lk(m);
+            if (n > 0) HandlePacket(buf, n, Endpoint{from.sin_addr.s_addr, ntohs(from.sin_port)});
+            Step();
+        }
+    }
+};
 
 }  // namespace
 
@@ -788,6 +1166,163 @@ int main() {
         a.Stop();
         b.Stop();
         mock.Stop();
+    }
+
+    // --- 9. the LBPPC co-op mode (Config::lbppc, net/p2p_lbppc.h): our link with LBPPC players -----
+    {
+        UdpMock mock;
+        CHECK(mock.Start());
+        auto modeCfg = [&](const std::string& name, std::vector<std::string> allowed) {
+            Config c = PlayerConfig(name, mock, std::move(allowed));
+            c.lbppc = true;
+            c.exactMath = true;
+            return c;
+        };
+        // 9a. we join an LBPPC host.
+        Link h;
+        Received atH;
+        Sink(h, atH);
+        CHECK(h.Start(modeCfg("Hana_8", {"Lbp_9"})));
+        LbppcMock lb;
+        CHECK(lb.Start("Lbp_9", mock.self, {"Hana_8"}));
+        CHECK(WaitFor([&] { return h.External().Valid() && mock.Ext("Lbp_9").Valid(); }));
+        h.Activate("Lbp_9");
+        std::vector<Event> evH;
+        CHECK(WaitFor([&] { return HasEvent(evH, h, Event::Established, "Lbp_9"); }));
+        CHECK(WaitFor([&] { return lb.Established("Hana_8"); }));
+        PeerInfo ih = h.Info("Lbp_9");
+        CHECK(ih.state == State::Active && ih.lbppc && ih.locallyActivated && !ih.relayed);
+        {
+            std::lock_guard lk(lb.m);
+            bool marked = false;  // ours, so a host of ours waits for our HELLO; LBPPC never reads it
+            for (const auto& c : lb.controls) marked |= c.kind == 1 && c.reason == 0x334C;
+            CHECK(marked);
+        }
+        // Game datagrams both ways, in the PS4's own frame.
+        CHECK(h.SendData(ih.gameAddr, 3658, 3658, "to-lbppc", 8));
+        CHECK(WaitFor([&] { return lb.Count() >= 1; }));
+        {
+            std::lock_guard lk(lb.m);
+            CHECK(!lb.got.empty() && lb.got[0].sv == 3658 && lb.got[0].dv == 3658 && lb.got[0].data == "to-lbppc");
+            const uint8_t head[6] = {0xFF, 0x83, 0x0E, 0x4A, 0x0E, 0x4A};
+            CHECK(!lb.got.empty() && lb.got[0].raw.size() == 14 && std::memcmp(lb.got[0].raw.data(), head, 6) == 0);
+        }
+        CHECK(lb.SendData("Hana_8", "from-lbppc"));
+        CHECK(WaitFor([&] { return atH.Count() >= 1; }));
+        {
+            std::lock_guard lk(atH.m);
+            CHECK(!atH.data.empty() && std::string(atH.data[0].begin(), atH.data[0].end()) == "from-lbppc");
+            CHECK(atH.srcVport == 3658 && atH.dstVport == 3658 && atH.from == ih.gameAddr);
+        }
+        // Round trips: our echo pings answered, and theirs.
+        CHECK(WaitFor([&] { return h.Info("Lbp_9").rttUs > 0; }));
+        CHECK(WaitFor([&] {
+            std::lock_guard lk(lb.m);
+            return lb.transports.contains("Hana_8") && lb.transports["Hana_8"].pongs > 0;
+        }));
+        // 9b. it leaves (Close): DEAD for our game.
+        lb.Close("Hana_8");
+        CHECK(WaitFor([&] { return HasEvent(evH, h, Event::Dead, "Lbp_9"); }));
+        // 9c. it joins us (its game activates, ours hears PEER_ACTIVATED); our game activates too.
+        lb.Activate("Hana_8", mock.Ext("Hana_8"));
+        CHECK(WaitFor([&] { return HasEvent(evH, h, Event::PeerActivated, "Lbp_9"); }));
+        CHECK(WaitFor([&] { return lb.Established("Hana_8"); }));
+        ih = h.Info("Lbp_9");
+        CHECK(ih.state == State::Active && ih.lbppc && ih.peerActivated && !ih.locallyActivated);
+        CHECK(lb.SendData("Hana_8", "again"));
+        CHECK(WaitFor([&] { return atH.Count() >= 2; }));
+        CHECK(h.SendData(ih.gameAddr, 3658, 3658, "back", 4));
+        CHECK(WaitFor([&] { return lb.Count() >= 2; }));
+        h.Activate("Lbp_9");
+        CHECK(WaitFor([&] { return HasEvent(evH, h, Event::Mutual, "Lbp_9"); }));
+        // We leave: it gets Close.
+        h.Terminate("Lbp_9");
+        CHECK(WaitFor([&] {
+            std::lock_guard lk(lb.m);
+            return lb.closes >= 1;
+        }));
+        // 9d. an LBPPC player who isn't a friend is refused and never reaches the game.
+        {
+            LbppcMock stranger;
+            CHECK(stranger.Start("Lbp_X", mock.self, {"Hana_8"}));
+            CHECK(WaitFor([&] { return mock.Ext("Lbp_X").Valid(); }));
+            const uint64_t refusedBefore = h.GetStats().refused;
+            stranger.Activate("Hana_8", mock.Ext("Hana_8"));
+            CHECK(WaitFor([&] { return h.GetStats().refused > refusedBefore; }));
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            CHECK(!stranger.Established("Hana_8"));
+            CHECK(h.Info("Lbp_X").state == State::None);
+            bool heard = false;
+            for (const auto& e : h.TakeEvents()) heard |= e.peer == "Lbp_X";
+            CHECK(!heard);
+            stranger.Stop();
+        }
+        // 9e. two of ours in the mode keep our own protocol (gap-free delivery and all).
+        {
+            Link i;
+            CHECK(i.Start(modeCfg("Ivo_10", {"Hana_8"})));
+            CHECK(WaitFor([&] { return i.External().Valid(); }));
+            h.Activate("Ivo_10");
+            CHECK(WaitFor([&] { return HasEvent(evH, h, Event::Established, "Ivo_10"); }));
+            CHECK(h.Info("Ivo_10").state == State::Active && !h.Info("Ivo_10").lbppc);
+            CHECK(i.Info("Hana_8").state == State::Active && !i.Info("Hana_8").lbppc);
+            // 9f. one of ours without the mode refuses one with it (their worlds would drift apart).
+            Config jc = PlayerConfig("Jo_11", mock, {"Hana_8"});
+            jc.exactMath = true;
+            Link j;
+            CHECK(j.Start(jc));
+            CHECK(WaitFor([&] { return j.External().Valid(); }));
+            h.Activate("Jo_11");
+            CHECK(WaitFor([&] { return HasEvent(evH, h, Event::Dead, "Jo_11"); }, 5000));
+            CHECK(j.Info("Hana_8").state == State::None && j.GetStats().refused > 0);
+            // 9g. without the mode, LBPPC's packets are nobody's: an LBPPC player never connects.
+            lb.Activate("Jo_11", mock.Ext("Jo_11"));
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
+            CHECK(!lb.Established("Jo_11"));
+            CHECK(j.Info("Lbp_9").state == State::None);
+            i.Stop();
+            j.Stop();
+        }
+        lb.Stop();
+        h.Stop();
+        mock.Stop();
+        std::printf("  the LBPPC co-op mode: we join an LBPPC host and it joins us, a stranger refused, two of ours keep "
+                    "our protocol, a mode mismatch refused\n");
+    }
+    // 9h. the same through the relay: the server's addresses for both reach nobody (two NATs).
+    {
+        UdpMock mock;
+        mock.fakeAddresses = true;
+        CHECK(mock.Start());
+        Config hc = PlayerConfig("Hana_8", mock, {"Lbp_9"});
+        hc.lbppc = true;
+        hc.exactMath = true;
+        Link h;
+        Received atH;
+        Sink(h, atH);
+        CHECK(h.Start(hc));
+        LbppcMock lb;
+        CHECK(lb.Start("Lbp_9", mock.self, {"Hana_8"}));
+        CHECK(WaitFor([&] { return h.External().Valid() && mock.Ext("Lbp_9").Valid(); }));
+        h.Activate("Lbp_9");
+        std::vector<Event> evH;
+        CHECK(WaitFor([&] { return HasEvent(evH, h, Event::Established, "Lbp_9"); }));
+        CHECK(WaitFor([&] { return lb.Established("Hana_8"); }));
+        const PeerInfo ih = h.Info("Lbp_9");
+        CHECK(ih.state == State::Active && ih.lbppc && ih.relayed);
+        CHECK(h.SendData(ih.gameAddr, 3658, 3658, "relayed", 7));
+        CHECK(WaitFor([&] { return lb.Count() >= 1; }));
+        CHECK(lb.SendData("Hana_8", "relayed-back"));
+        CHECK(WaitFor([&] { return atH.Count() >= 1; }));
+        CHECK(h.GetStats().sentRelayed > 0);
+        {
+            std::lock_guard lk(mock.m);
+            CHECK(mock.relayed > 0);
+        }
+        lb.Stop();
+        h.Stop();
+        mock.Stop();
+        std::printf("  the LBPPC co-op mode through the relay: connected and datagrams both ways\n");
     }
 
     // --- 8. MSG_PEEK leaves the datagram queued -----------------------------------------------
