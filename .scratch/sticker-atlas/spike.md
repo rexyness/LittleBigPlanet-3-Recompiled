@@ -37,6 +37,25 @@ Ten checked same-length edits in `runtime/src/core/patches.cpp`, applied only wi
   - The limit is likely in the decal shaders (`decalvshader.vpo`, `decalpshader.fpo`) or in the material shader's atlas sampling. Not verified.
 - **Only one sticker was measured.** It has a blocky outline even at G = 1.0 in both builds, so it is partly limited by its own image.
 
+## Photo-sticker run (2026-11-20, later)
+
+- **Setup:** the test baseline save, then `capfix_lane.sh`'s route to a Popit photo.
+- **Placement:** `cross` (USE!), then `lstick 0 1 500` (Sackboy walks toward the camera and the held photo loses the red tint), then `cross`.
+  - That placed it: the owner went from none to one (2x2 tiles in B, 3x2 in A; 4 and 2 tiles in use).
+  - This is the first scripted sticker placement in this project.
+- **Harness note:** multi-call sessions must use `m2_lib.sh`'s `human_keep`, `use_baseline` and `human_restore`. `saves.sh`'s `saves_keep` sets an exit trap that kills the game.
+- **The dump:** `LBP3_DUMP_NO_TRACE=1` plus F9 dumps the atlas as `t07_8192x8192_*.bmp`, `R8G8B8A8Unorm`. That settles the cost: **+192 MB** (256 MB against 64 MB).
+- **Tile detail:** score = rms(tile − up2(down2(tile))) / std on luma. 0 means the tile is an upscale with no detail at full resolution.
+
+| Tile | Score |
+|---|---|
+| 4096 atlas, 256-px tile | 0.082 / 0.095 |
+| The same tile upscaled 2x bilinearly (no extra detail) | 0.033 / 0.040 |
+| 8192 atlas, 512-px tile holding photo content | 0.046 / 0.075 |
+
+- **So the decal pass draws real detail into 512-px tiles.** There is no hidden 256-px assumption that reduces them to an upscale.
+- **The pair isn't matched.** The owners differ (2x2 at [30,0] against 3x2 at [29,0]), so the sticker landed differently in each run. The photo's Sackboy is about 70 texels tall in A's tile and about 60 in B's. How much sharper the *same* sticker gets is still unmeasured.
+
 ## Open
 
 - **Look at the atlas directly.** In one run per build, check whether a 512-px tile holds real extra detail. F9 dumps every target, but it also traces every draw of that frame, so add a way to skip the per-draw dumps first.
