@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <sstream>
 
+#include "gpu/dlss_modes.h"
+
 namespace launcher {
 namespace {
 
@@ -92,6 +94,10 @@ std::string ToIni(const Settings& s) {
       << "framegen=" << b(s.framegen) << "\n"
       << "; render size: 1280x720, 1920x1080, 2560x1440, 3840x2160, 2560x1080, 3440x1440, 3840x1600, 3840x1080, 4480x1260\n"
       << "res=" << s.res << "\n"
+      << "; upscaler: off or dlss (a DLSS build only); with dlss, res is the size of the picture and the game draws smaller\n"
+      << "upscaler=" << s.upscaler << "\n"
+      << "; upscaler_mode: dlaa, quality, balanced, performance or ultraperformance\n"
+      << "upscaler_mode=" << s.upscaler_mode << "\n"
       << "fg_text=" << b(s.fg_text) << "\n"
       << "status_flips=" << s.status_flips << "\n"
       << "; 0 = all CPU cores but one\n"
@@ -183,6 +189,10 @@ Settings FromIni(const std::string& text) {
             else if (key == "framegen") ParseBool(v, s.framegen);
             else if (key == "res") {
                 if (const std::string r = CanonicalRes(v); !r.empty()) s.res = r;
+            } else if (key == "upscaler") {
+                if (v == "off" || v == "dlss") s.upscaler = v;
+            } else if (key == "upscaler_mode") {
+                if (const int m = dlss_modes::Find(v.c_str()); m >= 0) s.upscaler_mode = dlss_modes::kModes[m].key;
             }
             // my_unlocks (older files) is ignored: the in-game menu arms the LBP1/LBP2 import now, so
             // a 1 left in an old file no longer imports on every launch.
@@ -296,6 +306,13 @@ LaunchPlan MapSettings(const Settings& s) {
     if (const std::string r = CanonicalRes(s.res); !r.empty() && r != "1920x1080") {
         set("LBP3_RES", r == "2560x1440" ? "1440" : r);  // "1440": the original switch, the same size
         set("LBP3_RES_SHADERS", "1");
+    }
+    // The upscaler (a DLSS build): LBP3_RES stays the output size, and lbp3.exe works out the render
+    // size from the mode (gpu/dlss.h), which can be smaller than 1080p: the shader rescale is needed.
+    if (s.upscaler == "dlss") {
+        set("LBP3_UPSCALER", "dlss");
+        set("LBP3_UPSCALER_MODE", s.upscaler_mode);
+        if (CanonicalRes(s.res) == "1920x1080" || CanonicalRes(s.res).empty()) set("LBP3_RES_SHADERS", "1");
     }
     if (!s.fg_text) set("LBP3_FRAMEGEN_TEXT", "off");
     set("LBP3_STATUS_FLIPS", std::to_string(s.status_flips));

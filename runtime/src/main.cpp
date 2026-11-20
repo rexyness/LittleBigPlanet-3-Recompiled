@@ -23,6 +23,7 @@
 #include "core/tls.h"
 #include "core/vfs.h"
 #include "gpu/renderer.h"
+#include "gpu/dlss.h"
 #include "ui/boot_overlay.h"
 #include "video/presenter.h"
 
@@ -94,7 +95,11 @@ int main(int argc, char** argv) {
     KeepForeignVulkanLayersOut();
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--gpu-test") return gpu::Init() ? 0 : 1;  // device bring-up only
+        if (std::string(argv[i]) == "--dlss-probe") return gpu::dlss::Probe();  // the launcher asks
     }
+    // A DLSS build with LBP3_UPSCALER=dlss: check DLSS can run, then set the render size
+    // (LBP3_RES) from the output size and the mode, before anything reads it (gpu/dlss.h).
+    gpu::dlss::Prepare();
     std::vector<fs::path> roots;  // patch files win over base files
     int first = 1;
     if (argc >= 3 && argv[1][0] != '-' && fs::is_directory(argv[1]) && fs::is_directory(argv[2])) {

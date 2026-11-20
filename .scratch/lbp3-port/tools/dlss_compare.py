@@ -24,9 +24,13 @@ for name in sys.argv[3:]:
     m = json.load(open(os.path.join(d, 'manifest.json')))
     k = len(m['frames']) - 1
     hud, fin = load(d, k, 'hudless', m), load(d, k, 'final', m)
-    if hud is None or fin is None or hud.shape != fin.shape:
-        print(name, 'missing or mismatched images')
+    if hud is None or fin is None:
+        print(name, 'missing images')
         continue
+    if hud.shape != fin.shape:  # an upscaling mode: the game's picture stretched (bilinear) to DLSS's size
+        print(f'{name}: the game renders {hud.shape[1]}x{hud.shape[0]}, DLSS makes {fin.shape[1]}x{fin.shape[0]}; '
+              'the game picture is stretched for the comparison')
+        hud = np.asarray(Image.fromarray(hud).resize((fin.shape[1], fin.shape[0]), Image.BILINEAR))
     Image.fromarray(hud).save(os.path.join(out, f'{name}_game.png'))
     Image.fromarray(fin).save(os.path.join(out, f'{name}_dlss.png'))
     diff = np.abs(hud.astype(int) - fin.astype(int)).max(axis=2)

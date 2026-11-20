@@ -49,6 +49,10 @@ struct Settings {
     bool skip_intro = true;
     bool framegen = true;
     std::string res = "2560x1440";  // WxH, one of Resolutions() (older files: res=1440 or 1080)
+    // The upscaler (issue #24; a DLSS build only, docs/adr/0002): "off" or "dlss". With "dlss", res is
+    // the output size and the game draws at upscaler_mode's render size (gpu/dlss_modes.h keys).
+    std::string upscaler = "off";
+    std::string upscaler_mode = "quality";
     // play_best.bat's
     bool fg_text = true;
     int status_flips = 30;

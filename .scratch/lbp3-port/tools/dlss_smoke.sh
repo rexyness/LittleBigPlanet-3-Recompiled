@@ -2,7 +2,7 @@
 # dlss_smoke.sh: boot the dlss build with the upscaler on (muted, 2560x1440, test saves, game lock),
 # wait 40 s at the Pod, print the [dlss] and [gpu] lines, stop.
 cd /d/Recomps/lbp3-recompiled || exit 1
-EXE=D:/Recomps/lbp3-wt/dlss/build/lbp3.exe
+EXE=${DLSS_EXE:-D:/Recomps/lbp3-wt/dlss/build/lbp3.exe}
 . .scratch/lbp3-port/tools/game_lock.sh
 game_lock_acquire dlss 60 || exit 1
 . .scratch/lbp3-port/tools/saves.sh; saves_keep

@@ -46,6 +46,7 @@
 #include "../launcher/launcher_refresh.h"
 #include "../launcher/launcher_release.h"
 #include "input/action_table.h"
+#include "gpu/dlss_modes.h"
 #include "miniz.h"
 #include "shadnet.pb.h"
 
@@ -112,6 +113,43 @@ static void TestIni() {
     CHECK(FromIni("[launcher]\nsettings_version=2\n[game]\nasync_shaders=0\n").async_shaders == AsyncShaders::Online);
     CHECK(FromIni("[game]\nasync_shaders=0\n").async_shaders == AsyncShaders::Online);
     CHECK(FromIni("[launcher]\nsettings_version=2\n[game]\nasync_shaders=1\n").async_shaders == AsyncShaders::Always);
+    // The upscaler (issue #24): off by default, kept in the file, mapped to LBP3_UPSCALER(_MODE) with
+    // LBP3_RES staying the output size; unknown values ignored.
+    CHECK(Settings{}.upscaler == "off" && Settings{}.upscaler_mode == "quality");
+    CHECK(!EnvMap(Settings{}).count("LBP3_UPSCALER") && !EnvMap(Settings{}).count("LBP3_UPSCALER_MODE"));
+    {
+        Settings u;
+        u.upscaler = "dlss";
+        u.upscaler_mode = "performance";
+        const Settings v = FromIni(ToIni(u));
+        CHECK(v.upscaler == "dlss" && v.upscaler_mode == "performance");
+        const auto env = EnvMap(u);
+        CHECK(env.count("LBP3_UPSCALER") && env.at("LBP3_UPSCALER") == "dlss");
+        CHECK(env.count("LBP3_UPSCALER_MODE") && env.at("LBP3_UPSCALER_MODE") == "performance");
+        CHECK(env.count("LBP3_RES") && env.at("LBP3_RES") == "1440");  // the output size
+        u.res = "1920x1080";  // a smaller render size than 1080p needs the shader rescale too
+        CHECK(EnvMap(u).count("LBP3_RES_SHADERS") && !EnvMap(u).count("LBP3_RES"));
+        CHECK(FromIni("[game]\nupscaler=fsr\nupscaler_mode=ultra\n").upscaler == "off");
+        CHECK(FromIni("[game]\nupscaler=fsr\nupscaler_mode=ultra\n").upscaler_mode == "quality");
+        CHECK(FromIni("[game]\nupscaler_mode=Balanced\n").upscaler_mode == "balanced");
+    }
+    // Render sizes (gpu/dlss_modes.h): heights in 8s, widths in 16s, at least 1280x720, the output's
+    // aspect (at most 0.9% wider)
+    {
+        auto rs = [](uint32_t w, uint32_t h, int m) {
+            uint32_t rw = 0, rh = 0;
+            return dlss_modes::RenderSize(w, h, dlss_modes::kModes[m].ratio, &rw, &rh)
+                       ? std::to_string(rw) + "x" + std::to_string(rh)
+                       : std::string("-");
+        };
+        CHECK(rs(2560, 1440, 0) == "2560x1440" && rs(2560, 1440, 1) == "1712x960");
+        CHECK(rs(2560, 1440, 2) == "1472x824" && rs(2560, 1440, 3) == "1280x720" && rs(2560, 1440, 4) == "-");
+        CHECK(rs(1920, 1080, 1) == "1280x720" && rs(1920, 1080, 2) == "-" && rs(1920, 1080, 3) == "-");
+        CHECK(rs(3840, 2160, 1) == "2560x1440" && rs(3840, 2160, 2) == "2224x1248");
+        CHECK(rs(3840, 2160, 3) == "1920x1080" && rs(3840, 2160, 4) == "1280x720");
+        CHECK(rs(3440, 1440, 1) == "2256x944" && rs(1280, 720, 1) == "-");
+        CHECK(dlss_modes::Find("UltraPerformance") == 4 && dlss_modes::Find("fast") == -1);
+    }
     CHECK(FromIni("[launcher]\nsettings_version=3\n[game]\nasync_shaders=0\n").async_shaders == AsyncShaders::Off);
     CHECK(FromIni("[launcher]\nsettings_version=3\n[game]\nasync_shaders=online\n").async_shaders == AsyncShaders::Online);
     CHECK(ToIni(Settings{}).find("async_shaders=online\n") != std::string::npos);

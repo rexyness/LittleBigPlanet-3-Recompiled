@@ -9,6 +9,7 @@
 // finished frame, and hands that picture to the readback instead of the display buffer.
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 
 namespace gpu::dlss {
@@ -20,6 +21,15 @@ struct Output {
 };
 
 #if LBP3_DLSS
+// At start-up, before anything reads LBP3_RES: with LBP3_UPSCALER=dlss, checks that DLSS can run
+// here (NVIDIA's DLL next to lbp3.exe, NGX's feature query on the GPU the game will use). If it
+// can, LBP3_RES (the output size) becomes the render size of LBP3_UPSCALER_MODE (dlaa, quality,
+// balanced, performance, ultraperformance; default quality). If it can't, the upscaler stays off
+// and the game renders at the output size, as without it.
+void Prepare();
+// lbp3.exe --dlss-probe: one line on stdout; exit 0 = DLSS can run here, 1 = it can't, 2 = not a
+// DLSS build.
+int Probe();
 // Before the Vulkan instance is created: with LBP3_UPSCALER=dlss, has shadPS4 enable the
 // instance and device extensions NGX asks for.
 void RegisterVulkanExtensions();
@@ -33,7 +43,15 @@ Output Process(void* cmd, void* displayImage);
 // The remote command "dlss <key> <value>" (tests): jitter ++|+-|-+|--|on|off, mv
 // normal|zero|flipx|flipy|flipxy, smaa skip|keep. Applied at the next flip, with a history reset.
 void Remote(const std::string& key, const std::string& value);
+// The output size Prepare kept when DLSS upscales from a smaller render size; 0x0 otherwise.
+void OutputSize(uint32_t* w, uint32_t* h);
 #else
+inline void OutputSize(uint32_t* w, uint32_t* h) { *w = *h = 0; }
+inline void Prepare() {}
+inline int Probe() {
+    std::printf("dlss: not a DLSS build\n");
+    return 2;
+}
 inline void RegisterVulkanExtensions() {}
 inline bool Start() { return false; }
 inline bool Active() { return false; }

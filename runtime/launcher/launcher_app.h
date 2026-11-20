@@ -220,6 +220,15 @@ struct App {
     Job stats_job;
     PlayStats stats;
     std::mutex stats_m;
+    // The chosen lbp3.exe as a DLSS build (issue #24): no DLSS_BUILD_NOT_FOR_RELEASE marker beside it
+    // means a public build; otherwise its own "--dlss-probe" answer, asked in the background whenever
+    // the exe changes. state: -1 asking, 0 DLSS can run, 1 it can't (line says why), 2 not a DLSS build.
+    struct DlssProbe {
+        std::mutex m;
+        fs::path exe;
+        int state = -1;
+        std::string line;
+    } dlss;
     std::vector<Change> news;
     std::vector<std::pair<std::string, std::string>> manifest;
     std::vector<std::string> highlights;  // a package's RELEASE-NOTES.md "What's in it" (no git history there)

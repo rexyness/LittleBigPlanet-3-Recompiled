@@ -627,11 +627,19 @@ namespace {
 
 constexpr uint32_t kVelocityClear = 0x007f7f00u;
 // One image, 4 bytes/texel: room for 1920x1088, or the render size when the game renders at
-// another one (LBP3_RES, core/res_patches.cpp); a bigger image is skipped, never overflowed.
-const vk::DeviceSize kSlot = [] {
-    const Lbp3Res::Size s = Lbp3Res::Current();
-    return s == Lbp3Res::kNative ? vk::DeviceSize{1920} * 1088 * 4 : vk::DeviceSize{s.w} * s.h * 4;
-}();
+// another one (LBP3_RES, core/res_patches.cpp), or the DLSS upscaler's output size when that is
+// bigger (the flipped image); a bigger image is skipped, never overflowed. Worked out on first use,
+// not at start-up: a DLSS build sets the render size in main() (gpu/dlss.h).
+vk::DeviceSize SlotBytes() {
+    static const vk::DeviceSize bytes = [] {
+        const Lbp3Res::Size s = Lbp3Res::Current();
+        vk::DeviceSize b = s == Lbp3Res::kNative ? vk::DeviceSize{1920} * 1088 * 4 : vk::DeviceSize{s.w} * s.h * 4;
+        uint32_t ow = 0, oh = 0;
+        dlss::OutputSize(&ow, &oh);
+        return std::max(b, vk::DeviceSize{ow} * oh * 4);
+    }();
+    return bytes;
+}
 enum Slot { kHudless = 0, kFinal = 1, kVelocity = 2, kDepth = 3, kSlots = 4 };
 
 struct Copy {
@@ -741,7 +749,7 @@ void RecordCopy(FrameRec& rec, Slot slot, uint64_t addr, bool depth, bool atFlip
     if (depth != isDepth) return;
     const uint32_t bpp = isDepth ? 4 : FormatBytes(fmt);
     const uint32_t w = image->info.size.width, h = image->info.size.height;
-    if (!bpp || vk::DeviceSize{w} * h * bpp > kSlot) return;
+    if (!bpp || vk::DeviceSize{w} * h * bpp > SlotBytes()) return;
     g_scheduler->EndRendering();
     const auto cmd = g_scheduler->CommandBuffer();
     VideoCore::Image::Barriers barriers;
@@ -751,7 +759,7 @@ void RecordCopy(FrameRec& rec, Slot slot, uint64_t addr, bool depth, bool atFlip
         cmd.pipelineBarrier2(vk::DependencyInfo{.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size()),
                                                 .pImageMemoryBarriers = barriers.data()});
     const auto aspect = isDepth ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlagBits::eColor;
-    const vk::BufferImageCopy region{.bufferOffset = kSlot * slot,
+    const vk::BufferImageCopy region{.bufferOffset = SlotBytes() * slot,
                                      .imageSubresource = {aspect, 0, 0, 1},
                                      .imageExtent = {w, h, 1}};
     cmd.copyImageToBuffer(image->GetImage(), vk::ImageLayout::eTransferSrcOptimal, rec.buffer, region);
@@ -775,7 +783,7 @@ uint64_t BestDepth() {
 }
 
 bool AllocFrame(FrameRec& rec) {
-    const VkBufferCreateInfo info{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = kSlot * kSlots,
+    const VkBufferCreateInfo info{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = SlotBytes() * kSlots,
                                   .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     const VmaAllocationCreateInfo alloc{.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
                                                  VMA_ALLOCATION_CREATE_MAPPED_BIT,
@@ -805,11 +813,11 @@ void WriteAll(std::string dir, std::vector<FrameRec>* frames) {
     LARGE_INTEGER freq;
     QueryPerformanceFrequency(&freq);
     std::string json = "{\n  \"qpc_hz\": " + std::to_string(freq.QuadPart) + ",\n  \"slot_bytes\": " +
-                       std::to_string(kSlot) + ",\n  \"frames\": [\n";
+                       std::to_string(SlotBytes()) + ",\n  \"frames\": [\n";
     static const char* names[kSlots] = {"hudless", "final", "velocity", "depth"};
     for (size_t k = 0; k < frames->size(); ++k) {
         FrameRec& rec = (*frames)[k];
-        vmaInvalidateAllocation(g_instance->GetAllocator(), rec.allocation, 0, kSlot * kSlots);
+        vmaInvalidateAllocation(g_instance->GetAllocator(), rec.allocation, 0, SlotBytes() * kSlots);
         const auto* base = static_cast<const uint8_t*>(rec.mapped);
         json += "    {\"k\": " + std::to_string(k);
         for (int s = 0; s < kSlots; ++s) {
@@ -823,7 +831,7 @@ void WriteAll(std::string dir, std::vector<FrameRec>* frames) {
             char name[64];
             std::snprintf(name, sizeof(name), "\\f%03zu_%s.raw", k, names[s]);
             if (FILE* f = std::fopen((dir + name).c_str(), "wb")) {
-                std::fwrite(base + kSlot * s, 1, size_t{c.w} * c.h * c.bpp, f);
+                std::fwrite(base + SlotBytes() * s, 1, size_t{c.w} * c.h * c.bpp, f);
                 std::fclose(f);
             }
         }
@@ -1021,8 +1029,8 @@ void OnFinal(const std::vector<uint8_t>& pixels, uint32_t w, uint32_t h, uint32_
     FrameRec& rec = g_frames[g_frameIndex];
     Copy& c = rec.copies[kFinal];
     const vk::DeviceSize bytes = vk::DeviceSize{w} * h * 4;
-    if (rec.mapped && bytes <= kSlot && pixels.size() >= bytes) {
-        std::memcpy(static_cast<uint8_t*>(rec.mapped) + kSlot * kFinal, pixels.data(), bytes);
+    if (rec.mapped && bytes <= SlotBytes() && pixels.size() >= bytes) {
+        std::memcpy(static_cast<uint8_t*>(rec.mapped) + SlotBytes() * kFinal, pixels.data(), bytes);
         c.w = w;
         c.h = h;
         c.fmt = fmt;

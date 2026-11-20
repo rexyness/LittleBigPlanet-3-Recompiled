@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "common/lbp3_res.h"
+#include "gpu/dlss_modes.h"
 #include "gpu/dlss_shaders/dlss_compose_comp.h"
 #include "gpu/dlss_shaders/dlss_mvdecode_comp.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -29,6 +30,7 @@
 
 #include <vk_mem_alloc.h>
 
+#include <nvsdk_ngx_helpers.h>
 #include <nvsdk_ngx_helpers_vk.h>
 
 #ifndef NOMINMAX
@@ -67,6 +69,7 @@ bool g_jitterOn = true;                        // LBP3_DLSS_JITTER: on | off
 float g_jitterSignX = 1.0f, g_jitterSignY = 1.0f;  // LBP3_DLSS_JITTER_SIGN: ++ | +- | -+ | -- (what DLSS is told)
 bool g_skipSmaa = true;                        // LBP3_DLSS_SMAA: skip | keep
 bool g_trace = false;                          // LBP3_DLSS_TRACE=1
+float g_mipBias = 0.0f;                        // LBP3_DLSS_MIPBIAS overrides NVIDIA's (stage 3)
 // The game's SMAA writes its result back into the scene buffer with one full-screen draw (PS
 // 6d4d5238, perf/fps60_render_re.md #375-380; "copy back" 6d4d5238b13eadc4 in the blA traces).
 // Leaving out that draw keeps the scene un-antialiased for DLSS; the passes before it only fill
@@ -161,6 +164,153 @@ std::vector<std::string> DeviceExtensions(VkInstance instance, VkPhysicalDevice 
     VkExtensionProperties* props = nullptr;
     const NVSDK_NGX_Result r = NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements(instance, pd, &d, &n, &props);
     return Names("device", r, n, props);
+}
+
+// ---- Modes and the start-up check -------------------------------------------------------------
+
+constexpr NVSDK_NGX_PerfQuality_Value kModeValues[dlss_modes::kCount] = {
+    NVSDK_NGX_PerfQuality_Value_DLAA, NVSDK_NGX_PerfQuality_Value_MaxQuality, NVSDK_NGX_PerfQuality_Value_Balanced,
+    NVSDK_NGX_PerfQuality_Value_MaxPerf, NVSDK_NGX_PerfQuality_Value_UltraPerformance};
+int g_mode = 0;                   // index into dlss_modes::kModes (DLAA unless Prepare chose another)
+bool g_disabled = false;          // Prepare found DLSS can't run here: the upscaler stays off
+uint32_t g_outW = 0, g_outH = 0;  // the output size; 0 = the render size (DLAA)
+
+const char* ModeLabel() { return dlss_modes::kModes[g_mode].label; }
+
+// Whether DLSS can run on the GPU the game will use (shadPS4's choice with no GPU set: a discrete
+// GPU first, then the most device-local memory), from a throwaway Vulkan instance: NVIDIA's DLL
+// next to lbp3.exe, then NGX's feature query. Needs InitCommon().
+bool CanRun(std::string* why, std::string* gpu) {
+    const std::wstring dll = g_exeDir + L"\\nvngx_dlss.dll";
+    if (GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        *why = "NVIDIA's DLSS DLL (nvngx_dlss.dll) isn't next to lbp3.exe";
+        return false;
+    }
+    HMODULE vk = LoadLibraryW(L"vulkan-1.dll");
+    if (!vk) {
+        *why = "no Vulkan driver (vulkan-1.dll)";
+        return false;
+    }
+    const auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(vk, "vkGetInstanceProcAddr"));
+    const auto create = gipa ? reinterpret_cast<PFN_vkCreateInstance>(gipa(nullptr, "vkCreateInstance")) : nullptr;
+    VkInstance instance{};
+    const VkApplicationInfo app{.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "lbp3 dlss check",
+                                .applicationVersion = 1, .pEngineName = kEngineVersion, .engineVersion = 1,
+                                .apiVersion = VK_API_VERSION_1_3};
+    const VkInstanceCreateInfo ci{.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app};
+    if (!create || create(&ci, nullptr, &instance) != VK_SUCCESS) {
+        *why = "a Vulkan instance couldn't be created";
+        return false;
+    }
+    const auto destroy = reinterpret_cast<PFN_vkDestroyInstance>(gipa(instance, "vkDestroyInstance"));
+    const auto enumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(gipa(instance, "vkEnumeratePhysicalDevices"));
+    const auto props = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(gipa(instance, "vkGetPhysicalDeviceProperties"));
+    const auto memory =
+        reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(gipa(instance, "vkGetPhysicalDeviceMemoryProperties"));
+    uint32_t n = 0;
+    enumerate(instance, &n, nullptr);
+    std::vector<VkPhysicalDevice> devices(n);
+    if (n) enumerate(instance, &n, devices.data());
+    VkPhysicalDevice best{};
+    bool bestDiscrete = false;
+    uint64_t bestMem = 0;
+    for (VkPhysicalDevice pd : devices) {
+        VkPhysicalDeviceProperties p{};
+        props(pd, &p);
+        VkPhysicalDeviceMemoryProperties m{};
+        memory(pd, &m);
+        uint64_t local = 0;
+        for (uint32_t i = 0; i < m.memoryHeapCount; ++i)
+            if (m.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) local += m.memoryHeaps[i].size;
+        const bool discrete = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        if (!best || (discrete && !bestDiscrete) || (discrete == bestDiscrete && local > bestMem)) {
+            best = pd;
+            bestDiscrete = discrete;
+            bestMem = local;
+            *gpu = p.deviceName;
+        }
+    }
+    if (!best) {
+        destroy(instance, nullptr);
+        *why = "no GPU";
+        return false;
+    }
+    const NVSDK_NGX_FeatureDiscoveryInfo d = Discovery();
+    NVSDK_NGX_FeatureRequirement req{};
+    const NVSDK_NGX_Result r = NVSDK_NGX_VULKAN_GetFeatureRequirements(instance, best, &d, &req);
+    destroy(instance, nullptr);
+    if (NVSDK_NGX_FAILED(r)) {
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "NVIDIA's DLSS check failed on %s (0x%08x)", gpu->c_str(), unsigned(r));
+        *why = buf;
+        return false;
+    }
+    if (req.FeatureSupported != NVSDK_NGX_FeatureSupportResult_Supported) {
+        const unsigned f = unsigned(req.FeatureSupported);
+        *why = "DLSS isn't supported on " + *gpu + ":";
+        if (f & NVSDK_NGX_FeatureSupportResult_AdapterUnsupported) *why += " not an NVIDIA RTX GPU;";
+        if (f & NVSDK_NGX_FeatureSupportResult_DriverVersionUnsupported) *why += " the driver is too old;";
+        if (f & NVSDK_NGX_FeatureSupportResult_OSVersionBelowMinimumSupported) *why += " Windows is too old;";
+        if (f & (NVSDK_NGX_FeatureSupportResult_CheckNotPresent | NVSDK_NGX_FeatureSupportResult_NotImplemented))
+            *why += " the driver can't check;";
+        why->pop_back();
+        return false;
+    }
+    return true;
+}
+
+// CanRun in a child process (lbp3.exe --dlss-probe): the check loads the Vulkan loader, NVIDIA's
+// driver and NGX, which take thread-local-storage slots the runtime still needs at start-up ("no
+// inline TEB TLS slot available"), so the game's own process loads nothing for it.
+bool CanRunInChild(std::string* why, std::string* gpu) {
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    SECURITY_ATTRIBUTES sa{.nLength = sizeof(sa), .bInheritHandle = TRUE};
+    HANDLE rd = nullptr, wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) {
+        *why = "the DLSS check couldn't start";
+        return false;
+    }
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW si{.cb = sizeof(si), .dwFlags = STARTF_USESTDHANDLES};
+    si.hStdOutput = wr;
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    std::wstring cmd = L"\"" + std::wstring(exe) + L"\" --dlss-probe";
+    PROCESS_INFORMATION pi{};
+    const BOOL started = CreateProcessW(exe, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    CloseHandle(wr);
+    if (!started) {
+        CloseHandle(rd);
+        *why = "the DLSS check couldn't start";
+        return false;
+    }
+    std::string out;
+    char buf[512];
+    DWORD got = 0;
+    while (ReadFile(rd, buf, sizeof(buf), &got, nullptr) && got) out.append(buf, got);
+    CloseHandle(rd);
+    DWORD code = 1;
+    if (WaitForSingleObject(pi.hProcess, 30000) != WAIT_OBJECT_0) {
+        TerminateProcess(pi.hProcess, 1);
+        out = "dlss: not available: the DLSS check took too long";
+    }
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    // The last "dlss: " line (the child may print other lines first).
+    std::string line;
+    for (size_t p = out.find("dlss: "); p != std::string::npos; p = out.find("dlss: ", p + 1)) {
+        const size_t e = out.find_first_of("\r\n", p);
+        line = out.substr(p + 6, e == std::string::npos ? std::string::npos : e - p - 6);
+    }
+    constexpr std::string_view kOn = "available on ", kOff = "not available: ";
+    if (code == 0 && line.rfind(kOn, 0) == 0) {
+        *gpu = line.substr(kOn.size());
+        return true;
+    }
+    *why = line.rfind(kOff, 0) == 0 ? line.substr(kOff.size()) : "the DLSS check failed (exit " + std::to_string(code) + ")";
+    return false;
 }
 
 // ---- Our own images ---------------------------------------------------------------------------
@@ -532,21 +682,37 @@ void OnFill(u64 dst, u64 bytes, u32 value, u32 mask, bool full) {
 // The 3D scene's draws get the frame's sub-pixel offset: depth-tested, more than 12 indices (not a
 // full-screen pass), a viewport the size of the render, and not into a display buffer. Only while
 // the last flip was upscaled, so a frame DLSS doesn't take is never jittered twice in a row.
-bool Jitter(float w, float h, float* dx, float* dy) {
-    if (!g_jitterOn || !g_prevUpscaled) return false;
+// A draw of the 3D scene: depth-tested, more than 12 indices (not a full-screen pass), a viewport the
+// size of the render (w x h), not into a display buffer. rt0 = its colour target.
+bool SceneDraw(float w, float h, uint64_t* rt0) {
     const auto& regs = internal::GetLiverpool()->regs;
     if (!regs.depth_control.depth_enable || regs.num_indices <= 12) return false;
     const Lbp3Res::Size rs = Lbp3Res::Current();
     if (std::abs(std::abs(w) - float(rs.w)) > 0.5f || std::abs(std::abs(h) - float(rs.h)) > 0.5f) return false;
     const auto& cb0 = regs.color_buffers[0];
-    const uint64_t rt0 = cb0 ? cb0.Address() : 0;
-    if (IsDisplay(rt0)) return false;
+    *rt0 = cb0 ? cb0.Address() : 0;
+    return !IsDisplay(*rt0);
+}
+
+bool Jitter(float w, float h, float* dx, float* dy) {
+    if (!g_jitterOn || !g_prevUpscaled) return false;
+    uint64_t rt0 = 0;
+    if (!SceneDraw(w, h, &rt0)) return false;
     *dx = g_jx;
     *dy = g_jy;
     g_frameJittered = true;
     ++g_frame.jittered;
     if (g_trace) ++g_stats.jitterTargets[rt0];
     return true;
+}
+
+// The 3D scene's samplers get NVIDIA's mip bias (guide 3.5: log2(render / output) - 1) while DLSS
+// upscales, so textures keep the detail of the output size rather than the render size.
+float SamplerBias() {
+    if (g_mipBias == 0.0f || !g_prevUpscaled) return 0.0f;
+    const auto& vp = internal::GetLiverpool()->regs.viewports[0];
+    uint64_t rt0 = 0;
+    return SceneDraw(2.0f * vp.xscale, 2.0f * vp.yscale, &rt0) ? g_mipBias : 0.0f;
 }
 
 bool Skip(u64 vs, u64 ps, u32 n) {
@@ -564,15 +730,16 @@ void Hook() {
     Vulkan::g_lbp3FgOnFill = OnFill;
     Vulkan::g_lbp3ViewportJitter = Jitter;
     Vulkan::g_lbp3SkipDraw = Skip;
+    Vulkan::g_lbp3SamplerBias = SamplerBias;
     g_hooked = true;
 }
 
 void Log() {
     if (++g_stats.flips < 300) return;
     std::fprintf(stderr,
-                 "[dlss] DLAA %ux%u: %u of %u flips upscaled; not: %u without the HUD-less image, %u without "
-                 "vectors, %u without depth, %u failed; %u frames jittered, SMAA left out in %u\n",
-                 g_featOutW, g_featOutH, g_stats.upscaled, g_stats.flips, g_stats.noHud, g_stats.noVel,
+                 "[dlss] %s %ux%u -> %ux%u: %u of %u flips upscaled; not: %u without the HUD-less image, %u "
+                 "without vectors, %u without depth, %u failed; %u frames jittered, SMAA left out in %u\n",
+                 ModeLabel(), g_featW, g_featH, g_featOutW, g_featOutH, g_stats.upscaled, g_stats.flips, g_stats.noHud, g_stats.noVel,
                  g_stats.noDepth, g_stats.failed, g_stats.jitteredFrames, g_stats.smaaSkipped);
     if (g_trace && !g_stats.jitterTargets.empty()) {
         std::string list;
@@ -594,9 +761,11 @@ const char* MvName() {
 }
 
 void LogSettings(const char* why) {
-    std::fprintf(stderr, "[dlss] %s: vectors %s, jitter %s (%u phases, DLSS told %c%c), SMAA %s while upscaling%s\n", why,
-                 MvName(), g_jitterOn ? "on" : "off", g_phases, g_jitterSignX > 0 ? '+' : '-',
-                 g_jitterSignY > 0 ? '+' : '-', g_skipSmaa ? "left out" : "kept", g_trace ? ", tracing" : "");
+    std::fprintf(stderr,
+                 "[dlss] %s: vectors %s, jitter %s (%u phases, DLSS told %c%c), SMAA %s while upscaling, mip bias "
+                 "%.2f%s\n",
+                 why, MvName(), g_jitterOn ? "on" : "off", g_phases, g_jitterSignX > 0 ? '+' : '-',
+                 g_jitterSignY > 0 ? '+' : '-', g_skipSmaa ? "left out" : "kept", g_mipBias, g_trace ? ", tracing" : "");
 }
 
 // One setting (the environment's or the remote command's). False = unknown.
@@ -636,17 +805,70 @@ void ReadSettings() {
     if (!env("LBP3_DLSS_JITTER_SIGN").empty()) Apply("jitter", env("LBP3_DLSS_JITTER_SIGN"));
     if (!env("LBP3_DLSS_SMAA").empty()) Apply("smaa", env("LBP3_DLSS_SMAA"));
     g_trace = EnvOn("LBP3_DLSS_TRACE");
-    // NVIDIA's guide 3.7.1: 8 x (output / render)^2 phases, at least 16 here (DLAA).
-    g_phases = 16;
+    // NVIDIA's guide 3.7.1: 8 x (output / render)^2 phases (Quality 18, Balanced 24, Performance
+    // 32, Ultra Performance 72), at least 16 here (DLAA).
+    const double ratio = dlss_modes::kModes[g_mode].ratio;
+    g_phases = std::max<uint32_t>(16, uint32_t(std::ceil(8.0 * ratio * ratio)));
+    // NVIDIA's guide 3.5: log2(render / output) - 1 (DLAA -1, Quality -1.58, Performance -2).
+    g_mipBias = float(std::log2(1.0 / ratio) - 1.0);
+    if (const char* b = std::getenv("LBP3_DLSS_MIPBIAS"); b && *b) g_mipBias = float(std::atof(b));
     NextJitter();
     LogSettings("settings");
 }
 
 }  // namespace
 
+void Prepare() {
+    const char* v = std::getenv("LBP3_UPSCALER");
+    if (!v || _stricmp(v, "dlss") != 0) return;
+    InitCommon();
+    Lbp3Res::Size out = Lbp3Res::kNative;
+    Lbp3Res::Parse(std::getenv("LBP3_RES"), &out);  // as Lbp3Res::Current() would read it
+    const char* m = std::getenv("LBP3_UPSCALER_MODE");
+    int mode = m && *m ? dlss_modes::Find(m) : dlss_modes::kDefault;
+    if (mode < 0) {
+        std::fprintf(stderr, "[dlss] LBP3_UPSCALER_MODE=%s isn't a mode: Quality\n", m);
+        mode = dlss_modes::kDefault;
+    }
+    uint32_t rw = 0, rh = 0;
+    if (!dlss_modes::RenderSize(out.w, out.h, dlss_modes::kModes[mode].ratio, &rw, &rh)) {
+        std::fprintf(stderr, "[dlss] %s would render under 1280x720 at %ux%u: DLAA instead\n",
+                     dlss_modes::kModes[mode].label, out.w, out.h);
+        mode = 0;
+        rw = out.w, rh = out.h;
+    }
+    std::string why, gpu;
+    if (!CanRunInChild(&why, &gpu)) {
+        std::fprintf(stderr, "[dlss] no upscaler this run: %s. The game renders at %ux%u.\n", why.c_str(), out.w, out.h);
+        g_disabled = true;
+        return;
+    }
+    g_mode = mode;
+    g_outW = out.w;
+    g_outH = out.h;
+    if (rw != out.w || rh != out.h) {
+        char size[32];
+        std::snprintf(size, sizeof(size), "%ux%u", rw, rh);
+        _putenv_s("LBP3_RES", size);  // the render size, before anything reads it
+    }
+    std::fprintf(stderr, "[dlss] %s on %s: the game renders %ux%u, DLSS makes %ux%u\n", ModeLabel(), gpu.c_str(), rw,
+                 rh, out.w, out.h);
+}
+
+int Probe() {
+    InitCommon();
+    std::string why, gpu;
+    if (CanRun(&why, &gpu)) {
+        std::printf("dlss: available on %s\n", gpu.c_str());
+        return 0;
+    }
+    std::printf("dlss: not available: %s\n", why.c_str());
+    return 1;
+}
+
 void RegisterVulkanExtensions() {
     const char* v = std::getenv("LBP3_UPSCALER");
-    g_wanted = v && _stricmp(v, "dlss") == 0;
+    g_wanted = v && _stricmp(v, "dlss") == 0 && !g_disabled;
     if (!g_wanted) return;
     InitCommon();
     ReadSettings();
@@ -691,13 +913,29 @@ bool Start() {
         std::fprintf(stderr, "[dlss] could not build the upscaler's own passes: no upscaler this run\n");
         return false;
     }
+    if (g_outW) {  // NVIDIA's own render size for the mode, against the one Prepare chose
+        unsigned optW = 0, optH = 0, maxW = 0, maxH = 0, minW = 0, minH = 0;
+        float sharpness = 0.0f;
+        NGX_DLSS_GET_OPTIMAL_SETTINGS(g_caps, g_outW, g_outH, kModeValues[g_mode], &optW, &optH, &maxW, &maxH, &minW,
+                                      &minH, &sharpness);
+        const Lbp3Res::Size rs = Lbp3Res::Current();
+        const bool inside = rs.w >= minW && rs.w <= maxW && rs.h >= minH && rs.h <= maxH;
+        std::fprintf(stderr, "[dlss] NVIDIA's %s for %ux%u: %ux%u (allowed %ux%u to %ux%u); the game renders %ux%u%s\n",
+                     ModeLabel(), g_outW, g_outH, optW, optH, minW, minH, maxW, maxH, rs.w, rs.h,
+                     inside ? "" : ", OUTSIDE that range");
+    }
     g_ready = true;
-    std::fprintf(stderr, "[dlss] DLSS ready on %s (DLAA); NVIDIA's DLL from %ls\n",
-                 std::string(inst->GetModelName()).c_str(), g_exeDir.c_str());
+    std::fprintf(stderr, "[dlss] DLSS ready on %s (%s); NVIDIA's DLL from %ls\n",
+                 std::string(inst->GetModelName()).c_str(), ModeLabel(), g_exeDir.c_str());
     return true;
 }
 
 bool Active() { return g_ready; }
+
+void OutputSize(uint32_t* w, uint32_t* h) {
+    *w = g_outW;
+    *h = g_outH;
+}
 
 void Remote(const std::string& key, const std::string& value) {
     if (!g_ready) {
@@ -727,7 +965,8 @@ Output Evaluate(void* cmdp, void* imagep, const Frame& f, float jx, float jy) {
         g_reset = true;  // the history no longer follows
         return out;
     }
-    const uint32_t OW = W, OH = H;  // DLAA
+    // The output size Prepare kept (the launcher's Resolution); the render size is the game's.
+    const uint32_t OW = g_outW ? g_outW : W, OH = g_outH ? g_outH : H;
     vk::CommandBuffer cmd(static_cast<VkCommandBuffer>(cmdp));
     const vk::Format fmt = Unorm(display.info.pixel_format);
     if (!Make(g_final, W, H, fmt, vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled) ||
@@ -750,7 +989,7 @@ Output Evaluate(void* cmdp, void* imagep, const Frame& f, float jx, float jy) {
         cp.Feature.InHeight = H;
         cp.Feature.InTargetWidth = OW;
         cp.Feature.InTargetHeight = OH;
-        cp.Feature.InPerfQualityValue = NVSDK_NGX_PerfQuality_Value_DLAA;
+        cp.Feature.InPerfQualityValue = OW == W && OH == H ? NVSDK_NGX_PerfQuality_Value_DLAA : kModeValues[g_mode];
         // 8-bit, perceptually encoded colour (not HDR); vectors at the render size and without
         // jitter; conventional depth (perf/fg_inputs.md); DLSS works out the exposure itself.
         cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
@@ -766,8 +1005,8 @@ Output Evaluate(void* cmdp, void* imagep, const Frame& f, float jx, float jy) {
         }
         g_featW = W, g_featH = H, g_featOutW = OW, g_featOutH = OH;
         g_reset = true;
-        std::fprintf(stderr, "[dlss] DLSS created: %ux%u -> %ux%u (DLAA), display format %s\n", W, H, OW, OH,
-                     vk::to_string(display.info.pixel_format).c_str());
+        std::fprintf(stderr, "[dlss] DLSS created: %ux%u -> %ux%u (%s), display format %s\n", W, H, OW, OH,
+                     ModeLabel(), vk::to_string(display.info.pixel_format).c_str());
         if (Bgra(display.info.pixel_format))
             std::fprintf(stderr, "[dlss] the display buffer is BGRA: the HUD put-back writes RGBA, colours swap\n");
     }

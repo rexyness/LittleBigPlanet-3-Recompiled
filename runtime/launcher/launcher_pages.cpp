@@ -19,6 +19,7 @@
 #include "launcher_shell.h"
 #include "launcher_theme.h"
 #include "input/action_table.h"
+#include "gpu/dlss_modes.h"
 
 namespace launcher::ui {
 
@@ -637,6 +638,113 @@ void PageGame(App& a) {
 // ---------------------------------------------------------------------------------------------
 // Graphics and sound
 
+namespace {
+
+// The upscaler (issue #24) is only for a DLSS build's lbp3.exe (docs/adr/0002): the marker beside it,
+// then its own --dlss-probe answer, asked in the background once per exe. Returns the state
+// (App::DlssProbe) and, when known, the GPU (0) or the reason (1).
+int DlssState(App& a, std::string* line = nullptr) {
+    std::unique_lock lk(a.dlss.m);
+    if (a.dlss.exe != a.p.exe || a.dlss.exe.empty()) {
+        a.dlss.exe = a.p.exe;
+        a.dlss.line.clear();
+        std::error_code ec;
+        if (a.p.exe.empty() || !fs::exists(a.p.exe.parent_path() / "DLSS_BUILD_NOT_FOR_RELEASE", ec)) {
+            a.dlss.state = 2;
+        } else {
+            a.dlss.state = -1;
+            std::thread([&a, exe = a.p.exe] {
+                const ProcResult r = RunCapture(Quote(exe.wstring()) + L" --dlss-probe", exe.parent_path(), nullptr, nullptr, 30000);
+                std::string said;  // the last "dlss: " line
+                for (size_t p = r.output.find("dlss: "); p != std::string::npos; p = r.output.find("dlss: ", p + 1)) {
+                    const size_t e = r.output.find_first_of("\r\n", p);
+                    said = r.output.substr(p + 6, e == std::string::npos ? std::string::npos : e - p - 6);
+                }
+                std::lock_guard lk2(a.dlss.m);
+                if (a.dlss.exe != exe) return;  // another exe was chosen meanwhile
+                if (r.exit_code == 0) {
+                    a.dlss.state = 0;
+                    a.dlss.line = said.rfind("available on ", 0) == 0 ? said.substr(13) : said;
+                } else if (r.exit_code == 2) {
+                    a.dlss.state = 2;
+                } else {
+                    a.dlss.state = 1;
+                    a.dlss.line = said.rfind("not available: ", 0) == 0 ? said.substr(15)
+                                  : r.started                         ? "the check failed"
+                                                                      : r.error;
+                }
+            }).detach();
+        }
+    }
+    if (line) *line = a.dlss.line;
+    return a.dlss.state;
+}
+
+// Upscaler (Off / NVIDIA DLSS) and Mode, under Resolution. Nothing at all for a public build.
+void DlssControls(App& a) {
+    Settings& s = a.s;
+    std::string line;
+    const int state = DlssState(a, &line);
+    if (state == 2) return;
+    const bool on = s.upscaler == "dlss";
+    ImGui::TextUnformatted("Upscaler");
+    ImGui::SameLine(S(120));
+    ImGui::BeginDisabled(state != 0);
+    ImGui::SetNextItemWidth(S(320));
+    if (ImGui::BeginCombo("##upscaler", on ? "NVIDIA DLSS" : "Off")) {
+        if (ImGui::Selectable("Off", !on)) s.upscaler = "off";
+        if (ImGui::Selectable("NVIDIA DLSS", on)) s.upscaler = "dlss";
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    std::string help;
+    if (state == -1) {
+        help = "Checking whether DLSS can run on this PC...";
+    } else if (state == 1) {
+        help = "DLSS can't run here: " + line + ". The game draws at the Resolution above, without an upscaler.";
+    } else if (!on) {
+        help = "DLSS draws the game smaller and rebuilds the picture at the Resolution above, with smoother edges "
+               "than the game's own. Runs on " + line + ".";
+    }
+    if (!help.empty() || !on) {
+        Help(help.c_str());
+        return;
+    }
+    uint32_t ow = 1920, oh = 1080;
+    std::sscanf(CanonicalRes(s.res).c_str(), "%ux%u", &ow, &oh);
+    int cur = dlss_modes::Find(s.upscaler_mode.c_str());
+    if (cur < 0) cur = dlss_modes::kDefault;
+    ImGui::TextUnformatted("Mode");
+    ImGui::SameLine(S(120));
+    ImGui::SetNextItemWidth(S(320));
+    if (ImGui::BeginCombo("##upscaler_mode", dlss_modes::kModes[cur].label)) {
+        for (int i = 0; i < dlss_modes::kCount; ++i) {
+            uint32_t rw = 0, rh = 0;
+            const bool ok = dlss_modes::RenderSize(ow, oh, dlss_modes::kModes[i].ratio, &rw, &rh);
+            char label[96];
+            if (ok) std::snprintf(label, sizeof label, "%s  (draws %ux%u)", dlss_modes::kModes[i].label, rw, rh);
+            else std::snprintf(label, sizeof label, "%s  (not at %ux%u)", dlss_modes::kModes[i].label, ow, oh);
+            if (ImGui::Selectable(label, i == cur, ok ? 0 : ImGuiSelectableFlags_Disabled)) s.upscaler_mode = dlss_modes::kModes[i].key;
+            if (!ok && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("It would draw the game under 1280x720, where the game switches to its low-resolution menus.");
+        }
+        ImGui::EndCombo();
+    }
+    uint32_t rw = ow, rh = oh;
+    char text[240];
+    if (!dlss_modes::RenderSize(ow, oh, dlss_modes::kModes[cur].ratio, &rw, &rh))
+        std::snprintf(text, sizeof text, "%s would draw under 1280x720 at %ux%u, so the game uses DLAA instead. Pick another mode.",
+                      dlss_modes::kModes[cur].label, ow, oh);
+    else if (cur == 0)
+        std::snprintf(text, sizeof text, "DLAA: the game draws at the full %ux%u and DLSS only smooths it. The sharpest; costs the most GPU time.", ow, oh);
+    else
+        std::snprintf(text, sizeof text, "The game draws at %ux%u and DLSS rebuilds the picture at %ux%u. Takes effect when the game starts.",
+                      rw, rh, ow, oh);
+    Help(text);
+}
+
+}  // namespace
+
 void PageGraphics(App& a) {
     Settings& s = a.s;
     PageTitle("Graphics & sound", "Resolution, frame generation, the display and window, volume.");
@@ -645,8 +753,13 @@ void PageGraphics(App& a) {
         ImGui::TextUnformatted("Resolution");
         ImGui::SameLine(S(120));
         ResolutionCombo("##res", s.res, S(320));
-        Help("The size the game draws at. Above 1080p it's sharper and costs more GPU time; a size wider than "
-             "16:9 widens the view, and shows with black bars on a 16:9 screen. Takes effect when the game starts.");
+        if (s.upscaler == "dlss" && DlssState(a) == 0)
+            Help("The size of the picture you see. With DLSS on, the game draws smaller (the Mode below says how big) and "
+                 "DLSS fills in this size. Takes effect when the game starts.");
+        else
+            Help("The size the game draws at. Above 1080p it's sharper and costs more GPU time; a size wider than "
+                 "16:9 widens the view, and shows with black bars on a 16:9 screen. Takes effect when the game starts.");
+        DlssControls(a);
         Toggle("60 frames a second on screen (the game itself stays at 30)", &s.framegen, "A generated frame between each pair of real ones. About 17 ms more input lag.");
         ImGui::BeginDisabled(!s.framegen);
         Toggle("Keep in-world text readable", &s.fg_text, "Generated frames keep thin bright text sharp (the map's \"Loading...\" ring).");
@@ -1225,6 +1338,8 @@ void PageHelp(App& a) {
         Dim("Ideas from LBPPC (github.com/emurphy04/LBPPC); this launcher is our own code, apart from the Quit Game edit (a port of "
             "LBPPC's quit_menu.py, GPL-2.0-or-later) and shadPS4's shadNet client (GPL-2.0-or-later). The game's art shown here "
             "comes from your own dump and is never copied anywhere.");
+        // A DLSS build's attribution (docs/adr/0002): plain text, no NVIDIA logos.
+        if (const int st = DlssState(a); st == 0 || st == 1) Dim("This build uses NVIDIA DLSS.");
     }
     EndCard();
 }
