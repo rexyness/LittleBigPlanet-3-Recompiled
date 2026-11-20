@@ -463,7 +463,10 @@ void MaybeDumpRenderTargets() {
     }
     // Trace every draw of the frame before the dump (LBP3_TRACE_DRAWS=1, always for F9).
     static const bool traceDraws = std::getenv("LBP3_TRACE_DRAWS") != nullptr;
-    if ((traceDraws || hotkeyDump) && target >= 0) {
+    // PROTOTYPE (sticker atlas spike): LBP3_DUMP_NO_TRACE=1 makes F9 dump only the flip's targets
+    // (the 8192x8192 atlas among them), without a file per draw of the traced frame.
+    static const bool noTrace = std::getenv("LBP3_DUMP_NO_TRACE") != nullptr;
+    if ((traceDraws || (hotkeyDump && !noTrace)) && target >= 0) {
         if (flips == target - 1) {
             std::fprintf(stderr, "[draw] ---- frame %d begins ----\n", target);
             Vulkan::g_lbp3TraceIndex = 0;
