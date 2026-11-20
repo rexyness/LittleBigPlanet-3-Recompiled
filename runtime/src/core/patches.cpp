@@ -84,6 +84,33 @@ const Patch kPatches[] = {
      "EXPERIMENT: every sound reports not playing (script native GetIsPlaying); tells whether "
      "the end of The Legend of Bunkum waits on a sound that never stops.",
      "LBP3_PATCH_SOUND_NEVER_PLAYING"},
+    // PROTOTYPE (prototype/sticker-atlas): the sticker atlas at 512-px tiles. The atlas
+    // (render-target slot 27, 0x133d8d0+0xaf8) is a 16x16 grid of 256-px tiles; these ten edits
+    // make it 8192x8192 with the grid kept, so every tile has 2x the texels per axis. The page
+    // table and the material shaders work in tiles (tc0biasscale = rect/256 of the page table,
+    // the 1/16 per tile is in the shader), so nothing else changes. All ten or none: an 8192
+    // atlas with 256-px viewports only wastes memory, but 512-px viewports in a 4096 atlas
+    // would draw outside it.
+    {"eboot.bin", 0x427971, {0xbe, 0x00, 0x10, 0x00, 0x00}, {0xbe, 0x00, 0x20, 0x00, 0x00},
+     "PROTOTYPE sticker atlas: target width 4096 -> 8192 (render-target builder 0x427940)", "LBP3_STICKERS_HD"},
+    {"eboot.bin", 0x427976, {0xba, 0x00, 0x10, 0x00, 0x00}, {0xba, 0x00, 0x20, 0x00, 0x00},
+     "PROTOTYPE sticker atlas: target height 4096 -> 8192", "LBP3_STICKERS_HD"},
+    {"eboot.bin", 0x47ffee, {0xc1, 0xe1, 0x08}, {0xc1, 0xe1, 0x09},
+     "PROTOTYPE sticker atlas: RenderDecals tile x = entry << 9 (was << 8)", "LBP3_STICKERS_HD"},
+    {"eboot.bin", 0x47fff7, {0xc1, 0xe7, 0x08}, {0xc1, 0xe7, 0x09},
+     "PROTOTYPE sticker atlas: RenderDecals tile y << 9", "LBP3_STICKERS_HD"},
+    {"eboot.bin", 0x47fffd, {0xba, 0x00, 0x01, 0x00, 0x00}, {0xba, 0x00, 0x02, 0x00, 0x00},
+     "PROTOTYPE sticker atlas: RenderDecals tile viewport width 512", "LBP3_STICKERS_HD"},
+    {"eboot.bin", 0x480002, {0xb9, 0x00, 0x01, 0x00, 0x00}, {0xb9, 0x00, 0x02, 0x00, 0x00},
+     "PROTOTYPE sticker atlas: RenderDecals tile viewport height 512", "LBP3_STICKERS_HD"},
+    {"eboot.bin", 0x480549, {0xc1, 0xe7, 0x08}, {0xc1, 0xe7, 0x09},
+     "PROTOTYPE sticker atlas: RenderDecals (new tile) x << 9", "LBP3_STICKERS_HD"},
+    {"eboot.bin", 0x480554, {0xc1, 0xe6, 0x08}, {0xc1, 0xe6, 0x09},
+     "PROTOTYPE sticker atlas: RenderDecals (new tile) y << 9", "LBP3_STICKERS_HD"},
+    {"eboot.bin", 0x480557, {0xba, 0x00, 0x01, 0x00, 0x00}, {0xba, 0x00, 0x02, 0x00, 0x00},
+     "PROTOTYPE sticker atlas: RenderDecals (new tile) viewport width 512", "LBP3_STICKERS_HD"},
+    {"eboot.bin", 0x48055c, {0xb9, 0x00, 0x01, 0x00, 0x00}, {0xb9, 0x00, 0x02, 0x00, 0x00},
+     "PROTOTYPE sticker atlas: RenderDecals (new tile) viewport height 512", "LBP3_STICKERS_HD"},
 };
 
 // ---- LBP3_RES: render at another size than 1920x1080: core/res_patches.cpp ----
