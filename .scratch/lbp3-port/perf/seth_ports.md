@@ -309,3 +309,33 @@ Done on 2026-11-19 from the shots already taken; no game run.
   - the frozen build is `build_b2a\lbp3.exe`, under the normal name in its own folder;
   - all four `seth_*` scripts in `_tools` refuse an exe not named `lbp3.exe` before taking the lock (tested);
   - long runs get a watchdog.
+
+# Batch 2 in v0.1.8: held (2026-11-20, 03:30-05:00)
+
+The user: "perhaps you can do regression on batch 2 and if it's good include it in 0.1.8". Batch 1 and 2 were merged with main (the on-screen keyboard's word suggestions) as `release/v0.1.8-batch2` (merge `de9dc0c`, shadPS4 `b0242a25`; pushed, not merged into main) and given v0.1.4's full regression in both configurations (`_tools/rel018_run.sh`, output `analysis\rel018_regress_out.txt`). **Everything passed except the Introduction's pacing, and that holds Batch 2 back: v0.1.8 is keyboard-only** (`release/v0.1.8`).
+
+**What passed** (A: runtime defaults; B: 1440p, shader rescale, frame generation; both muted, physical pads hidden, on `analysis\rel018_cache`, a copy of `seth_cache8`):
+- keyboard, photo, backup (6 dialogs on the overlay, no save file changed) and co-op: PASS in A and B;
+- Thruster 3/3, Bunkum 16/16 with Needlepoint, Create sky cyan, in A and B; 80 sites at 1440p in B;
+- frame generation in B: the same cuts as `seth1`/`sb2` (one camera-move cut as the Introduction starts; Bunkum 17 jumps, 9 image cuts);
+- 0 GPU warnings, 0 crashes in 24 runs; no nvlddmkm or Display events; the clone's exe restored each time;
+- offline suites on the merged build: 18 of 18, 0 failed.
+
+**What didn't: the Introduction, sim steps != 1 (gate: under 1% per run).** A: 0.92% and **1.57%**; B: 0.92% and 0.13%. No pipelines compiled and no graphics blocking in any of them, so not shader stalls.
+- **A/B on the same night and conditions** (`_tools/intro_ab018.sh`, outputs `analysis\rel018_introab_out.txt` and `rel018_introab2_out.txt`): control = main's own build (keyboard, no Batch 2; `em_cache` copy), candidate = the merged build, and the candidate with `LBP3_FAULT_WINDOW=0` (the `[faults]` lines confirm it: ~14,400 write faults per line off, ~560 on).
+
+  | Arm | Runs (%) | At or above 0.9% |
+  |---|---|---|
+  | control (main) | 0.13, 0.13, 0.00 | 0 of 3 |
+  | candidate, window on | 0.00, 0.13, 1.05, 0.00, 0.00, 0.52 | 1 of 6 |
+  | candidate, window off | 0.13, 0.00, 0.26, 0.20, 0.92, 0.13, 0.00, 0.00, 0.00 | 1 of 9 |
+
+- **All Batch 2 runs on this script** (`sb2`, `sb2w`, `r018a/b`, the A/B's candidates): 22, of which 5 at or above 0.9% (two over the gate: 1.57%, 1.05%). **Every recorded run without Batch 2:** 41: 34 earlier ones back to `sn3`, Batch 1's `seth1` among them, plus tonight's 3 controls and the keyboard-only release's 4 (`k18a` 0.26 / 0.13%, `k18b` 0.50 / 0.25%). 1 of them is at or above 0.9% (1.01%, a 1440p experiment).
+- **How sure:** tonight alone it's 5 of 19 runs with Batch 2 against 0 of 7 without; chance gives that about one time in five. Only the pooled history (5 of 22 against 1 of 41) makes it convincing. So: **failed the gate, probably from the branch, cause unproven.**
+- **Not the fault window.** The rule was written before the second A/B: any window-off run at or above 0.9% means something else on the branch (Batch 1 or 2: `seth1`, Batch 1 alone, has only two runs, 0.00% and 0.13%). `candfw05` had 0.92%.
+- **What the misses look like** (`miss_where.py` in the job's temp folder; easy to redo from the logs): flips stay at 33.3 ms with no frame over 40 ms around them, so it isn't a stall. The sim's step count jitters 0/2 for about a second (12-14 misses within 30 flips, e.g. `01210111120201...`) at a different point in each bad run (level flips 834, 933, 1060), plus scattered 0-then-2 pairs. That's the game's 30 Hz sim clock wobbling across the flip boundary.
+- **Next suspect** (not tested): runtime `ae8d8ee`, the flip interrupt ticking shadPS4's frame count (`videoout.cpp`), since the game paces its sim from flips. Then the shader-translation changes (item 4) and Batch 1's runtime commits. Bisecting needs builds without each, about 6 Introduction runs per arm: with misses this rare, 2 runs say nothing.
+
+**Home's card** (the open question above): eight shots 0.5 s apart (`_tools/home_card.sh`) show the card still (at most 1 px), so the offset isn't animation phase. It's the same with the window on and off (0 px). In the keyboard suite's Home shot it sits 14-15 px above `mub`'s on both Batch 2 runs (`r018a`, `r018b`), where main builds land 2-12 px below it. Cosmetic, cause unknown; a control run of `home_card.sh` on main is the next step.
+
+**Also found tonight:** the keyboard suite (and any route through Edit Now) failed whenever a physical controller was connected: the user's DualSense over Bluetooth. That is why last night's three keyboard runs failed (Popit open, Text Chat's "Enter Your Message"), and it wasn't a code problem. Scripted runs now hide physical pads (`7910407` on `release/v0.1.8`: `remote_start.ps1`, `t_m2v_osk.sh`, `m5_np_route.sh`; `hitl_start.sh` keeps them with `LBP3_REAL_PADS=1`).

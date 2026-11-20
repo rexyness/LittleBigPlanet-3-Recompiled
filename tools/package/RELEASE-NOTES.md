@@ -14,8 +14,9 @@ accounts. New here? Read on. **No game files are included:** you need your own c
   leave it, also next time.
 - **Your shader cache is rebuilt once.** A few of the PS4's graphics instructions are now translated exactly
   (reciprocal square roots clamp instead of reaching infinity, single-lane register writes, and one form of
-  branch masking, which ran code for pixels that should have skipped it). Old shaders don't match any more, so expect the first-visit
-  pauses again for a while after updating (or new things appearing a moment late, with background builds on).
+  branch masking, which ran code for pixels that should have skipped it). Old shaders don't match any more, so
+  expect the first-visit pauses again for a while after updating (or new things appearing a moment late, with
+  background builds on).
 - **Fewer graphics stalls.** When the game writes to memory the graphics core is watching, the 256 KB around it
   is released at once instead of page by page: 86% fewer of those interruptions, and the graphics thread waits
   half as long. On a fast PC the frame rate doesn't change; it's headroom for slower ones.
@@ -136,6 +137,8 @@ The first visit to each area can pause briefly while your graphics driver builds
 
 ### Known issues
 - Some scenes are still brighter than on a PS4, though less than before v0.1.7.
+- Since v0.1.8, a level can now and then judder for about a second (in tests, about one run of the Introduction
+  in four). It's being looked into.
 - Online co-op is still new:
   - it hasn't been tested yet between two PCs on different networks;
   - leaving and rejoining, and playing through real levels together, are only lightly tested;
