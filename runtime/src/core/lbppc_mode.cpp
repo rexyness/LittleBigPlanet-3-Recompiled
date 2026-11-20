@@ -9,11 +9,12 @@
 namespace core::lbppc {
 namespace {
 
-// LBPPC's: Windows' default for a new thread (MXCSR 0x1f80: exceptions masked, no flush-to-zero or
-// denormals-are-zero; x87 0x027f: 53-bit precision). To be confirmed on a running LBPPC
-// (docs/research/lbppc-coop.md).
+// LBPPC's, measured on a running LBPPC 0.1.5 (2026-11-20, docs/research/lbppc-coop.md): every thread the
+// game creates (JobManager and SceneThread workers, main fast/slow, streaming, HTTP...) runs MXCSR
+// 0x1f80 (exceptions masked, no flush-to-zero, no denormals-are-zero) and x87 0x037f; none was seen
+// with the console's 0x9fc0. So the only difference from ours is flush-to-zero and denormals-are-zero.
 constexpr FpState kPs4{0x9fc0, 0x037f, true, "ps4"};
-constexpr FpState kLbppc{0x1f80, 0x027f, false, "lbppc"};
+constexpr FpState kLbppc{0x1f80, 0x037f, false, "lbppc"};
 
 }  // namespace
 

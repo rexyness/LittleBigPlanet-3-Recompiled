@@ -54,15 +54,18 @@ LBP3's online co-op runs every player's world in lockstep and ends the session w
 | Item | This port | LBPPC | Status |
 |---|---|---|---|
 | Exact maths (rcpps/rsqrtps/dpps) | 3,085 eboot + 288 spu.prx sites | the same 3,373 sites and stubs | identical **read** (diffed) |
-| FP control state on game threads | MXCSR 0x9fc0 (PS4: FTZ+DAZ), x87 0x037f (`hle/kernel_pthread.cpp`, `hle/fiber.cpp`) | sets none (`src/runtime_thread.c` host_start): Windows' default, likely 0x1f80 | **differs**; LBPPC's real state to be measured on a running LBPPC |
-| HasLBP2 | the game's answer | forced true, online too (`src/probe.c` ~1493) | differs; what it changes to be read |
+| FP control state on game threads | MXCSR 0x9fc0 (PS4: FTZ+DAZ), x87 0x037f (`hle/kernel_pthread.cpp`, `hle/fiber.cpp`) | **measured** on a running LBPPC 0.1.5 (2026-11-20): every game-created thread MXCSR 0x1f80 (no FTZ/DAZ), x87 0x037f; none at 0x9fc0 | **differs** in FTZ/DAZ only; the mode runs 0x1f80/0x037f (`LBP3_FP_STATE=lbppc`, checked with the same sampler on ours) |
+| HasLBP2 | the game's answer | forced true for every part, online too (`src/probe.c` ~1493): the script native HasLBP2 (0x822bc0) | the mode forces it too (`LBP3_HAS_LBP2=all|game`) |
 | "The game diverged" | ends at the first | tolerates two in a row (`src/probe.c` ~500) | differs; add only if mixed runs need it |
 | 16:9 simulation camera online | yes | yes | same |
-| Game build | US CUSA00473 1.28 | US and EU 1.28 | EU players: unknown, untested |
+| Game build | US CUSA00473 1.28 | US and EU 1.28 ("the EU 1.28 has the US 1.28's very eboot.bin", LBPPC `run.py`) | same code; EU players untested (their NP title ID differs) |
 
-The FP state is the dominant unknown: it changes simulation results here (it was the cause of the
-Legend of Bunkum white-screen ending, `input/game_state.cpp`). The mode will run LBPPC's FP state; in
-the mode the Bunkum ending can come back (`LBP3_CUTSCENE_AUTOSKIP=on` is the fallback).
+The FP state changes simulation results here (it was the cause of the Legend of Bunkum white-screen
+ending, `input/game_state.cpp`), so the mode runs LBPPC's; in the mode the Bunkum ending can come back
+(`LBP3_CUTSCENE_AUTOSKIP=on` is the fallback). Measured with a thread sampler (each thread suspended
+for a moment and its MXCSR and x87 control word read): on ours, game threads 0x9fc0/0x037f by default
+and 0x1f80/0x037f with `LBP3_FP_STATE=lbppc`; on LBPPC 0.1.5 (offline, a test data folder),
+0x1f80/0x037f on every game-created thread.
 
 ## Plan and status
 
@@ -70,8 +73,8 @@ Branch `feat/lbppc-coop` = the netcode chain (`netcode/rtt-floor`, which holds `
 merged with v0.1.8 `main`. Landing it lands that chain too.
 
 1. The peer protocol in the link + mock tests. **Done** (`p2ptest` 308/308).
-2. The FP-state switch (`LBP3_FP_STATE`), and measuring LBPPC's real per-thread state.
-3. The mode's plumbing: `LBP3_LBPPC_COOP=1` → link dialect, FP state, HasLBP2; launcher switch.
+2. The FP-state switch (`LBP3_FP_STATE`), and measuring LBPPC's real per-thread state. **Done.**
+3. The mode's plumbing: `LBP3_LBPPC_COOP=1` → link dialect, FP state, HasLBP2; launcher switch. **Done.**
 4. A live mixed session on this PC (ours against the installed LBPPC, test accounts, muted, under
    the game lock): join, Pod, a level; the sync checks agree; then the tick gate with the mode off.
 
