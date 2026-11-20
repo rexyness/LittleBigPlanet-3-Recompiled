@@ -1,0 +1,55 @@
+// The DLSS upscaler's own compute passes (gpu/dlss.cpp; a DLSS build only). One SPIR-V per
+// pass, chosen by PASS (cmake/dlss_shaders.cmake).
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#if PASS == 1
+// The game's velocity target -> DLSS's motion vectors. The target is RGBA8: R = 255 where the
+// pixel has a vector; B and G hold the motion N-1 -> N in steps biased by 127 (the pixel at p in
+// N was at p - m in N-1, video/framegen_warp.h). DLSS wants current -> previous in render pixels,
+// so scale is minus the pixels per step at this render size. Codes 0 and 255 are saturated
+// (faster than the target can hold) and are passed on clamped. No vector (sky): no motion.
+layout(set = 0, binding = 0) uniform sampler2D velTex;
+layout(set = 0, binding = 1, rg16f) uniform writeonly image2D mvOut;
+layout(push_constant) uniform PC {
+    vec2 scale;
+    uvec2 size;
+} pc;
+
+void main() {
+    const uvec2 p = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(p, pc.size))) return;
+    const vec4 v = texelFetch(velTex, ivec2(p), 0) * 255.0;
+    vec2 mv = vec2(0.0);
+    if (v.r > 254.5) mv = vec2(v.b - 127.0, v.g - 127.0) * pc.scale;
+    imageStore(mvOut, ivec2(p), vec4(mv, 0.0, 0.0));
+}
+
+#elif PASS == 2
+// The screen HUD back on top of DLSS's picture: where the finished frame differs from its HUD-less
+// image by more than hudT (out of 255) in any channel, the finished frame; elsewhere DLSS's. The
+// finished frame and the HUD-less image are at the render size and are sampled at the output
+// pixel's centre (equal sizes: DLAA, texel for texel).
+layout(set = 0, binding = 0) uniform sampler2D finalTex;
+layout(set = 0, binding = 1) uniform sampler2D hudlessTex;
+layout(set = 0, binding = 2) uniform sampler2D dlssTex;
+layout(set = 0, binding = 3, rgba8) uniform writeonly image2D outImg;
+layout(push_constant) uniform PC {
+    float hudT;
+    uint pad;
+    uvec2 size;  // output size
+} pc;
+
+void main() {
+    const uvec2 p = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(p, pc.size))) return;
+    const vec2 uv = (vec2(p) + 0.5) / vec2(pc.size);
+    const vec4 f = textureLod(finalTex, uv, 0.0);
+    const vec4 h = textureLod(hudlessTex, uv, 0.0);
+    const vec4 d = texelFetch(dlssTex, ivec2(p), 0);
+    const vec3 diff = abs(f.rgb - h.rgb) * 255.0;
+    const bool hud = max(diff.r, max(diff.g, diff.b)) > pc.hudT;
+    imageStore(outImg, ivec2(p), hud ? f : vec4(d.rgb, f.a));
+}
+#endif

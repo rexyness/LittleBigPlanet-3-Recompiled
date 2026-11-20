@@ -10,6 +10,12 @@ endif()
 
 find_package(SDL3 REQUIRED CONFIG PATHS "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/SDL3/cmake" NO_DEFAULT_PATH)
 
+# A DLSS build (issue #24, docs/adr/0002): links NVIDIA's DLSS SDK, which is downloaded outside
+# the repository (github.com/NVIDIA/DLSS, pinned v310.9.16) and never committed. A DLSS build is
+# for the person who made it and is never published; the release packaging refuses one.
+option(LBP3_DLSS "A DLSS build: link NVIDIA's DLSS (never published)" OFF)
+set(LBP3_DLSS_SDK "" CACHE PATH "NVIDIA's DLSS SDK folder (v310.9.16), outside the repository")
+
 include(cmake/shader_recompiler.cmake)
 include(cmake/video_core.cmake)
 include(cmake/shadnet.cmake)  # opt-in at run time (LBP3_SHADNET=1)
@@ -110,6 +116,13 @@ target_link_libraries(hle PUBLIC imgui SDL3::SDL3 bcrypt winmm dbghelp onecore a
 
 add_executable(lbp3 src/main.cpp)
 target_link_libraries(lbp3 PRIVATE hle)
+if (LBP3_DLSS)
+    # NVIDIA's DLSS DLL next to the exe, where NGX looks for it; a marker the packaging refuses.
+    add_custom_command(TARGET lbp3 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LBP3_DLSS_SDK}/lib/Windows_x86_64/rel/nvngx_dlss.dll"
+                $<TARGET_FILE_DIR:lbp3>
+        COMMAND ${CMAKE_COMMAND} -E touch $<TARGET_FILE_DIR:lbp3>/DLSS_BUILD_NOT_FOR_RELEASE)
+endif()
 
 add_executable(padtest tests/padtest.cpp)
 target_link_libraries(padtest PRIVATE hle)

@@ -3,6 +3,7 @@
 #include "gpu/renderer.h"
 #include "gpu/frame_split.h"
 #include "gpu/fg_live.h"
+#include "gpu/dlss.h"
 #include "video/presenter.h"
 
 #include <algorithm>
@@ -110,6 +111,7 @@ AmdGpu::Liverpool* GetLiverpool() { return g_liverpool; }
 
 bool Init() {
     if (g_instance) return true;
+    dlss::RegisterVulkanExtensions();  // a DLSS build with LBP3_UPSCALER=dlss: NGX's extensions
     g_instance = new Vulkan::Instance(g_headless, EmulatorSettings.GetGpuId(),
                                       EmulatorSettings.IsVkValidationEnabled(),
                                       EmulatorSettings.IsVkCrashDiagnosticEnabled());
@@ -127,6 +129,7 @@ bool Init() {
         g_pendingMaps.clear();
     }
     fg::Init();  // LBP3_FG_DUMP (exp/fg-capture)
+    dlss::Start();  // a DLSS build with LBP3_UPSCALER=dlss (gpu/dlss.h)
     // The driver pipeline cache (fix/pipeline-warmup) is saved every 20 s while pipelines are
     // made, and once more when the game ends (ExitProcess runs no destructors).
     video::AddExitHook([] { Vulkan::SaveDriverPipelineCacheNow(); });
@@ -227,9 +230,6 @@ bool ReadbackDisplayBuffer(const DisplayBufferDesc& d, std::vector<uint8_t>& out
     auto& image = cache.GetImage(id);
     width = image.info.size.width;
     height = image.info.size.height;
-    const vk::DeviceSize bytes = vk::DeviceSize{width} * height * 4;
-    if (!EnsureStaging(bytes)) return false;
-
     g_scheduler->EndRendering();
     const auto cmd = g_scheduler->CommandBuffer();
     VideoCore::Image::Barriers barriers;
@@ -239,6 +239,15 @@ bool ReadbackDisplayBuffer(const DisplayBufferDesc& d, std::vector<uint8_t>& out
         cmd.pipelineBarrier2(vk::DependencyInfo{.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size()),
                                                 .pImageMemoryBarriers = barriers.data()});
     }
+    // A DLSS build with the upscaler on: its picture (the screen HUD put back) is read back instead.
+    const dlss::Output up = dlss::Process(static_cast<VkCommandBuffer>(cmd), &image);
+    const vk::Image readFrom = up.image ? vk::Image(static_cast<VkImage>(up.image)) : image.GetImage();
+    if (up.image) {
+        width = up.width;
+        height = up.height;
+    }
+    const vk::DeviceSize bytes = vk::DeviceSize{width} * height * 4;
+    if (!EnsureStaging(bytes)) return false;
     const vk::BufferImageCopy region{
         .bufferOffset = 0,
         .bufferRowLength = 0,
@@ -247,7 +256,7 @@ bool ReadbackDisplayBuffer(const DisplayBufferDesc& d, std::vector<uint8_t>& out
         .imageOffset = {0, 0, 0},
         .imageExtent = {width, height, 1},
     };
-    cmd.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal, g_staging.buffer, region);
+    cmd.copyImageToBuffer(readFrom, vk::ImageLayout::eTransferSrcOptimal, g_staging.buffer, region);
     fglive::OnReadbackCopy(static_cast<VkCommandBuffer>(cmd), &image);  // frame generation's copy (when on)
     split::Mark(split::FinishBegin);
     g_scheduler->Finish();  // wait for the GPU; fine for a first version

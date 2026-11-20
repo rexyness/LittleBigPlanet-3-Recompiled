@@ -29,6 +29,7 @@
 #include "gpu/frame_split.h"
 #include "gpu/renderer.h"
 #include "gpu/fg_live.h"
+#include "gpu/dlss.h"
 #include "ui/boot_overlay.h"
 #include "video/framegen.h"
 #include "video/live_stats.h"
@@ -401,6 +402,7 @@ int PS4_SYSV_ABI sceVideoOutRegisterBuffers(int32_t handle, int32_t start, void*
                                            attr->pitchInPixel, attr->pixelFormat, attr->tilingMode};
         gpu::fg::SetDisplayBuffer(start + i, reinterpret_cast<uint64_t>(addresses[i]));
         gpu::fglive::SetDisplayBuffer(start + i, reinterpret_cast<uint64_t>(addresses[i]));
+        gpu::dlss::SetDisplayBuffer(start + i, reinterpret_cast<uint64_t>(addresses[i]));
     }
     return start;  // the buffer set index
 }

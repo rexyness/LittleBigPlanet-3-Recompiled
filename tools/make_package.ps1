@@ -49,6 +49,11 @@ if (-not $SkipBuild) {
 foreach ($f in "build\lbp3.exe", "build\LBP3Launcher.exe", "build\SDL3.dll", "tools\nid_names.txt", "data\osk\words_en.txt") {
     if (-not (Test-Path $f)) { throw "missing $f" }
 }
+# Never a DLSS build (docs/adr/0002): NVIDIA's licence rules DLSS out of this GPL release.
+$dlssOn = (Test-Path build\CMakeCache.txt) -and (Select-String -Path build\CMakeCache.txt -Pattern '^LBP3_DLSS:BOOL=(ON|TRUE|1)$' -Quiet)
+if ($dlssOn -or (Test-Path build\DLSS_BUILD_NOT_FOR_RELEASE) -or (Test-Path build\nvngx_dlss.dll)) {
+    throw "build\ is a DLSS build (LBP3_DLSS): a DLSS build is never published; package from a build without it"
+}
 
 # The VC++ runtime (msvcp140, vcruntime140, ...), copied app-local from Visual Studio's redist folder (the
 # redistributable licence allows that), so a friend needs no separate install.
@@ -124,6 +129,7 @@ if ($sdl) { New-Item -ItemType Directory -Force "$stage\licenses\third_party\SDL
 # Safety: nothing from the game, the user's saves or accounts may be in the package.
 $forbidden = Get-ChildItem $stage -Recurse -File | Where-Object {
     $_.Name -match '(?i)^(eboot\.bin|param\.sfo|game_dir\.txt|launcher\.ini|online_account.*\.txt|input\.ini|driver\.vkcache|learned_words\.txt|keyboard\.ini)$' -or
+    $_.Name -match '(?i)^(nvngx.*\.dll|DLSS_BUILD_NOT_FOR_RELEASE)$' -or
     $_.Extension -match '(?i)^\.(farc|pkg|sprx|prx|spv|fsb|bik|bin|pdb)$' -or
     $_.FullName -match '(?i)\\(savedata|shader_cache[^\\]*|sce_sys|CUSA\d{5}[^\\]*|user|analysis)\\'
 }

@@ -50,3 +50,18 @@ target_include_directories(video_core
     PUBLIC ${SHADPS4_EXT}/tracy/public)  # profiling compiled out (no TRACY_ENABLE)
 target_compile_options(video_core PRIVATE -Wno-everything)
 target_link_libraries(video_core PUBLIC shader_recompiler Vulkan::Headers GPUOpen::VulkanMemoryAllocator SDL3::SDL3 miniz)
+
+# A DLSS build (LBP3_DLSS, CMakeLists.txt): the DLSS upscaler and NVIDIA's NGX library, from the
+# DLSS SDK outside the repository (docs/adr/0002). Off in every public build.
+if (LBP3_DLSS)
+    if (NOT EXISTS "${LBP3_DLSS_SDK}/include/nvsdk_ngx_vk.h")
+        message(FATAL_ERROR "LBP3_DLSS is on but LBP3_DLSS_SDK (\"${LBP3_DLSS_SDK}\") isn't NVIDIA's DLSS SDK folder")
+    endif()
+    include(${CMAKE_CURRENT_LIST_DIR}/dlss_shaders.cmake)
+    target_sources(video_core PRIVATE src/gpu/dlss.cpp)
+    add_dependencies(video_core dlss_shaders)
+    target_include_directories(video_core PRIVATE ${DLSS_SHADER_INCLUDE} ${LBP3_DLSS_SDK}/include)
+    target_compile_definitions(video_core PUBLIC LBP3_DLSS=1)
+    # nvsdk_ngx_d: NGX for the DLL C runtime (/MD, the default here).
+    target_link_libraries(video_core PUBLIC ${LBP3_DLSS_SDK}/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib)
+endif()
