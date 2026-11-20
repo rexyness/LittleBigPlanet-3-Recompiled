@@ -60,6 +60,14 @@ v0.1.3 the game does its maths exactly online, so a PC with an AMD processor and
 stay in step; a player on an older version can't join (their game would drift apart from yours). Since v0.1.1
 a lost game message no longer ends the session. Friends on the same network connect over it directly.
 
+**Playing with friends on LBPPC's own client** (new, opt-in): switch on **Play with LBPPC players** on the
+launcher's **Online** page; it applies from the next start. Then friends who play on LBPPC can join your game and
+you theirs, from the same menus. While it's on, this game computes the way LBPPC's does, so friends on this port
+need it on too to play with you (and off to play with each other without it: a join between the two settings
+fails, so their worlds can't drift apart). Games with LBPPC players go through LBPPC's own connection, without this port's protection against lost
+messages, and through the server when your connections can't reach each other directly. With it on, the end of
+The Legend of Bunkum may need the pause menu's skip.
+
 If the game says *"A problem occurred when attempting to connect to the LittleBigPlanet servers (403)"*, the
 sign-in failed. Usually the password in that file is wrong; the launcher's **Online** page can test it. The
 other cause is an out-of-date version: play.lbppc.com is switching to the sign-in codes that came with v0.1.1 and

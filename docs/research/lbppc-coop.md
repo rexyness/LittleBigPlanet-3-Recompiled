@@ -77,13 +77,48 @@ merged with v0.1.8 `main`. Landing it lands that chain too.
 3. The mode's plumbing: `LBP3_LBPPC_COOP=1` → link dialect, FP state, HasLBP2; launcher switch. **Done.**
 4. A live mixed session on this PC (ours against the installed LBPPC, test accounts, muted, under
    the game lock): join, Pod, a level; the sync checks agree; then the tick gate with the mode off.
+   **Done; held** (2026-11-20, below).
 
 Acceptance: a mixed session holds with the sync checks agreeing. If matched FP state and HasLBP2
 still diverge, stop and report.
 
+### The live mixed session (2026-11-20, 16:40-16:57)
+
+Ours: this branch's build in test instance A as Kistopawa, `LBP3_LBPPC_COOP=1`, the sync probe on,
+muted. LBPPC 0.1.5: the installed client run from a separate data folder (`LBPPC_DATA_DIR`: its
+prepared game, a fresh profile, no sign-in file) as Kistopawa2 (`BB_SHADNET_*`, `LBPPC_SERVER`, as its
+launcher sets them for play.lbppc.com), UPnP off, its sync log on (`LBPPC_POS_LOG=1`), driven by its
+scripted pad file (`BB_PAD_FILE`), muted through its audio session. Both on this PC, so through the
+relay (LBPPC never offers a LAN address), RTT about 360 ms.
+
+1. **The link alone** (`LBP3_P2P_TEST_CONNECT`): our ActivationRequest (relayed after 4 s),
+   LBPPC's ActivationAck, Accept/Check/CheckAck both ways, Established; connected in 4.7 s. LBPPC's
+   game then sent game datagrams to ours. Nothing of LBPPC's was dropped as unreadable.
+2. **Ours joins LBPPC's game**: our Pod computer showed the LBPPC player "Playing in Pod" (presence
+   across clients); Join; LBPPC's host asked "Kistopawa wishes to join you", allowed; both players
+   state 11; about 150 game datagrams each way per 5 s. Both moved and jumped for 2 minutes:
+   **LBPPC's sync check: 237 comparisons, all the same, none different.** As the guest we can't use
+   the host's Pod computer (as on a PS4).
+3. **LBPPC joins ours**: LBPPC's Pod computer showed us "Playing in Pod"; its Join; our join check
+   (a friend), the handshake, connected in 0.7 s; our host allowed; the game state exchange 3.2 s.
+   Our host started the Introduction (the rig's route); both players in the level, the same picture on
+   both screens; both ran and jumped for a minute. **LBPPC's sync check: 204 comparisons, all the
+   same.** No "The game diverged", no kick, no DEAD on either side.
+
+Not covered yet: a real internet path (two PCs), a direct path, a third player, a long session, and
+LBPPC's tolerance of brief differences after level changes (none were seen, so ours has none).
+Logs and screenshots stay out of the repo (they hold this PC's public address).
+
+Found on the way: Windows keeps a per-app mute by the executable's path, so muting a test LBPPC mutes
+the player's own LBPPC too; the test tools unmute before stopping it.
+
 ## Costs and open questions
 
 - Mixed sessions get LBPPC's link: no gap-free delivery, a sticky relay, no silence timeout.
+- Without gap-free delivery, the port's clock fault on paths faster than a frame (#1, ticket 13) turns
+  any loss into the 10 s kick. LBPPC players rarely get such a path to us (no LAN address; relayed
+  even on one network), and the RTT floor (`LBP3_RTT_FLOOR_MS`, a test setting today, installed only
+  with the session log or `LBP3_CONN_PROBE`) is #1's chosen fix for ours and theirs alike: owed there.
 - Any LBPPC release can change its protocol or simulation: check each one.
 - LBPPC's accounts design (`docs/accounts/DESIGN.md`) ends name-and-password sign-in for old
   clients 3 months after its Phase 1; this port signs in that way. Independent of this mode, but it

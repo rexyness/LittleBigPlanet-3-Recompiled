@@ -731,6 +731,42 @@ struct Link::Impl {
         HandlePeerPacketNow(d, n, src, relayed, now);
     }
 
+    // LBPPC's protocol, diagnostics: each signaling packet sent and received (the first 120), and the
+    // first 30 of its frames we couldn't read, in hex (a misread layout shows there, not as an error).
+    int lbLogs = 0, lbDrops = 0;
+    static const char* LbKind(uint8_t type, uint8_t kind) {
+        if (type == lbppc::kHandshake) {
+            static const char* k[] = {"handshake?", "Offer", "Accept", "Check", "CheckAck"};
+            return kind <= 4 ? k[kind] : "handshake?";
+        }
+        if (type == lbppc::kControl) {
+            static const char* k[] = {"control?", "ActivationRequest", "ActivationAck", "Close", "Established"};
+            return kind <= 4 ? k[kind] : "control?";
+        }
+        return type == lbppc::kEchoPing ? "EchoPing" : type == lbppc::kEchoPong ? "EchoPong" : "?";
+    }
+    void LbLog(const char* dir, const char* what, const std::string& peer, const Endpoint& at, bool relayed) {
+        if (lbLogs >= 120) return;
+        if (++lbLogs == 120) std::fprintf(stderr, "[p2p-lb] (no more of these lines)\n");
+        std::fprintf(stderr, "[p2p-lb] %s %s %s %s %s%s\n", core::Stamp().text, dir, what, peer.c_str(), ToString(at).c_str(),
+                     relayed ? " (relayed)" : "");
+    }
+    void LbDrop(const char* why, const uint8_t* d, size_t n, const Endpoint& src, bool relayed) {
+        if (lbDrops >= 30) return;
+        ++lbDrops;
+        char hex[3 * 72 + 1] = {};
+        const size_t shown = std::min<size_t>(n, 72);
+        for (size_t i = 0; i < shown; ++i) std::snprintf(hex + 3 * i, 4, " %02x", d[i]);
+        std::fprintf(stderr, "[p2p-lb] %s dropped (%s): %zu bytes from %s%s:%s%s\n", core::Stamp().text, why, n,
+                     ToString(src).c_str(), relayed ? " (relayed)" : "", hex, n > shown ? " ..." : "");
+    }
+    // Lock held: an LBPPC signaling packet goes back the way the one it answers came, logged.
+    void LbReply(const Endpoint& src, bool relayed, const std::string& peer, uint8_t type, uint8_t kind,
+                 const std::vector<uint8_t>& b) {
+        LbLog("sent", LbKind(type, kind), peer, src, relayed);
+        Reply(src, relayed, b);
+    }
+
     // Lock held: the peer speaks LBPPC's protocol from now on (Config::lbppc).
     void LbBecome(Peer& p, const Endpoint& src) {
         if (!p.lb) {
@@ -746,16 +782,17 @@ struct Link::Impl {
     // The link's thread: a packet in LBPPC's frame (net/p2p_lbppc.h). Only with Config::lbppc.
     void HandleLbppc(const uint8_t* d, size_t n, const Endpoint& src, bool relayed, Clock::time_point now) {
         const lbppc::Parsed f = lbppc::Parse(d, n);
-        if (f.kind == lbppc::Parsed::None) return;
+        if (f.kind == lbppc::Parsed::None) {
+            LbDrop("not a plain P2P datagram", d, n, src, relayed);
+            return;
+        }
         std::lock_guard lk(m);
         ++stats.received;
         if (f.kind == lbppc::Parsed::Data) {
             // The game's datagram: the sender is whoever its packets come from.
             Peer* p = PeerFrom(src, relayed);
             if (!p || !p->lb || !Carries(*p)) {
-                if (++stats.dataUnknown <= 10)
-                    std::fprintf(stderr, "[p2p] an LBPPC game datagram from %s%s, from no connected LBPPC player: dropped\n",
-                                 ToString(src).c_str(), relayed ? " (relayed)" : "");
+                if (++stats.dataUnknown <= 10) LbDrop("a game datagram from no connected LBPPC player", d, n, src, relayed);
                 return;
             }
             Heard(*p, src, relayed, now, 0xFF, n);
@@ -768,6 +805,10 @@ struct Link::Impl {
             return;
         }
         const uint8_t type = lbppc::TypeOf(f.body, f.len);
+        if (!type) {
+            LbDrop("not a signaling packet we know", d, n, src, relayed);
+            return;
+        }
         if (type == lbppc::kEchoPing || type == lbppc::kEchoPong) {
             // Only for the round trip; they carry no online ID.
             Peer* p = PeerFrom(src, relayed);
@@ -785,6 +826,7 @@ struct Link::Impl {
         }
         if (type == lbppc::kControl) {
             const lbppc::Control c = lbppc::DecodeControl(f.body);
+            LbLog("got", LbKind(type, c.kind), c.from, src, relayed);
             if (c.to != cfg.self || c.from.empty() || c.from == cfg.self) return;
             auto it = peers.find(c.from);
             switch (c.kind) {
@@ -812,7 +854,7 @@ struct Link::Impl {
                 LbBecome(p, src);
                 p.remote = true;
                 Heard(p, src, relayed, now, 0xFF, n);
-                Reply(src, relayed, LbControl(p, lbppc::kActivationAck));
+                LbReply(src, relayed, p.name, lbppc::kControl, lbppc::kActivationAck, LbControl(p, lbppc::kActivationAck));
                 if (p.state == State::Active) SetActive(p);  // already up: the activation is mutual now
                 return;
             }
@@ -851,6 +893,7 @@ struct Link::Impl {
         }
         if (type == lbppc::kHandshake) {
             const lbppc::Handshake h = lbppc::DecodeHandshake(f.body);
+            LbLog("got", LbKind(type, h.kind), h.from, src, relayed);
             if (h.to != cfg.self || h.from.empty() || h.from == cfg.self) return;
             auto it = peers.find(h.from);
             if (it == peers.end() || it->second.state == State::Closing) return;  // as LBPPC: no connection, no answer
@@ -863,9 +906,9 @@ struct Link::Impl {
             }
             Heard(p, src, relayed, now, 0xFF, n);
             switch (h.kind) {
-            case lbppc::kOffer: Reply(src, relayed, LbHandshake(p, lbppc::kAccept)); break;
-            case lbppc::kAccept: Reply(src, relayed, LbHandshake(p, lbppc::kCheck, LbNowUs(now))); break;
-            case lbppc::kCheck: Reply(src, relayed, LbHandshake(p, lbppc::kCheckAck, h.nonce)); break;
+            case lbppc::kOffer: LbReply(src, relayed, p.name, lbppc::kHandshake, lbppc::kAccept, LbHandshake(p, lbppc::kAccept)); break;
+            case lbppc::kAccept: LbReply(src, relayed, p.name, lbppc::kHandshake, lbppc::kCheck, LbHandshake(p, lbppc::kCheck, LbNowUs(now))); break;
+            case lbppc::kCheck: LbReply(src, relayed, p.name, lbppc::kHandshake, lbppc::kCheckAck, LbHandshake(p, lbppc::kCheckAck, h.nonce)); break;
             case lbppc::kCheckAck:
                 // Our Check answered: connected.
                 if (LbNowUs(now) >= h.nonce) p.rttUs = static_cast<int>(std::min<uint64_t>(LbNowUs(now) - h.nonce, 10'000'000));
@@ -1304,6 +1347,9 @@ struct Link::Impl {
                                             now - p.lbLastActivation >= std::chrono::seconds(2))) {
                                 p.lbLastActivation = now;
                                 out.push_back(LbControl(p, lbppc::kActivationRequest, lbppc::kOurMarker));
+                                if (!p.candidates.empty() || p.relayTo.Valid())  // nowhere to send yet: the server's answer is pending
+                                    LbLog("sent", "ActivationRequest", p.name, p.candidates.empty() ? p.relayTo : p.candidates.front(),
+                                          relayToo || (p.lb && p.lbRelay));
                             }
                             out.push_back(LbHandshake(p, lbppc::kOffer));
                         }
