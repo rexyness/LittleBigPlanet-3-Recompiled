@@ -138,6 +138,58 @@ void PauseMenuQuit() {
     CHECK(!quit && armed == 8000);
 }
 
+// Saving before closing: one poll's decision (hle/quit.h).
+void QuitSavesFirst() {
+    using namespace hle::quit;
+    SaveState start;
+    start.known = true;
+    start.profiles = 2;
+    start.dirty = 1;  // a sticker on the Pod: "Pod changed", nothing asked yet
+    start.frame = 100;
+    // Not this game version's data: close as before, without touching it.
+    SaveState unknown;
+    CHECK(DecideSave(unknown, unknown, 0, 0) == SaveStep::Unknown);
+    CHECK(DecideSave(start, unknown, 0, 0) == SaveStep::Unknown);
+    // Nothing unsaved, pending or queued: close at once.
+    SaveState clean = start;
+    clean.dirty = 0;
+    CHECK(DecideSave(clean, clean, 0, 0) == SaveStep::NothingToSave);
+    // Unsaved: ask for the save, then wait while it's requested, being written or still mounted.
+    CHECK(DecideSave(start, start, 0, 0) == SaveStep::Request);
+    SaveState now = start;
+    now.pending = 1;
+    CHECK(DecideSave(start, now, 100, 0) == SaveStep::Wait);
+    now.dirty = 0;
+    now.pending = 0;
+    now.queued = 1;
+    CHECK(DecideSave(start, now, 200, 0) == SaveStep::Wait);
+    now.queued = 0;
+    now.mounted = true;
+    CHECK(DecideSave(start, now, 300, 0) == SaveStep::Wait);
+    // Clean, nothing queued or mounted, and the game has run at least two frames since: saved.
+    now.mounted = false;
+    now.frame = 101;
+    CHECK(DecideSave(start, now, 400, 0) == SaveStep::Wait);
+    now.frame = 102;
+    CHECK(DecideSave(start, now, 400, 0) == SaveStep::Saved);
+    // The request was dropped (the game rewrote the byte) or deferred: ask again.
+    SaveState dropped = start;
+    dropped.frame = 110;
+    CHECK(DecideSave(start, dropped, 500, 0) == SaveStep::Request);
+    // A save already under way when the quit was asked for: wait for it, it isn't "nothing".
+    SaveState busy = clean;
+    busy.pending = 1;
+    CHECK(DecideSave(busy, busy, 0, 0) == SaveStep::Wait);
+    SaveState done = clean;
+    done.frame = 102;
+    CHECK(DecideSave(busy, done, 600, 0) == SaveStep::Saved);
+    // Never forever: 20 s, or no new frame for 3 s (the attract video), closes anyway.
+    CHECK(DecideSave(start, now = start, kSaveTimeoutMs, 0) == SaveStep::TimedOut);
+    now.pending = 1;
+    CHECK(DecideSave(start, now, 1000, kStallMs) == SaveStep::Stalled);
+    CHECK(DecideSave(start, now, 1000, kStallMs - 1) == SaveStep::Wait);
+}
+
 void Menu() {
     using namespace ui::menu;
     Model m;
@@ -226,6 +278,7 @@ void Languages() {
 int main() {
     FileEdits();
     PauseMenuQuit();
+    QuitSavesFirst();
     Menu();
     Languages();
     std::printf("uxtest: %d checks, %d failed\n", g_checks, g_failed);
