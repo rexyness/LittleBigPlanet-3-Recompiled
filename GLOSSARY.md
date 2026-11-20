@@ -47,6 +47,40 @@ _Avoid_: system module, PRX (alone)
 **Imported library**:
 A PS4 system library the eboot or a game-shipped module links against and expects the runtime to provide.
 
+## The picture
+
+**Render size**:
+The width and height the game draws its frame at. Without an upscaler it is the same as the output size.
+_Avoid_: internal resolution, resolution (alone), res
+
+**Output size**:
+The width and height of the picture the port hands to the window, picked by the launcher's Resolution setting. The window may still letterbox or stretch it.
+_Avoid_: display resolution, window size, resolution (alone)
+
+**Upscaler**:
+The step that turns the game's frame at the render size into the picture at the output size, which is the same size or bigger. DLSS is the one the port has.
+_Avoid_: scaler, upsampler, super resolution
+
+**Upscaler mode**:
+How much smaller the render size is than the output size: DLAA (the same size), Quality, Balanced, Performance or Ultra Performance (a third of each side).
+_Avoid_: preset (NVIDIA's word for its model versions), quality level
+
+**Screen HUD**:
+What the game draws over its finished picture: gauges, button prompts such as "Close Popit", subtitles.
+_Avoid_: UI (alone), overlay (that is the port's own on-screen keyboard and dialogs)
+
+**In-world UI**:
+The game's interface drawn into the 3D scene before the picture is finished: the popit, the cursor, labels and speech bubbles.
+_Avoid_: HUD
+
+**HUD-less image**:
+The game's finished picture just before the screen HUD is drawn: the 3D scene with its in-world UI, colour-graded.
+_Avoid_: clean frame
+
+**DLSS build**:
+A build of the port made with NVIDIA's DLSS switched on. It is never published; public releases are built without it.
+_Avoid_: DLSS release, DLSS version
+
 ## The on-screen keyboard
 
 **On-screen keyboard**:
