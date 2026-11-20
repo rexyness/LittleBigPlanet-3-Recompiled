@@ -88,3 +88,44 @@ The design is settled in issue #24, `GLOSSARY.md` ("The picture") and ADRs 0002 
 - **Open:**
   - **16-bit vectors:** not done. The 8-bit decode reprojects correctly, and what the extra precision would add is unmeasured.
   - **Mip bias:** NVIDIA's guide 3.5: `log2(render width / output width) − 1`, so −1 at DLAA. It comes with the render size in stage 3.
+
+## Stage 3: modes, the start-up check, the launcher (2026-11-21)
+
+- **Modes** (`runtime/src/gpu/dlss_modes.h`, shared with the launcher, no NVIDIA code):
+  - heights in multiples of 8 and widths in multiples of 16 (`capture_pitch.md`), the output's aspect at most 0.9% wider so `Wide()` stays false at 16:9, never under 1280x720;
+  - the render sizes:
+
+    | Output | Quality | Balanced | Performance | Ultra Performance |
+    |---|---|---|---|---|
+    | 2560x1440 | 1712x960 | 1472x824 | 1280x720 | – |
+    | 3840x2160 | 2560x1440 | 2224x1248 | 1920x1080 | 1280x720 |
+    | 1920x1080 | 1280x720 | – | – | – |
+    | 3440x1440 | 2256x944 | | | |
+
+  - NVIDIA's own Quality size for 2560x1440 is 1707x960, allowed 1280x720 to 2560x1440 [measured, NGX's optimal settings], so 1712x960 is inside the range.
+- **Start-up:** `dlss::Prepare()` at the top of `main()`, before anything reads `LBP3_RES`.
+  - With `LBP3_UPSCALER=dlss`, it runs a child `lbp3.exe --dlss-probe`, which checks for NVIDIA's DLL next to the exe and runs NGX's `GetFeatureRequirements` on the GPU shadPS4 picks. It's a child process because, done in-process, the Vulkan loader, the driver and NGX took the thread-local-storage slots the runtime needs ("no inline TEB TLS slot available", the first try).
+  - Then `LBP3_RES` becomes the mode's render size, and the output size is kept.
+  - The capture slot used to be sized at static initialisation, before `Prepare`. It is now sized on first use and fits the output.
+- **Fallback** [measured]: without NVIDIA's DLL, the log says `[dlss] no upscaler this run: NVIDIA's DLSS DLL (nvngx_dlss.dll) isn't next to lbp3.exe. The game renders at 2560x1440.`, the display buffers are 2560x1440, and NGX doesn't start. `--dlss-probe` answers 0 (`available on NVIDIA GeForce RTX 3090`), 1 (the reason) or 2 (`not a DLSS build`, a release build).
+- **Per mode:** jitter phases 8 × ratio², at least 16 (Quality 18, Balanced 24, Performance 32, Ultra Performance 72), and mip bias `log2(render / output) − 1` (DLAA −1, Quality −1.58, Performance −2) on the scene's pixel-shader samplers, through shadPS4's `g_lbp3SamplerBias` (`7b17e96d`). `LBP3_DLSS_MIPBIAS` overrides it.
+- **Cost** [measured, the route, frame work]:
+
+  | 2560x1440 output | Render | Walk | Basket |
+  |---|---|---|---|
+  | Native, SMAA | 2560x1440 | 21.84 ms | 19.80 ms |
+  | DLAA (stage 1, no jitter) | 2560x1440 | 25.48 ms | 22.77 ms |
+  | Quality | 1712x960 | 23.20 ms | 20.57 ms |
+  | Performance | 1280x720 | 22.85 ms | 20.43 ms |
+
+  All hold 30 fps with 0 GPU warnings.
+- **Picture** [looked at, `analysis\dlss_stills\dlss_p2_*`]:
+  - In Performance (1280x720 → 2560x1440), DLSS is far sharper than the 720p picture stretched with bilinear filtering: the basket weave, the herringbone fabric and the bottle's edge, which is a staircase in the stretch.
+  - The popit's label (in-world UI, through DLSS) reads cleanly.
+  - The screen HUD ("Close Popit") is visibly soft: it is drawn at 720p and stretched, as ADR 0003 expected. At Quality the stretch is 960 to 1440 lines.
+- **Launcher:**
+  - Graphics & sound has Upscaler (Off / NVIDIA DLSS) and Mode. They are shown only for a DLSS build's `lbp3.exe`: its `DLSS_BUILD_NOT_FOR_RELEASE` marker first, then its own `--dlss-probe` answer, asked in the background.
+  - Modes under 1280x720 are greyed with the reason, and the help line gives the render size.
+  - About says "This build uses NVIDIA DLSS."
+  - `launcher.ini` gains `upscaler` and `upscaler_mode`. `launchertest` 451 checks (+17), 0 failed, in both builds.
+- **Not yet:** frame generation (stage 4); the Mode row seen live (the `--shot` pictures come before the probe answers); mip bias compared on against off.
