@@ -174,7 +174,7 @@ The release zip is built from bestofboth `b37790b`. The test report, with screen
   - 3440x1440: 91 sites patched (wide view), loading screen, first picture after 1.0 s.
   - Both reach the Pod with a fresh profile; 0 crash lines, 0 GPU warnings.
 
-## v0.1.8-lbp3port (prepared 2026-11-20, NOT published)
+## v0.1.8-lbp3port (published 2026-11-20, ~08:10)
 
 **Decision, 2026-11-20 ~06:15: v0.1.8 includes Batch 2.** Shown the pacing data below (the worst run is about 12 one-frame hitches in 51 s, mostly within one second; cause unproven), the user said "include batch 2, package it". The release branch is **`release/v0.1.8-batch2`**: main `9a4d760` + `feat/seth-batch2` (merge `de9dc0c`, shadPS4 `b0242a25`) + the pad fix `99e2ff3` + the release notes and credits, with a known issue for the occasional judder. The package and its tests are at the end of this section. Everything below down to it describes the keyboard-only candidate, `release/v0.1.8` (shadPS4 `37508fd9`). That one is kept as the fallback: its zip is moved to `D:\Recomps\lbp3-dist\v018-keyboard-only\` (sha256 `c93f9643…`, tested as described).
 
@@ -205,3 +205,8 @@ The release zip is built from bestofboth `b37790b`. The test report, with screen
   - **Clean-folder test: PASS** (`test-v018b2\report`, `test-v018b2_run.txt`): 1440p, 80 sites, first picture after 0.8 s; 3440x1440, 91 sites, after 1.1 s; 0 crash lines, 0 GPU warnings, alive in both.
   - **Word suggestions in the game on the packaged exe: PASS** (`test-v018b2_words.txt`, shots `m2_pkg018b2words_*`). The word list loaded from `…\test-v018b2\unz\data\osk\words_en.txt` (30 ms); R3 picked "help"; the bar pick gave "hello"; both were learned once; the keyboard moved (x=1.0). The user's own learned words and keyboard place were put back, md5-checked.
   - **To publish:** tag `v0.1.8-lbp3port` at `e7e4176` on the runtime fork and at `b0242a25` on the shadPS4 fork; fast-forward main to `release/v0.1.8-batch2`. Players' shader caches rebuild once (version 8).
+- **Published** at the user's "go ahead": https://github.com/rexyness/LittleBigPlanet-3-Recompiled/releases/tag/v0.1.8-lbp3port, "LittleBigPlanet 3 Recompiled v0.1.8 (word suggestions on the on-screen keyboard; fixes from sethlikepie's port)".
+  - Tags `v0.1.8-lbp3port`: runtime `e7e4176`, shadPS4 `b0242a25`, both lightweight like v0.1.4's.
+  - Notes from `tools/package/RELEASE-NOTES.md` (unchanged since `e7e4176`). Assets: the zip (8,095,385 bytes) and its `.sha256`.
+  - Checked: not a draft or prerelease; `releases/latest` names it; the downloaded asset's sha256 is `aa5caf99…`, the tested zip's.
+  - **Main not yet fast-forwarded:** this background job doesn't push main. The user runs `git merge --ff-only fork/release/v0.1.8-batch2` and `git push fork main` in the clone; main `9a4d760` is an ancestor.
