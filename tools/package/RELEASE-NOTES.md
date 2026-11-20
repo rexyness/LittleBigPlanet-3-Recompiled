@@ -1,9 +1,38 @@
-**v0.1.7: the game's lighting reaches the picture again, so scenes are no longer washed out.**
-If you have v0.1.4, v0.1.5 or v0.1.6, the launcher shows "v0.1.7 is out" when it opens: press **Update**. From
-v0.1.1 to v0.1.3, go to **Tools > Check for updates**. It installs v0.1.7 and keeps your saves, settings and
+**v0.1.8: word suggestions on the on-screen keyboard, and fixes from sethlikepie's LittleBigPlanet 3 port.**
+If you have v0.1.4 to v0.1.7, the launcher shows "v0.1.8 is out" when it opens: press **Update**. From
+v0.1.1 to v0.1.3, go to **Tools > Check for updates**. It installs v0.1.8 and keeps your saves, settings and
 accounts. New here? Read on. **No game files are included:** you need your own copy of the game.
 
-### What's in it (new in v0.1.7)
+### What's in it (new in v0.1.8)
+- **Word suggestions on the on-screen keyboard.** A bar above the keys suggests words as you type (as many as fit,
+  up to six). **R3** or **Tab** picks the first; press **up** from the top row to choose another, or click one. A
+  pick adds the space for you. The keyboard learns the words you confirm (not passwords; cancelled text teaches
+  nothing), kept in `user\config\learned_words.txt`. The word list is 30,000 common English words from film and
+  TV subtitles, plus LittleBigPlanet's own names; it isn't filtered, so it includes swear words. The launcher's
+  **Controls > On-screen keyboard > Word suggestions** turns suggestions and learning off.
+- **Move the on-screen keyboard** with the right stick, or drag its title row with the mouse. It stays where you
+  leave it, also next time.
+- **Your shader cache is rebuilt once.** A few of the PS4's graphics instructions are now translated exactly
+  (reciprocal square roots clamp instead of reaching infinity, single-lane register writes, and one form of
+  branch masking, which ran code for pixels that should have skipped it). Old shaders don't match any more, so expect the first-visit
+  pauses again for a while after updating (or new things appearing a moment late, with background builds on).
+- **Fewer graphics stalls.** When the game writes to memory the graphics core is watching, the 256 KB around it
+  is released at once instead of page by page: 86% fewer of those interruptions, and the graphics thread waits
+  half as long. On a fast PC the frame rate doesn't change; it's headroom for slower ones.
+- **Photos and level icons wait for their shaders** when new shaders are built in the background (online, by
+  default): while a picture is being taken, every draw waits for its shader instead of being left out, so the
+  picture isn't taken with something missing.
+- **Play backs up your saves first** when they changed since the last automatic backup (`auto_...` in the save
+  backups). The newest 10 automatic backups are kept; your own and the before-restore ones are never deleted.
+- **More graphics memory above 1440p** for the game (2,658 MB at 4K instead of 1,698), as a safety margin.
+- **Frame generation notices more camera cuts,** by how far the camera moves or turns, so it doesn't blend two
+  different shots.
+- **Windows 11:** the game keeps its 1 ms timer while it's minimised (Windows 11 lowers it for hidden windows).
+- **Three graphics fixes for LittleBigPlanet 3 by sgdc3** (textures with more mip levels or layers, pipeline state
+  left over from an earlier shader, colour clears of some packed formats).
+- Nothing in online play changed: v0.1.3 to v0.1.8 players can play together.
+
+### New in v0.1.7
 - **Lighting fixed.** The game draws part of its lighting into 16 small pictures and then reads them back as one
   tall one. On a PS4 that's the same memory; in this port the tall one never saw what had been drawn, so the
   lighting it carries was lost. Scenes looked washed out and bright things clipped to white (Newton's head, bottles
@@ -82,7 +111,7 @@ accounts. New here? Read on. **No game files are included:** you need your own c
 - Optional: your own DLC `.pkg` files and a PS4 pkg extractor.
 
 ### Getting started
-1. Download `LBP3-Recompiled-v0.1.7-lbp3port.zip` and unzip it somewhere you can write to (not Program Files).
+1. Download `LBP3-Recompiled-v0.1.8-lbp3port.zip` and unzip it somewhere you can write to (not Program Files).
 2. Run `LBP3Launcher.exe`. The setup asks for the folder that contains `CUSA00473` (pick it, or type or paste its
    path) and checks it.
 3. Press **PLAY**.
@@ -130,6 +159,8 @@ Built on PurpleGitty's LittleBigPlanet 3 Recompiled and the shadPS4 graphics cor
 LBPPC by emurphy04 (credited in the code), including the shadNet sign-in code request from LBPPC 0.1.3, the
 game addresses behind the ultrawide view, the exact maths for online play, the background shader builds, and from
 LBPPC 0.1.4 the Intel intro fix, the Radeon start-up fixes and the lighting fix. Their team also runs play.lbppc.com and allowed this port to use it.
+v0.1.8's graphics, timer, memory, backup and frame-generation changes come from sethlikepie's LittleBigPlanet 3 PC
+port (github.com/sethlikepie/littlebigplanet3-pc), including sgdc3's shadPS4 fixes for LittleBigPlanet 3.
 Full credits are in `CREDITS.md`.
 
 This is free software under the GNU GPL. The source is this repository at the tagged commit, with its shadPS4

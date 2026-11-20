@@ -16,6 +16,13 @@
   (camera aspect, 2D canvas and layout centres, the online camera split), the exact maths for online play
   (its stubs and list of the game's 3,373 sites), the background shader builds, and the community-download check. The LBPPC team also runs the
   play.lbppc.com servers and allowed this port to use them.
+- **sethlikepie's LittleBigPlanet 3 PC port** by sethlikepie and Emre_exe
+  (github.com/sethlikepie/littlebigplanet3-pc, GPL-2.0-or-later), and **sgdc3**'s shadPS4 fixes for
+  LittleBigPlanet 3 that it carries. From them, with credit in each commit: the graphics core's write-fault
+  window, the exact translation of the clamped reciprocal square root, single-lane register writes and the exec
+  scope after `s_and_b64`, the texture cache's mip-and-layer check, the pipeline-state reset, the colour-clear
+  swizzle, the background-build wait for draws during a capture, the camera-move rule for frame generation's
+  cuts, the larger graphics memory pool above 1440p, the Windows 11 timer resolution, and the backup on Play.
 - **Refresh** (LittleBigRefresh) and **shadNet** (shadps4-emu): the community game server and PSN stand-in
   that online play connects to.
 - **The on-screen keyboard's word suggestions** use a word list adapted from **FrequencyWords** by Hermit Dave
