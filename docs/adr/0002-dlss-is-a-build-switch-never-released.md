@@ -15,4 +15,4 @@ So DLSS sits behind a build switch that is off by default. NVIDIA's SDK (its hea
 
 Public players get no upscaler from this work, and the launcher shows no Upscaler setting in a public build.
 
-The licence's marketing terms apply to every application that incorporates the SDK, published or not: §7.1(b) asks for "the NVIDIA Marks on splash screens, in the about box of the application (if present), and in credits for game applications", and §7.2(c) requires NVIDIA's written approval of each use, a sample submitted two weeks ahead.
+The licence's marketing terms apply to every application that incorporates the SDK, published or not: §7.1(b) asks for "the NVIDIA Marks on splash screens, in the about box of the application (if present), and in credits for game applications", and §7.2(c) requires NVIDIA's written approval of each use, a sample submitted two weeks ahead. A DLSS build shows a plain attribution line ("This build uses NVIDIA DLSS") in the launcher's About and credits, with no NVIDIA logos and nothing submitted to NVIDIA. That is knowingly short of a strict reading of §7, accepted because the build is never published (decided 2026-11-21).
