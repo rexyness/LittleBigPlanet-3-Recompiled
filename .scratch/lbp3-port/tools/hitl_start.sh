@@ -24,7 +24,7 @@ for w in $(ps -ef | grep 'watch_freeze\.sh' | grep -v grep | awk '{print $2}'); 
 taskkill //f //im lbp3.exe >/dev/null 2>&1; sleep 1; rm -f analysis/input_cmd.txt
 mkdir -p analysis/savedata_backups && cp -r user/savedata/CUSA00473 "analysis/savedata_backups/before_${tag}_$(date +%H%M)"
 echo "preset $preset: $vars $*"
-powershell -NoProfile -Command "Set-Location D:\\Recomps\\lbp3-recompiled; & .\\tools\\remote_start.ps1 LBP3_GPU_CHECKPOINTS=1 $vars $*" || exit 1
+powershell -NoProfile -Command "Set-Location D:\\Recomps\\lbp3-recompiled; & .\\tools\\remote_start.ps1 LBP3_GPU_CHECKPOINTS=1 LBP3_REAL_PADS=1 $vars $*" || exit 1
 # Rolling screenshots every 4 s until the game exits (runs detached).
 powershell -NoProfile -ExecutionPolicy Bypass -File "$S/rolling_capture.ps1" -Tag "$tag" >/dev/null 2>&1 &
 # The branch check above can't see a stale binary; the checkpoints line only comes from the diag build.

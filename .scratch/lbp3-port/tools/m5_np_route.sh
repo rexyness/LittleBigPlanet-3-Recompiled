@@ -25,7 +25,7 @@ launch_exe() {  # as tools/remote_start.ps1, with any lbp3.exe (paths in mixed f
   taskkill //f //im lbp3.exe >/dev/null 2>&1; sleep 1; rm -f analysis/input_cmd.txt
   exe_m=$(cygpath -m "$(realpath "$EXE")"); root_m=$(cygpath -m "$PWD")
   disp=$(head -n 1 analysis/test_display.txt 2>/dev/null | tr -d '\r ')
-  env LBP3_REMOTE_INPUT=1 LBP3_OSK_PLAIN="${LBP3_OSK_PLAIN:-1}" LBP3_DISPLAY="${LBP3_DISPLAY:-$disp}" "$@" powershell -NoProfile -Command \
+  env LBP3_REMOTE_INPUT=1 LBP3_OSK_PLAIN="${LBP3_OSK_PLAIN:-1}" SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT="${SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT:-0x0000/0x0000}" LBP3_DISPLAY="${LBP3_DISPLAY:-$disp}" "$@" powershell -NoProfile -Command \
     "Start-Process -FilePath '$exe_m' -ArgumentList '--run','--skip-intro' -WorkingDirectory '$root_m' -RedirectStandardOutput '$root_m/analysis/remote_stdout.txt' -RedirectStandardError '$root_m/analysis/remote_stderr.txt'" >/dev/null
 }
 launch_exe "$@"; sleep 30
