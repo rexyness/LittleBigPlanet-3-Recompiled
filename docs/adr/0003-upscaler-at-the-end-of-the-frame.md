@@ -13,3 +13,7 @@ So the upscaler takes the HUD-less image (the display buffer right after the fin
 - The upscaler sees motion blur, depth of field and colour grading already applied.
 - The screen HUD is drawn at the render size and stretched, so its text is softer in the smaller upscaler modes.
 - The in-world UI (the popit, the cursor, labels) goes through the upscaler without motion vectors of its own; a fix is added only if it visibly smears.
+- The jitter and the skipped SMAA change the game's frame for everything that reads it, not only the upscaler:
+  - the screen HUD is put back from the stretched final frame, so translucent HUD parts carry the jittered, un-antialiased scene behind them;
+  - the game's own read-backs of its frame (the pause menu's fade, the Pod computer, photos and level icons) see that same scene.
+
