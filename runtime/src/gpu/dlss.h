@@ -9,6 +9,7 @@
 // finished frame, and hands that picture to the readback instead of the display buffer.
 
 #include <cstdint>
+#include <string>
 
 namespace gpu::dlss {
 
@@ -29,12 +30,16 @@ void SetDisplayBuffer(int index, uint64_t address);
 // At the flip, in the frame's command buffer, after the display image has been made a transfer
 // source: records DLSS and the HUD's put-back. displayImage is the texture cache's Image.
 Output Process(void* cmd, void* displayImage);
+// The remote command "dlss <key> <value>" (tests): jitter ++|+-|-+|--|on|off, mv
+// normal|zero|flipx|flipy|flipxy, smaa skip|keep. Applied at the next flip, with a history reset.
+void Remote(const std::string& key, const std::string& value);
 #else
 inline void RegisterVulkanExtensions() {}
 inline bool Start() { return false; }
 inline bool Active() { return false; }
 inline void SetDisplayBuffer(int, uint64_t) {}
 inline Output Process(void*, void*) { return {}; }
+inline void Remote(const std::string&, const std::string&) {}
 #endif
 
 }  // namespace gpu::dlss

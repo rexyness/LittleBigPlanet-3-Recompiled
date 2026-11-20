@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <span>
 #include <string>
 #include <vector>
@@ -58,6 +59,27 @@ constexpr float kHudT = 8.0f;  // as frame generation's HUD put-back
 
 bool g_wanted = false;  // LBP3_UPSCALER=dlss
 bool g_ready = false;   // NGX started and DLSS available
+
+// Settings (environment, read with LBP3_UPSCALER). Each piece has its own switch so it can be
+// judged on its own.
+float g_mvSignX = 1.0f, g_mvSignY = 1.0f;     // LBP3_DLSS_MV: normal | zero | flipx | flipy | flipxy
+bool g_jitterOn = true;                        // LBP3_DLSS_JITTER: on | off
+float g_jitterSignX = 1.0f, g_jitterSignY = 1.0f;  // LBP3_DLSS_JITTER_SIGN: ++ | +- | -+ | -- (what DLSS is told)
+bool g_skipSmaa = true;                        // LBP3_DLSS_SMAA: skip | keep
+bool g_trace = false;                          // LBP3_DLSS_TRACE=1
+// The game's SMAA writes its result back into the scene buffer with one full-screen draw (PS
+// 6d4d5238, perf/fps60_render_re.md #375-380; "copy back" 6d4d5238b13eadc4 in the blA traces).
+// Leaving out that draw keeps the scene un-antialiased for DLSS; the passes before it only fill
+// SMAA's own targets.
+constexpr u64 kSmaaCopyBackPs = 0x6d4d5238b13eadc4ull;
+
+// Jitter: one Halton(2,3) offset per rendered frame, in render pixels within [-0.5, 0.5]
+// (NVIDIA's guide 3.7). The frame being drawn uses g_jx/g_jy; the flip evaluates DLSS with the
+// offset its frame was drawn with and moves to the next phase.
+uint32_t g_phase = 0, g_phases = 16;
+float g_jx = 0.0f, g_jy = 0.0f;
+bool g_frameJittered = false;   // the frame being drawn is jittered (set by the first jittered draw)
+bool g_prevUpscaled = false;    // the last flip was upscaled: jitter and the SMAA skip may run
 std::wstring g_dataPath;
 std::wstring g_exeDir;
 const wchar_t* g_paths[1] = {nullptr};
@@ -342,6 +364,7 @@ void Run(vk::CommandBuffer cmd, const Pass& p, std::initializer_list<std::pair<c
 
 struct Frame {
     bool composite = false, hud = false, vel = false, depth = false;
+    uint32_t draws = 0, displayDraws = 0, jittered = 0, skipped = 0;
 } g_frame;
 std::map<uint64_t, uint32_t> g_zCount;  // depth address -> depth-tested draws this frame
 uint64_t g_velAddr = 0;
@@ -351,7 +374,26 @@ void (*g_prevOnFill)(u64, u64, u32, u32, bool) = nullptr;
 
 struct Stats {
     uint32_t flips = 0, upscaled = 0, noHud = 0, noVel = 0, noDepth = 0, failed = 0;
+    uint32_t jitteredFrames = 0, smaaSkipped = 0;
+    std::map<uint64_t, uint64_t> jitterTargets;  // rt0 -> jittered draws (LBP3_DLSS_TRACE)
 } g_stats;
+uint64_t g_flipCount = 0;
+
+float Halton(uint32_t i, uint32_t base) {
+    float f = 1.0f, r = 0.0f;
+    while (i > 0) {
+        f /= float(base);
+        r += f * float(i % base);
+        i /= base;
+    }
+    return r;
+}
+
+void NextJitter() {
+    g_phase = (g_phase + 1) % g_phases;
+    g_jx = Halton(g_phase + 1, 2) - 0.5f;
+    g_jy = Halton(g_phase + 1, 3) - 0.5f;
+}
 
 bool IsDisplay(uint64_t addr) {
     if (!addr) return false;
@@ -467,6 +509,8 @@ void AfterDraw(u64 vs, u64 ps, u32 n) {
     if (rt0 && rt0 != g_velAddr && db.DepthValid() && regs.depth_control.depth_enable && db.Pitch() >= rs.w &&
         db.Height() >= rs.h)
         ++g_zCount[db.DepthAddress()];
+    ++g_frame.draws;
+    if (IsDisplay(rt0)) ++g_frame.displayDraws;
     if (g_frame.composite || ps == 0 || !IsDisplay(rt0)) return;
     // The final composite: the first draw with a pixel shader into a display buffer. The screen
     // HUD comes after it, so the display image now is the HUD-less image.
@@ -485,12 +529,41 @@ void OnFill(u64 dst, u64 bytes, u32 value, u32 mask, bool full) {
     if (VideoCore::Image* depth = FindTarget(BestDepth(), true)) g_frame.depth = CaptureDepth(*depth);
 }
 
+// The 3D scene's draws get the frame's sub-pixel offset: depth-tested, more than 12 indices (not a
+// full-screen pass), a viewport the size of the render, and not into a display buffer. Only while
+// the last flip was upscaled, so a frame DLSS doesn't take is never jittered twice in a row.
+bool Jitter(float w, float h, float* dx, float* dy) {
+    if (!g_jitterOn || !g_prevUpscaled) return false;
+    const auto& regs = internal::GetLiverpool()->regs;
+    if (!regs.depth_control.depth_enable || regs.num_indices <= 12) return false;
+    const Lbp3Res::Size rs = Lbp3Res::Current();
+    if (std::abs(std::abs(w) - float(rs.w)) > 0.5f || std::abs(std::abs(h) - float(rs.h)) > 0.5f) return false;
+    const auto& cb0 = regs.color_buffers[0];
+    const uint64_t rt0 = cb0 ? cb0.Address() : 0;
+    if (IsDisplay(rt0)) return false;
+    *dx = g_jx;
+    *dy = g_jy;
+    g_frameJittered = true;
+    ++g_frame.jittered;
+    if (g_trace) ++g_stats.jitterTargets[rt0];
+    return true;
+}
+
+bool Skip(u64 vs, u64 ps, u32 n) {
+    (void)vs;
+    if (!g_skipSmaa || !g_prevUpscaled || ps != kSmaaCopyBackPs || n > 6) return false;
+    ++g_frame.skipped;
+    return true;
+}
+
 void Hook() {
     // Chained after whatever holds the hooks already (frame generation, the capture tool).
     g_prevAfterDraw = Vulkan::g_lbp3FgAfterDraw;
     g_prevOnFill = Vulkan::g_lbp3FgOnFill;
     Vulkan::g_lbp3FgAfterDraw = AfterDraw;
     Vulkan::g_lbp3FgOnFill = OnFill;
+    Vulkan::g_lbp3ViewportJitter = Jitter;
+    Vulkan::g_lbp3SkipDraw = Skip;
     g_hooked = true;
 }
 
@@ -498,10 +571,75 @@ void Log() {
     if (++g_stats.flips < 300) return;
     std::fprintf(stderr,
                  "[dlss] DLAA %ux%u: %u of %u flips upscaled; not: %u without the HUD-less image, %u without "
-                 "vectors, %u without depth, %u failed\n",
+                 "vectors, %u without depth, %u failed; %u frames jittered, SMAA left out in %u\n",
                  g_featOutW, g_featOutH, g_stats.upscaled, g_stats.flips, g_stats.noHud, g_stats.noVel,
-                 g_stats.noDepth, g_stats.failed);
+                 g_stats.noDepth, g_stats.failed, g_stats.jitteredFrames, g_stats.smaaSkipped);
+    if (g_trace && !g_stats.jitterTargets.empty()) {
+        std::string list;
+        for (const auto& [rt0, n] : g_stats.jitterTargets) {
+            char buf[48];
+            std::snprintf(buf, sizeof(buf), " %llx:%.1f", static_cast<unsigned long long>(rt0),
+                          double(n) / std::max<uint32_t>(1, g_stats.jitteredFrames));
+            list += buf;
+        }
+        std::fprintf(stderr, "[dlss] jittered draws per jittered frame, by colour target:%s\n", list.c_str());
+    }
     g_stats = Stats{};
+}
+
+const char* MvName() {
+    if (g_mvSignX == 0.0f) return "zero";
+    if (g_mvSignX < 0.0f) return g_mvSignY < 0.0f ? "flipxy" : "flipx";
+    return g_mvSignY < 0.0f ? "flipy" : "normal";
+}
+
+void LogSettings(const char* why) {
+    std::fprintf(stderr, "[dlss] %s: vectors %s, jitter %s (%u phases, DLSS told %c%c), SMAA %s while upscaling%s\n", why,
+                 MvName(), g_jitterOn ? "on" : "off", g_phases, g_jitterSignX > 0 ? '+' : '-',
+                 g_jitterSignY > 0 ? '+' : '-', g_skipSmaa ? "left out" : "kept", g_trace ? ", tracing" : "");
+}
+
+// One setting (the environment's or the remote command's). False = unknown.
+bool Apply(const std::string& key, const std::string& v) {
+    if (key == "mv") {
+        g_mvSignX = g_mvSignY = 1.0f;
+        if (v == "zero") g_mvSignX = g_mvSignY = 0.0f;
+        else if (v == "flipx") g_mvSignX = -1.0f;
+        else if (v == "flipy") g_mvSignY = -1.0f;
+        else if (v == "flipxy") g_mvSignX = g_mvSignY = -1.0f;
+        else if (v != "normal" && !v.empty()) return false;
+    } else if (key == "jitter") {
+        if (v == "off") g_jitterOn = false;
+        else if (v == "on" || v.empty()) g_jitterOn = true;
+        else if (v.size() == 2 && (v[0] == '+' || v[0] == '-') && (v[1] == '+' || v[1] == '-')) {
+            g_jitterOn = true;
+            g_jitterSignX = v[0] == '-' ? -1.0f : 1.0f;
+            g_jitterSignY = v[1] == '-' ? -1.0f : 1.0f;
+        } else return false;
+    } else if (key == "smaa") {
+        if (v != "skip" && v != "keep") return false;
+        g_skipSmaa = v == "skip";
+    } else return false;
+    return true;
+}
+
+std::mutex g_remoteMutex;
+std::vector<std::pair<std::string, std::string>> g_remote;  // queued by the input thread, applied at a flip
+
+void ReadSettings() {
+    const auto env = [](const char* name) -> std::string {
+        const char* v = std::getenv(name);
+        return v ? v : "";
+    };
+    if (!env("LBP3_DLSS_MV").empty()) Apply("mv", env("LBP3_DLSS_MV"));
+    if (env("LBP3_DLSS_JITTER") == "off") Apply("jitter", "off");
+    if (!env("LBP3_DLSS_JITTER_SIGN").empty()) Apply("jitter", env("LBP3_DLSS_JITTER_SIGN"));
+    if (!env("LBP3_DLSS_SMAA").empty()) Apply("smaa", env("LBP3_DLSS_SMAA"));
+    g_trace = EnvOn("LBP3_DLSS_TRACE");
+    // NVIDIA's guide 3.7.1: 8 x (output / render)^2 phases, at least 16 here (DLAA).
+    g_phases = 16;
+    NextJitter();
+    LogSettings("settings");
 }
 
 }  // namespace
@@ -511,6 +649,7 @@ void RegisterVulkanExtensions() {
     g_wanted = v && _stricmp(v, "dlss") == 0;
     if (!g_wanted) return;
     InitCommon();
+    ReadSettings();
     Vulkan::g_lbp3ExtraInstanceExtensions = InstanceExtensions;
     Vulkan::g_lbp3ExtraDeviceExtensions = DeviceExtensions;
 }
@@ -560,21 +699,24 @@ bool Start() {
 
 bool Active() { return g_ready; }
 
+void Remote(const std::string& key, const std::string& value) {
+    if (!g_ready) {
+        std::fprintf(stderr, "[dlss] remote '%s %s' ignored: the upscaler is off\n", key.c_str(), value.c_str());
+        return;
+    }
+    std::lock_guard lk(g_remoteMutex);
+    g_remote.emplace_back(key, value);
+}
+
 void SetDisplayBuffer(int index, uint64_t address) {
     if (index >= 0 && index < 16) g_display[index] = address;
 }
 
-Output Process(void* cmdp, void* imagep) {
+namespace {
+
+// One flip's DLSS; jx, jy = the offset its frame was drawn with (0 when it wasn't jittered).
+Output Evaluate(void* cmdp, void* imagep, const Frame& f, float jx, float jy) {
     Output out;
-    const Frame f = g_frame;
-    g_frame = Frame{};
-    g_zCount.clear();
-    if (!g_ready) return out;
-    if (!g_hooked) {
-        Hook();  // from the next frame on
-        return out;
-    }
-    Log();
     auto& display = *static_cast<VideoCore::Image*>(imagep);
     const uint32_t W = display.info.size.width, H = display.info.size.height;
     const bool sized = g_hud.w == W && g_hud.h == H && g_vel8.w == W && g_vel8.h == H && g_depth.w == W && g_depth.h == H;
@@ -643,7 +785,7 @@ Output Process(void* cmdp, void* imagep) {
     ToRead(cmd, g_vel8);
     ToWrite(cmd, g_mv);
     Run(cmd, g_mvPass, {{&g_vel8, g_nearest}}, g_mv,
-        PC{-kVecScaleX * float(W) / 1920.0f, -kVecScaleY * float(H) / 1080.0f, W, H});
+        PC{-g_mvSignX * kVecScaleX * float(W) / 1920.0f, -g_mvSignY * kVecScaleY * float(H) / 1080.0f, W, H});
 
     // DLSS.
     ToRead(cmd, g_mv);
@@ -664,8 +806,10 @@ Output Process(void* cmdp, void* imagep) {
     ep.Feature.pInOutput = &output;
     ep.pInDepth = &depth;
     ep.pInMotionVectors = &mv;
-    ep.InJitterOffsetX = 0.0f;
-    ep.InJitterOffsetY = 0.0f;
+    // The viewport moved the scene by (jx, jy) render pixels; LBP3_DLSS_JITTER_SIGN says how DLSS
+    // is told (settled at the basket: NVIDIA's guide leaves the sign to be checked).
+    ep.InJitterOffsetX = g_jitterSignX * jx;
+    ep.InJitterOffsetY = g_jitterSignY * jy;
     ep.InRenderSubrectDimensions = {W, H};
     ep.InReset = g_reset ? 1 : 0;
     ep.InMVScaleX = 1.0f;
@@ -691,6 +835,48 @@ Output Process(void* cmdp, void* imagep) {
     out.image = static_cast<VkImage>(g_comp.image);
     out.width = OW;
     out.height = OH;
+    return out;
+}
+
+}  // namespace
+
+Output Process(void* cmdp, void* imagep) {
+    const Frame f = g_frame;
+    g_frame = Frame{};
+    g_zCount.clear();
+    const bool jittered = g_frameJittered;
+    const float jx = jittered ? g_jx : 0.0f, jy = jittered ? g_jy : 0.0f;
+    g_frameJittered = false;
+    ++g_flipCount;
+    if (!g_ready) return {};
+    if (!g_hooked) {
+        Hook();  // from the next frame on
+        return {};
+    }
+    {
+        std::lock_guard lk(g_remoteMutex);
+        for (const auto& [key, value] : g_remote) {
+            if (Apply(key, value)) {
+                g_reset = true;  // a new setting starts DLSS's history afresh
+                LogSettings(("remote " + key + " " + value).c_str());
+            } else {
+                std::fprintf(stderr, "[dlss] remote: unknown setting '%s %s'\n", key.c_str(), value.c_str());
+            }
+        }
+        g_remote.clear();
+    }
+    Log();
+    const Output out = Evaluate(cmdp, imagep, f, jx, jy);
+    g_prevUpscaled = out.image != nullptr;  // the gate for the next frame's jitter and SMAA skip
+    g_stats.jitteredFrames += jittered;
+    g_stats.smaaSkipped += f.skipped > 0;
+    if (g_trace && !out.image)
+        std::fprintf(stderr,
+                     "[dlss] flip %llu not upscaled: composite %d, HUD-less %d, vectors %d, depth %d; %u draws, %u "
+                     "into a display buffer, %u jittered, SMAA %s\n",
+                     static_cast<unsigned long long>(g_flipCount), f.composite, f.hud, f.vel, f.depth, f.draws,
+                     f.displayDraws, f.jittered, f.skipped ? "left out" : "drawn");
+    NextJitter();
     return out;
 }
 

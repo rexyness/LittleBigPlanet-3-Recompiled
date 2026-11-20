@@ -11,6 +11,7 @@
 #include "video/framegen.h"
 #include "video/presenter.h"
 #include "gpu/renderer.h"
+#include "gpu/dlss.h"
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -469,6 +470,12 @@ void Parse(const std::string& line) {
         std::string set;
         in >> set;
         gpu::fg::Request(set);
+        return;
+    }
+    if (word == "dlss") {  // "dlss <key> <value>": a DLSS build's upscaler settings (tests, gpu/dlss.h)
+        std::string key, value;
+        in >> key >> value;
+        gpu::dlss::Remote(key, value);
         return;
     }
     if (word == "frames") {  // "frames N": record the next N presented frames
