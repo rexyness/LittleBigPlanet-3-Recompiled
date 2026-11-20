@@ -14,7 +14,9 @@
   codes (LBPPC 0.1.3), the pause-menu Quit Game script,
   the bloom and language patch addresses, the resolution list and the ultrawide view's patch addresses
   (camera aspect, 2D canvas and layout centres, the online camera split), the exact maths for online play
-  (its stubs and list of the game's 3,373 sites), the background shader builds, and the community-download check. The LBPPC team also runs the
+  (its stubs and list of the game's 3,373 sites), the background shader builds, and the community-download check.
+  The "Play with LBPPC players" switch (v0.1.9) speaks LBPPC's peer connection protocol (shadPS4's P2P framing and
+  LBPPC's signaling handler, GPL-2.0-or-later), re-implemented here from reading their source. The LBPPC team also runs the
   play.lbppc.com servers and allowed this port to use them.
 - **sethlikepie's LittleBigPlanet 3 PC port** by sethlikepie and Emre_exe
   (github.com/sethlikepie/littlebigplanet3-pc, GPL-2.0-or-later), and **sgdc3**'s shadPS4 fixes for

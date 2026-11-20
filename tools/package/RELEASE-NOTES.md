@@ -1,9 +1,26 @@
-**v0.1.8: word suggestions on the on-screen keyboard, and fixes from sethlikepie's LittleBigPlanet 3 port.**
-If you have v0.1.4 to v0.1.7, the launcher shows "v0.1.8 is out" when it opens: press **Update**. From
-v0.1.1 to v0.1.3, go to **Tools > Check for updates**. It installs v0.1.8 and keeps your saves, settings and
+**v0.1.9: play online with friends on LBPPC.**
+If you have v0.1.4 to v0.1.8, the launcher shows "v0.1.9 is out" when it opens: press **Update**. From
+v0.1.1 to v0.1.3, go to **Tools > Check for updates**. It installs v0.1.9 and keeps your saves, settings and
 accounts. New here? Read on. **No game files are included:** you need your own copy of the game.
 
-### What's in it (new in v0.1.8)
+### What's in it (new in v0.1.9)
+- **Play with friends on LBPPC's own client** (experimental, off by default). The launcher's **Online** page has
+  a new switch, **Play with LBPPC players**; it applies from the next start. With it on, friends who play
+  LittleBigPlanet 3 on LBPPC can join your game and you theirs, from the game's own menus, as with friends on this
+  port. While it's on, this game computes its world the way LBPPC's does, so friends on this port need the switch
+  on too to play with you, and off to play with each other without it (a join between the two settings fails
+  instead of drifting apart). Games with LBPPC players use LBPPC's own connection: through the server when your
+  connections can't reach each other directly, and without this port's repair of lost messages. Friends only, as
+  always. With the switch on, the end of The Legend of Bunkum may need the pause menu's skip. Tested with LBPPC
+  0.1.5, on one PC and between two over the internet.
+- **Leaving an online game is cleaner.** When you close the game, the other players are told at once instead of
+  noticing 15 seconds later, and when the game ends a connection its last messages still get through for a few
+  seconds.
+- **Your log records how each online session went** (every 5 seconds: who is connected, how the game's messages
+  flow, any stalls), so a "it lagged" report can be read. It's only written to your log; nothing is sent anywhere.
+- With the switch off nothing changed in how players connect: v0.1.3 to v0.1.9 players can play together.
+
+### New in v0.1.8
 - **Word suggestions on the on-screen keyboard.** A bar above the keys suggests words as you type (as many as fit,
   up to six). **R3** or **Tab** picks the first; press **up** from the top row to choose another, or click one. A
   pick adds the space for you. The keyboard learns the words you confirm (not passwords; cancelled text teaches
@@ -128,7 +145,8 @@ The first visit to each area can pause briefly while your graphics driver builds
 - **Online on the community servers at play.lbppc.com** (made by the LBPPC project; Sony's servers are gone).
   Create an account from the launcher's Online page. Community levels, your profile and your friends list work,
   and you can invite friends and join their games. Since v0.1.1 a lost game message no longer ends a co-op
-  session when both players have v0.1.1 or later.
+  session when both players have v0.1.1 or later. Since v0.1.9, with **Play with LBPPC players** on, also with
+  friends on LBPPC's own client.
 - A launcher with:
   - a setup wizard and a game file check;
   - a DLC installer and save backups;
@@ -154,6 +172,8 @@ The first visit to each area can pause briefly while your graphics driver builds
   then new things can appear a moment late instead, as they do online by default).
 - Intel 12th-generation and later processors: LBPPC found crashes there (after the first cutscene, or when a level
   loads) whose fix isn't in this port yet. If that happens to you, please send a report (Tools > Make a report zip).
+- With **Play with LBPPC players** on: three-player games, the European edition of LBPPC and long sessions haven't
+  been tried yet.
 - Exact maths online costs about half a millisecond a frame (of the 33 ms the game has); it has been proven exact
   in tests on one PC, but a real AMD-against-Intel co-op session hasn't been played yet.
 
@@ -164,6 +184,8 @@ game addresses behind the ultrawide view, the exact maths for online play, the b
 LBPPC 0.1.4 the Intel intro fix, the Radeon start-up fixes and the lighting fix. Their team also runs play.lbppc.com and allowed this port to use it.
 v0.1.8's graphics, timer, memory, backup and frame-generation changes come from sethlikepie's LittleBigPlanet 3 PC
 port (github.com/sethlikepie/littlebigplanet3-pc), including sgdc3's shadPS4 fixes for LittleBigPlanet 3.
+v0.1.9's play with LBPPC players speaks LBPPC's connection protocol, re-implemented from LBPPC's source and shadPS4's
+network code (both GPL-2.0-or-later).
 Full credits are in `CREDITS.md`.
 
 This is free software under the GNU GPL. The source is this repository at the tagged commit, with its shadPS4
