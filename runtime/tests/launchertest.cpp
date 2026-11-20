@@ -13,6 +13,7 @@
 #include <objbase.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -341,6 +342,56 @@ static void TestSaves() {
     int kept = 0;
     for (const auto& e : fs::directory_iterator(tmp / "analysis" / "play_logs")) kept += e.path().filename().string().rfind("play_best_", 0) == 0;
     CHECK(kept == 1);
+    std::error_code ec;
+    fs::remove_all(tmp, ec);
+}
+
+static void TestAutoBackup() {
+    // The copy before every Play (AutoBackupSaves), on a fake game folder (never the real one).
+    if (GameRunning()) {
+        std::printf("TestAutoBackup skipped: an lbp3.exe is running (the backup then skips by design)\n");
+        return;
+    }
+    const fs::path tmp = fs::temp_directory_path() / ("launchertest_autobackup_" + NowStamp());
+    Paths p;
+    p.root = tmp;
+    p.saves = tmp / "user" / "savedata" / "CUSA00473";
+    p.backups = tmp / "analysis" / "savedata_backups";
+    CHECK(AutoBackupSaves(p, 3) == "automatic save backup: no saves yet");
+    const fs::path save = p.saves / "LBPxSAVE" / "00000001" / "bigfart1";
+    fs::create_directories(save.parent_path());
+    std::ofstream(save) << "version one";
+    const std::string made = AutoBackupSaves(p, 3);
+    auto list = ListBackups(p);
+    CHECK(made.rfind("automatic save backup: auto_", 0) == 0 && list.size() == 1);
+    CHECK(ReadFile(p.backups / list[0].name / "LBPxSAVE" / "00000001" / "bigfart1") == "version one");
+    // unchanged saves: no second copy
+    CHECK(AutoBackupSaves(p, 3).find("unchanged since " + list[0].name) != std::string::npos);
+    CHECK(ListBackups(p).size() == 1);
+    // older automatic copies beyond `keep` go, oldest first; a manual one stays
+    const auto now = fs::file_time_type::clock::now();
+    auto old = [&](const std::string& name, int hoursAgo) {
+        fs::create_directories(p.backups / name / "LBPxSAVE");
+        std::ofstream(p.backups / name / "LBPxSAVE" / "x") << name;
+        std::error_code e;
+        fs::last_write_time(p.backups / name, now - std::chrono::hours(hoursAgo), e);
+    };
+    old("manual_20200101_000000", 100);
+    for (int i = 1; i <= 4; ++i) old("auto_2020010" + std::to_string(i) + "_000000", 10 - i);  // 01 oldest
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));  // a new stamp for the next copy
+    std::ofstream(save) << "version two, longer";
+    const std::string second = AutoBackupSaves(p, 3);
+    CHECK(second.find("3 older automatic ones removed, 3 kept") != std::string::npos);
+    std::vector<std::string> autos;
+    for (const Backup& b : ListBackups(p))
+        if (b.name.rfind("auto_", 0) == 0) autos.push_back(b.name);
+    CHECK(autos.size() == 3 && autos[2] == "auto_20200104_000000");
+    CHECK(ReadFile(p.backups / autos[0] / "LBPxSAVE" / "00000001" / "bigfart1") == "version two, longer");
+    CHECK(fs::exists(p.backups / "manual_20200101_000000"));
+    // a test has the saves set aside: nothing is copied
+    std::ofstream(tmp / "analysis" / "savedata_live_is_test") << "";
+    std::ofstream(save) << "version three";
+    CHECK(AutoBackupSaves(p, 3).find("skipped (a test") != std::string::npos);
     std::error_code ec;
     fs::remove_all(tmp, ec);
 }
@@ -922,6 +973,7 @@ int main() {
     TestPaths();
     TestZip();
     TestSaves();
+    TestAutoBackup();
     TestSettings2();
     TestSfoAndDlc();
     TestFarc();

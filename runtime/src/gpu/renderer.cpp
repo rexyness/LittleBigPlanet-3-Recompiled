@@ -45,6 +45,8 @@
 namespace Vulkan {  // vk_pipeline_cache.cpp (LBP3 measurement counters)
 extern std::atomic<u32> g_lbp3ShaderCompiles, g_lbp3PipelineCompiles, g_lbp3DroppedDraws;
 extern std::atomic<u64> g_lbp3ShaderCompileUs, g_lbp3PipelineCompileUs;
+extern std::atomic<u32> g_lbp3AsyncSkippedDraws, g_lbp3AsyncWaitedDraws;
+extern std::atomic<u64> g_lbp3AsyncWaitUs;
 }  // namespace Vulkan
 
 namespace core {
@@ -1125,6 +1127,9 @@ PerfCounters ReadPerfCounters() {
     c.pipelineCompiles = Vulkan::g_lbp3PipelineCompiles.load();
     c.pipelineUs = Vulkan::g_lbp3PipelineCompileUs.load();
     c.droppedDraws = Vulkan::g_lbp3DroppedDraws.load();
+    c.asyncSkipped = Vulkan::g_lbp3AsyncSkippedDraws.load();
+    c.asyncWaited = Vulkan::g_lbp3AsyncWaitedDraws.load();
+    c.asyncWaitUs = Vulkan::g_lbp3AsyncWaitUs.load();
     return c;
 }
 

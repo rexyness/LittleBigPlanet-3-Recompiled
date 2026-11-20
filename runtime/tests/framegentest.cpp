@@ -513,6 +513,52 @@ static void TestWarpGpu() {
     Check(fg::Decide(d) == fg::Drop::None, "a fast but smooth camera move (the map swoop) is not a cut");
     d.camJumpThreshold = 0;
     Check(fg::Decide(d) == fg::Drop::None, "the camera-jump rule can be turned off");
+
+    // sethlikepie's relative rule (CUTREL): moves and turns far beyond the frame before. It only
+    // adds cuts: the jump rule above is unchanged, and unknown values (-1) never cut.
+    fg::DecideIn r;
+    r.havePrev = r.sameSize = true;
+    r.periodNs = r.sinceLastSlotNs = 33'333'333;
+    r.simSteps = 1;
+    r.camJumpThreshold = 1000;
+    r.camJump = 300;  // under the jump rule's threshold: a cut between nearby shots
+    r.prevCamJump = 2;
+    r.camMoved = 749, r.prevCamMoved = 1;
+    r.camTurned = 23, r.prevCamTurned = 0.2;
+    Check(fg::Decide(r) == fg::Drop::None, "the relative rule is off by default (camRelRatio 0)");
+    r.camRelRatio = 6;
+    Check(fg::Decide(r) == fg::Drop::Cut && std::strcmp(fg::CutRule(r), "camera move") == 0,
+          "749 units after 1: a cut by the move (their Heroes cutscene)");
+    r.camMoved = 40;
+    Check(fg::Decide(r) == fg::Drop::Cut && std::strcmp(fg::CutRule(r), "camera turn") == 0,
+          "23 degrees after 0.2: a cut by the turn");
+    r.camTurned = 5;
+    Check(fg::Decide(r) == fg::Drop::None, "40 units and 5 degrees: under both minimums, no cut");
+    r.camMoved = 749, r.prevCamMoved = 200;
+    r.camTurned = 23, r.prevCamTurned = 10;
+    Check(fg::Decide(r) == fg::Drop::None, "a fast but steady camera (749 after 200, 23 after 10 degrees) is no cut");
+    r.camTurned = 23, r.prevCamTurned = 0;
+    r.camMoved = 100, r.prevCamMoved = 0;
+    Check(fg::Decide(r) == fg::Drop::Cut, "a turn from rest counts the previous turn as at least 0.1 degree");
+    r.prevCamTurned = -1;
+    Check(fg::Decide(r) == fg::Drop::None, "an unknown previous turn: no turn cut");
+    r.camTurned = -1, r.prevCamTurned = 0.2;
+    Check(fg::Decide(r) == fg::Drop::None, "an unknown turn: no turn cut");
+    r.camMoved = 749, r.prevCamMoved = -1;
+    Check(fg::Decide(r) == fg::Drop::None, "an unknown previous move: no move cut");
+    r.prevCamMoved = 1;
+    r.camJump = 5753, r.prevCamJump = 240;
+    Check(std::strcmp(fg::CutRule(r), "camera jump") == 0, "the jump rule still comes first");
+    r.camJump = 5453, r.prevCamJump = 4804;  // the map swoop by the jump rule
+    r.camMoved = 3000, r.prevCamMoved = 2600;
+    Check(fg::Decide(r) == fg::Drop::None, "a smooth swoop stays no cut with the relative rule on");
+    r.camMoved = 749, r.prevCamMoved = 1;
+    r.camRelRatio = 0;
+    Check(fg::Decide(r) == fg::Drop::None, "LBP3_FRAMEGEN_CUTREL=0 turns it off");
+    r.cutDiff = 50, r.cutThreshold = 40;
+    Check(std::strcmp(fg::CutRule(r), "image") == 0, "the image rule is named");
+    r.cutDiff = 0;
+    Check(fg::CutRule(r)[0] == '\0', "no rule: empty name");
 }
 
 int main() {
