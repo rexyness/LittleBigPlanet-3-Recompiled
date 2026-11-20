@@ -110,6 +110,11 @@ a long session, EU players, the Bunkum ending in the mode, and LBPPC's tolerance
 after level changes (none were seen, so ours has none).
 Logs and screenshots stay out of the repo (they hold this PC's public address).
 
+The user's own session with a friend on LBPPC (2026-11-20 evening, two PCs, through the relay) worked.
+Its first join ended 3.8 s after the connection came up: our game ended it through its normal leave
+path (eboot+0x37818b) with the joining slot still at state 1, and LBPPC answered with Close; the retry
+connected and held. The user sees the same between two LBPPC players, so it isn't this mode's.
+
 Found on the way: Windows keeps a per-app mute by the executable's path, so muting a test LBPPC mutes
 the player's own LBPPC too (it happened once here and was cleared); the test tools unmute before
 stopping it.
