@@ -60,7 +60,7 @@ Ten checked same-length edits in `runtime/src/core/patches.cpp`, applied only wi
 
 The Create level ("Edit Now") has no stickerable material, and scripted placement doesn't register in the Pod either (neither ✕ nor an emulated touch-pad tap). So the user placed library stickers by hand: a huge Garfield on the floor and one on the back wall.
 
-To save Pod edits, leave the Pod (go into a level and back). "Quit Game" and closing the window don't save: the first attempt was lost that way. The save was copied, and the same copy was booted in both builds to the default Pod view.
+Quitting straight after placing lost the first attempt: the port's Quit game and the window's close button don't make the game save, and a Pod edit alone doesn't trigger LBP3's own autosave (fixed on `feat/quit-saves-first`). The second attempt was saved (`bigfart54`, then `littlefart1929`) while the player was at the Pod computer. The log shows no level load in that session, so what triggered the save was something at the Pod computer, not leaving the Pod. That save was copied, and the same copy was booted in both builds to the default Pod view.
 
 - **The pairing is exact.** Both runs had G = 1.0, the same 31x31 owner and 227 tiles free. A no-sticker control region is pixel-identical (mean |A−B| 0.00).
 - **Screen detail** (std of a 4-neighbour Laplacian):
