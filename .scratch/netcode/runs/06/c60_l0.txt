@@ -1,0 +1,13 @@
+=== cell c60_l0
+join: in; host thread's slot 5 to 11 in 4.1 s; join block host 1.6 s, guest 2.1 s
+pod, host:  35 windows, flips per 5 s min 149; no step 10 of 5300 flips (0.2%), longest run 1, windows with a run of 30 or more: 0, of 8 to 29: 0; host waits over 50 ms 59, longest between two frames 68 ms, catch-up frames 15; guest's INPUTS longest gap 67 ms
+pod, guest: 35 windows, flips per 5 s min 150; no step 41 of 5302 flips (0.8%), longest run 2, windows with a run of 30 or more: 0, of 8 to 29: 0
+level start: happened; host's longest run with no step around it 28 flips; guest's 28 flips; guest's INPUTS longest gap 1315 ms
+level, host:  12 windows, flips per 5 s min 143; no step 49 of 1775 flips (2.8%), longest run 1, windows with a run of 30 or more: 0, of 8 to 29: 0; host waits over 50 ms 83, longest between two frames 74 ms, catch-up frames 33; guest's INPUTS longest gap 74 ms
+level, guest: 11 windows, flips per 5 s min 147; no step 39 of 1636 flips (2.4%), longest run 3, windows with a run of 30 or more: 0, of 8 to 29: 0
+host's connection to the guest:  budget 32768 to 65536 (min 32768), cuts 0; game RTT median 67 ms, link 61 ms, wrong in 0 of 55, negative samples 0; unacknowledged max 3, held max 0
+guest's connection to the host:  budget 16384 to 65536 (min 16384), cuts 0; game RTT median 61 ms, link 61 ms, wrong in 0 of 55, negative samples 0; unacknowledged max 4, held max 0
+link, host's side:  longest wait for a datagram 409 ms; gaps 0 (asked again 0, given up 0), longest hold behind a gap 0 ms; path direct, LAN
+link, guest's side: longest wait for a datagram 283 ms; gaps 0 (asked again 0, given up 0), longest hold behind a gap 0 ms; path direct, LAN
+events: none
+ROW|c60_l0|join ok|level ok|kick no

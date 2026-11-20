@@ -115,19 +115,31 @@ void Worker() {
     // A camera cut: the camera's translation jumped (perf/fg_inputs.md: 5,753 at a cut, at most
     // ~250 in play). 0 turns it off.
     const double camJumpThreshold = EnvDouble("LBP3_FRAMEGEN_CAMJUMP", 1000.0);
+    // sethlikepie's relative cut rule (DecideIn): LBP3_FRAMEGEN_CUTREL=0 turns it off;
+    // _CUTREL_UNITS, _CUTREL_DEG and _CUTREL_RATIO change its thresholds.
+    const char* relEnv = std::getenv("LBP3_FRAMEGEN_CUTREL");
+    const bool camRel = !(relEnv && relEnv[0] == '0');
+    const double camRelUnits = EnvDouble("LBP3_FRAMEGEN_CUTREL_UNITS", 150.0);
+    const double camRelDeg = EnvDouble("LBP3_FRAMEGEN_CUTREL_DEG", 6.0);
+    const double camRelRatio = camRel ? EnvDouble("LBP3_FRAMEGEN_CUTREL_RATIO", 6.0) : 0.0;
     {
         std::lock_guard lk(g_mutex);
         g_generatorName = gen->Name();
     }
-    std::fprintf(stderr, "[framegen] on: generator %s, delay %s, cut threshold %.1f, camera jump %.0f\n", gen->Name(),
+    char relText[128] = "off (LBP3_FRAMEGEN_CUTREL=0)";
+    if (camRelRatio > 0)
+        std::snprintf(relText, sizeof relText, "moved > %.0f units or turned > %.1f deg, and > %.1fx the frame before",
+                      camRelUnits, camRelDeg, camRelRatio);
+    std::fprintf(stderr, "[framegen] on: generator %s, delay %s, cut threshold %.1f, camera jump %.0f, camera cut %s\n",
+                 gen->Name(),
                  delayOverride >= 0 ? std::to_string(delayOverride).c_str()
                                     : ("one refresh + " + std::to_string(gen->MarginMs()) + " ms").c_str(),
-                 cutThreshold, camJumpThreshold);
+                 cutThreshold, camJumpThreshold, relText);
 
     std::vector<uint8_t> prev;  // the last real frame (a copy: its own buffer goes to the presenter)
     uint32_t prevW = 0, prevH = 0;
     int64_t prevSlot = 0;
-    double prevCamJump = -1;
+    double prevCamJump = -1, prevCamMoved = -1, prevCamTurned = -1;
     bool havePrev = false;
     for (;;) {
         Submission s;
@@ -157,6 +169,15 @@ void Worker() {
         d.prevCamJump = prevCamJump;
         prevCamJump = s.info.camJump;
         d.camJumpThreshold = camJumpThreshold;
+        d.camMoved = s.info.camMoved;
+        d.prevCamMoved = prevCamMoved;
+        prevCamMoved = s.info.camMoved;
+        d.camTurned = s.info.camTurned;
+        d.prevCamTurned = prevCamTurned;
+        prevCamTurned = s.info.camTurned;
+        d.camRelUnits = camRelUnits;
+        d.camRelDeg = camRelDeg;
+        d.camRelRatio = camRelRatio;
         if (d.sameSize) {
             d.cutDiff = MeanAbsDiff(old, cur);
             std::lock_guard lk(g_mutex);
@@ -165,8 +186,12 @@ void Worker() {
             ++g_stats.diffCount;
         }
         Drop drop = Decide(d);
-        if (drop == Drop::Cut && d.camJumpThreshold > 0 && d.camJump > d.camJumpThreshold)
-            std::fprintf(stderr, "[framegen] cut: the camera jumped %.0f (%.0f the frame before)\n", d.camJump, d.prevCamJump);
+        if (drop == Drop::Cut)
+            std::fprintf(stderr,
+                         "[framegen] cut (%s): image diff %.1f, camera jump %.0f (%.0f the frame before), moved %.1f "
+                         "units (%.1f), turned %.2f deg (%.2f)\n",
+                         CutRule(d), d.cutDiff, d.camJump, d.prevCamJump, d.camMoved, d.prevCamMoved, d.camTurned,
+                         d.prevCamTurned);
         if (drop == Drop::None) {
             TimedFrame g;
             g.pixels = TakeBuffer();
@@ -373,10 +398,23 @@ Drop Decide(const DecideIn& in) {
     // A late frame or a load: the previous real frame is more than half a period off its beat.
     if (in.sinceLastSlotNs > in.periodNs + in.periodNs / 2 || in.sinceLastSlotNs < in.periodNs / 2) return Drop::Late;
     if (in.simSteps >= 0 && in.simSteps != 1) return Drop::Steps;
-    if (in.cutDiff > in.cutThreshold) return Drop::Cut;
-    if (in.camJumpThreshold > 0 && in.camJump > in.camJumpThreshold && !(in.prevCamJump >= 0 && in.camJump < 4 * in.prevCamJump))
-        return Drop::Cut;
+    if (CutRule(in)[0]) return Drop::Cut;
     return Drop::None;
+}
+
+const char* CutRule(const DecideIn& in) {
+    if (in.cutDiff > in.cutThreshold) return "image";
+    if (in.camJumpThreshold > 0 && in.camJump > in.camJumpThreshold && !(in.prevCamJump >= 0 && in.camJump < 4 * in.prevCamJump))
+        return "camera jump";
+    if (in.camRelRatio > 0) {
+        if (in.camMoved >= 0 && in.prevCamMoved >= 0 && in.camMoved > in.camRelUnits &&
+            in.camMoved > in.camRelRatio * in.prevCamMoved)
+            return "camera move";
+        if (in.camTurned >= 0 && in.prevCamTurned >= 0 && in.camTurned > in.camRelDeg &&
+            in.camTurned > in.camRelRatio * std::max(in.prevCamTurned, 0.1))
+            return "camera turn";
+    }
+    return "";
 }
 
 double MeanAbsDiff(const HostFrame& a, const HostFrame& b) {

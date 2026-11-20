@@ -1,0 +1,155 @@
+# Ticket 10 fix: graphics submits wait for the graphics queue only.
+# lbp3-recompiled fix/gfx-submit-wait (e85156b, on local/frame-pacing) and its shadPS4 submodule
+# fix/gfx-submit-wait (40d6adc5, on 4640726e). Part 1 applies to lbp3-recompiled, part 2 inside third_party/shadPS4.
+# --- part 1: lbp3-recompiled
+diff --git a/runtime/src/gpu/renderer.cpp b/runtime/src/gpu/renderer.cpp
+index 53dacd5..7deed58 100644
+--- a/runtime/src/gpu/renderer.cpp
++++ b/runtime/src/gpu/renderer.cpp
+@@ -648,7 +648,16 @@ void SubmitGfx(const uint32_t* dcb, uint32_t dcbBytes, const uint32_t* ccb, uint
+     // texture while our GPU was still copying it, tearing the intro video.
+     // LBP3_GPU_ASYNC=1 restores the overlap (faster; for testing).
+     static const bool async = std::getenv("LBP3_GPU_ASYNC") != nullptr;
+-    if (!async) WaitGpu();
++    // Wait for the graphics queue only (ticket 10). LBP3_SUBMIT_WAIT=all restores waiting on
++    // every queue, where a blocked compute queue released the game before this submission ran.
++    static const bool waitAll = [] {
++        const char* v = std::getenv("LBP3_SUBMIT_WAIT");
++        return v && std::string(v) == "all";
++    }();
++    static const bool strict = std::getenv("LBP3_SYNC_STRICT") != nullptr;
++    if (async) return;
++    if (waitAll || strict) WaitGpu();
++    else g_liverpool->WaitGfxIdleOrBlocked();
+ }
+ 
+ }  // namespace gpu
+# --- part 2: third_party/shadPS4
+diff --git a/src/video_core/amdgpu/liverpool.cpp b/src/video_core/amdgpu/liverpool.cpp
+index dcb9e9cc..aeed13dd 100644
+--- a/src/video_core/amdgpu/liverpool.cpp
++++ b/src/video_core/amdgpu/liverpool.cpp
+@@ -76,17 +76,22 @@ static bool LabelWrittenSince(u64 address, u32 since) {
+     return false;
+ }
+ 
+-Liverpool::BlockedWait Liverpool::BeginBlockedWait(u64 addr) {
++Liverpool::BlockedWait Liverpool::BeginBlockedWait(u64 addr, bool gfx) {
+     std::scoped_lock lk{submit_mutex};
+     last_blocked_addr = addr;
+     ++queues_blocked_on_wait;
++    if (gfx) {
++        gfx_last_blocked_addr = addr;
++        ++gfx_blocked_on_wait;
++    }
+     submit_cv.notify_all();
+-    return {addr, recent_label_write_count.load(), grace_releases.load()};
++    return {addr, recent_label_write_count.load(), grace_releases.load(), gfx};
+ }
+ 
+ void Liverpool::EndBlockedWait(const BlockedWait& wait) {
+     std::scoped_lock lk{submit_mutex};
+     --queues_blocked_on_wait;
++    if (wait.gfx) --gfx_blocked_on_wait;
+     if (!wait.addr) return;
+     const auto known = std::find(guest_written_waits.begin(), guest_written_waits.end(), wait.addr);
+     if (LabelWrittenSince(wait.addr, wait.label_writes)) {
+@@ -216,6 +221,7 @@ void Liverpool::Process(std::stop_token stoken) {
+                 queue.submits.pop();
+ 
+                 --num_submits;
++                if (curr_qid == GfxQueueId) --num_gfx_submits;
+                 std::scoped_lock lock2{submit_mutex};
+                 submit_cv.notify_all();
+             }
+@@ -918,7 +924,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+                     mem_semaphore->Signal();
+                 } else {
+                     if (!mem_semaphore->Signaled()) {
+-                        const auto blocked = BeginBlockedWait(mem_semaphore->Address<u64>());
++                        const auto blocked = BeginBlockedWait(mem_semaphore->Address<u64>(), true);
+                         const auto wait_start = std::chrono::steady_clock::now();
+                         bool reported = false;
+                         while (!mem_semaphore->Signaled()) {
+@@ -968,7 +974,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+                     // The guest may satisfy this wait only after its submit call returns.
+                     const auto blocked = BeginBlockedWait(wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory
+                                          ? wait_reg_mem->Address<u64>()
+-                                         : 0);
++                                         : 0, true);
+                     const auto wait_start = std::chrono::steady_clock::now();
+                     bool reported = false;
+                     while (!wait_reg_mem->Test(regs.reg_array)) {
+@@ -1434,6 +1440,7 @@ void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
+     }
+ 
+     std::scoped_lock lk{submit_mutex};
++    ++num_gfx_submits;
+     ++num_submits;
+     submit_cv.notify_one();
+ }
+diff --git a/src/video_core/amdgpu/liverpool.h b/src/video_core/amdgpu/liverpool.h
+index 112e7190..820bf7fd 100644
+--- a/src/video_core/amdgpu/liverpool.h
++++ b/src/video_core/amdgpu/liverpool.h
+@@ -120,6 +120,39 @@ public:
+         }
+     }
+ 
++    // LBP3 Recompiled: the same release rules as WaitGpuIdleOrBlocked, but for the graphics
++    // queue alone. A graphics submit returns once the graphics queue has run what it was
++    // given or blocks on a wait; a blocked compute queue no longer lets it return before the
++    // graphics queue has even started (the game then raced ahead and reset the flag the new
++    // command buffer's first WAIT_REG_MEM checks: ticket 10's save deadlock).
++    void WaitGfxIdleOrBlocked() noexcept {
++        using namespace std::chrono_literals;
++        std::unique_lock lk{submit_mutex};
++        std::chrono::steady_clock::time_point blocked_since{};
++        while (num_gfx_submits != 0) {
++            if (gfx_blocked_on_wait > 0) {
++                const auto now = std::chrono::steady_clock::now();
++                const u64 addr = gfx_last_blocked_addr;
++                const bool known = addr && std::find(guest_written_waits.begin(), guest_written_waits.end(),
++                                                     addr) != guest_written_waits.end();
++                if (known) {
++                    ++early_releases;
++                    return;
++                }
++                if (blocked_since == std::chrono::steady_clock::time_point{}) {
++                    blocked_since = now;
++                } else if (now - blocked_since >= 20ms) {
++                    ++grace_releases;
++                    ++early_releases;
++                    return;
++                }
++            } else {
++                blocked_since = {};
++            }
++            submit_cv.wait_for(lk, 1ms);
++        }
++    }
++
+     bool IsGpuIdle() const {
+         return num_submits == 0;
+     }
+@@ -272,6 +305,9 @@ private:
+     std::atomic<u32> num_commands{};
+     std::atomic<bool> submit_done{};
+     std::atomic<u32> queues_blocked_on_wait{};
++    std::atomic<u32> num_gfx_submits{};        // graphics submissions not finished yet
++    std::atomic<u32> gfx_blocked_on_wait{};    // the graphics queue is blocked on a wait
++    std::atomic<u64> gfx_last_blocked_addr{};
+     std::atomic<u64> last_blocked_addr{};      // memory address of the latest blocked wait (0: register)
+     std::vector<u64> guest_written_waits;      // wait addresses that needed an early release
+ 
+@@ -283,8 +319,9 @@ private:
+         u64 addr;
+         u32 label_writes;    // label write count at the start
+         u32 grace_releases;  // grace_releases at the start
++        bool gfx;            // on the graphics queue
+     };
+-    BlockedWait BeginBlockedWait(u64 addr);
++    BlockedWait BeginBlockedWait(u64 addr, bool gfx = false);
+     // The wait ended. If the guest had to be released to end it and no command stream
+     // wrote the address meanwhile, the guest's CPU wrote it: remember the address. If a
+     // command stream wrote it, forget it (a GPU-side label must be waited out).

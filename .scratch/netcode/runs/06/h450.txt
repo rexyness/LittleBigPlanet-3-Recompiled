@@ -1,0 +1,28 @@
+lock: acquired by netcode-cells
+10280 28176 
+[shadnet] signed in as Kistopawa: 2 friend(s), 1 request(s) received, 0 sent
+[shadnet] signed in as Kistopawa2: 2 friend(s), 0 request(s) received, 0 sent
+ready
+join_pressed 22:31:47
+j_h450: join pressed 22:31:58
+j_h450: allow 22:32:10 (waited 5 s)
+CELL h450: the guest did not get in within 90 s
+pod_start 22:33:46
+pod_end 22:35:16
+level_cmd 22:35:17
+level_play 22:35:47
+end 22:36:51
+=== cell h450
+join: NOT IN; host thread's slot 5 to 11 in nan s; join block host none, guest none
+pod, host:  17 windows, flips per 5 s min 150; no step 1428 of 2577 flips (55.4%), longest run 1427, windows with a run of 30 or more: 10, of 8 to 29: 0; host waits over 50 ms 48, longest between two frames 67 ms, catch-up frames 48
+pod, guest: 17 windows, flips per 5 s min 150; no step 10 of 2568 flips (0.4%), longest run 1, windows with a run of 30 or more: 0, of 8 to 29: 0
+level start: happened; host's longest run with no step around it 1553 flips; guest's 1 flips; guest's INPUTS longest gap 0 ms
+level, host:  12 windows, flips per 5 s min 150; no step 2 of 1809 flips (0.1%), longest run 1, windows with a run of 30 or more: 0, of 8 to 29: 0; host waits over 50 ms 81, longest between two frames 67 ms, catch-up frames 81
+level, guest: 11 windows, flips per 5 s min 151; no step 9 of 1665 flips (0.5%), longest run 1, windows with a run of 30 or more: 0, of 8 to 29: 0
+host's connection to the guest:  no lines
+guest's connection to the host:  no lines
+link, host's side:  no lines
+link, guest's side: no lines
+events: host +33 s: the game ends its connection to Kistopawa2: up for 17.0 s, last datagram given to the game 10.1 s ago, the lin; host: [p2p] 22:32:14.846 Kistopawa2: no game datagram for the game in 5 s (last packet of any kind 4385 ms ago, 0 held behind a gap)
+ROW|h450|join FAILED|level ok|kick YES
+lock: released by netcode-cells

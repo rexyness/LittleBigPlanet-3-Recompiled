@@ -1,0 +1,51 @@
+# Gap 8: the PS4 floating-point control state on game threads. Applies to lbp3-recompiled local/frame-pacing.
+diff --git a/runtime/src/core/runner.cpp b/runtime/src/core/runner.cpp
+index 64e6f30..4e8c79b 100644
+--- a/runtime/src/core/runner.cpp
++++ b/runtime/src/core/runner.cpp
+@@ -25,6 +25,7 @@
+ 
+ namespace hle::kernel {
+ void CommitWholeStack();  // kernel_pthread.cpp
++void SetGuestFpState();   // kernel_pthread.cpp
+ }
+ 
+ namespace core {
+@@ -225,6 +226,7 @@ DWORD WINAPI MainThread(void*) {
+     hle::kernel::CommitWholeStack();
+     SetupThreadTls();
+     RegisterCurrentThread("main");
++    hle::kernel::SetGuestFpState();  // before any module_start runs, as on the console
+     for (Module* m : g_startFirst) StartModule(*m, 0, nullptr);
+     static const char* const kArgv0 = "/app0/eboot.bin";
+     g_params.argc = 1;
+diff --git a/runtime/src/hle/kernel_pthread.cpp b/runtime/src/hle/kernel_pthread.cpp
+index 77cd49d..4223475 100644
+--- a/runtime/src/hle/kernel_pthread.cpp
++++ b/runtime/src/hle/kernel_pthread.cpp
+@@ -119,6 +119,17 @@ void CommitWholeStack() {
+         tib->StackLimit = low;
+ }
+ 
++// The PS4's floating-point control state for game code (gap 8; btsouth/lbp3-pc 45bb339): MXCSR
++// 0x9fc0 (all exceptions masked, flush-to-zero, denormals-are-zero) and x87 control word 0x037f.
++// Windows threads start with MXCSR 0x1f80, so denormals flowed through the game's physics and
++// cutscene code. Fibers already got 0x9fc0 (fiber.cpp).
++void SetGuestFpState() {
++    unsigned int mxcsr = 0x9fc0;
++    unsigned short fcw = 0x037f;
++    __asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
++    __asm__ volatile("fldcw %0" : : "m"(fcw));
++}
++
+ namespace {
+ 
+ DWORD WINAPI ThreadProc(void* p) {
+@@ -132,6 +143,7 @@ DWORD WINAPI ThreadProc(void* p) {
+     SetThreadStackGuarantee(&guarantee);
+     core::SetupThreadTls();
+     core::RegisterCurrentThread(t->name);
++    SetGuestFpState();
+     t->ret = t->entry(t->arg);
+     std::fprintf(stderr, "[thread] %s exited (returned %p)\n", t->name.c_str(), t->ret);
+     FinishThread(t);

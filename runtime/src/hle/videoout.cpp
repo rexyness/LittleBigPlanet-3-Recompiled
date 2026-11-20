@@ -40,9 +40,14 @@ extern std::atomic<uint32_t> g_lbp3ImageCreates, g_lbp3ImageExpands, g_lbp3Image
 extern std::atomic<uint32_t> g_lbp3Refreshes, g_lbp3RefreshesCpu, g_lbp3FillClears, g_lbp3PreSyncs,
     g_lbp3PreSyncSkips;
 extern std::atomic<uint64_t> g_lbp3RefreshBytes, g_lbp3FillClearBytes, g_lbp3PreSyncBytes;
+extern std::atomic<uint64_t> g_lbp3WriteFaults, g_lbp3WindowPages;  // buffer_cache.cpp
+uint32_t Lbp3FaultWindowKib();                                        // LBP3_FAULT_WINDOW
 }
 namespace Core {
 extern std::atomic<uint64_t> g_lbp3ProtectFast, g_lbp3ProtectWalk;  // gpu/video_core_glue.cpp
+}
+namespace Vulkan {
+extern std::atomic<uint64_t> g_lbp3GpuFrames;  // vk_rasterizer.cpp: frames whose flip the GPU thread reached
 }
 
 namespace hle::kernel {
@@ -84,7 +89,13 @@ gpu::DisplayBufferDesc g_displayBuffers[16];
 // reaches the frame's flip packet (GfxFlip interrupt), not at submit time.
 // splitFrame: gpu/frame_split.h. simSteps: the frame's simulation steps, read only with frame
 // generation on (video/framegen.h), else -1.
-struct PendingFlip { int buffer; int64_t arg; uint64_t splitFrame = 0; int simSteps = -1; double camJump = -1; };
+struct PendingFlip {
+    int buffer;
+    int64_t arg;
+    uint64_t splitFrame = 0;
+    int simSteps = -1;
+    double camJump = -1, camMoved = -1, camTurned = -1;  // FrameGenCamMotion
+};
 std::mutex g_pendingMutex;
 std::deque<PendingFlip> g_pendingFlips;
 constexpr uint32_t kIrqGfxFlip = 0x08;
@@ -182,6 +193,12 @@ void PrintPerfLine() {
                  now.gfxBlockedWaits - last.gfxBlockedWaits, rel[0][0] - lastRel[0][0], rel[0][1] - lastRel[0][1],
                  rel[1][0] - lastRel[1][0], rel[1][1] - lastRel[1][1], rel[2][0] - lastRel[2][0],
                  rel[2][1] - lastRel[2][1], now.droppedDraws - last.droppedDraws);
+    // Background pipeline builds, only when something happened (its own line: the [perf] line's
+    // format stays as tools read it).
+    if (now.asyncSkipped != last.asyncSkipped || now.asyncWaited != last.asyncWaited)
+        std::fprintf(stderr, "[async] skipped %u draws while their pipeline was built; %u waited for theirs (%.0f ms)\n",
+                     now.asyncSkipped - last.asyncSkipped, now.asyncWaited - last.asyncWaited,
+                     (now.asyncWaitUs - last.asyncWaitUs) / 1000.0);
     last = now;
     for (int s = 0; s < 3; ++s)
         for (int k = 0; k < 2; ++k) lastRel[s][k] = rel[s][k];
@@ -203,6 +220,12 @@ void PrintPerfLine() {
     std::fprintf(stderr, "[protect] %llu fast, %llu walked\n",
                  static_cast<unsigned long long>(Core::g_lbp3ProtectFast.exchange(0)),
                  static_cast<unsigned long long>(Core::g_lbp3ProtectWalk.exchange(0)));
+    // Guest write faults in the window, and the pages the fault window unprotected ahead of them
+    // (LBP3_FAULT_WINDOW, perf/gfx_wait.md fix 2). Its own line: [protect]'s format stays.
+    std::fprintf(stderr, "[faults] %llu write faults, %llu pages unprotected ahead (window %u KiB)\n",
+                 static_cast<unsigned long long>(VideoCore::g_lbp3WriteFaults.exchange(0)),
+                 static_cast<unsigned long long>(VideoCore::g_lbp3WindowPages.exchange(0)),
+                 VideoCore::Lbp3FaultWindowKib());
     video::framegen::PrintStatus();  // nothing unless LBP3_FRAMEGEN=1
     gpu::split::Flush();
 }
@@ -275,6 +298,9 @@ int PS4_SYSV_ABI sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index,
         // GPU interrupts fire the game's sceGnmAddEqEvent registrations with that id.
         gpu::SetInterruptHandler([](uint32_t irq) {
             if (irq == kIrqGfxFlip) {
+                // The GPU thread has reached a frame's flip: the frame count the background
+                // pipeline builds' wait policy reads (vk_pipeline_cache.cpp AsyncPolicyWaits).
+                Vulkan::g_lbp3GpuFrames.fetch_add(1, std::memory_order_relaxed);
                 PendingFlip f{-1, 0, 0};
                 {
                     std::lock_guard pl(g_pendingMutex);
@@ -317,6 +343,8 @@ int PS4_SYSV_ABI sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index,
                                                 .count();
                             info.simSteps = f.simSteps;
                             info.camJump = f.camJump;
+                            info.camMoved = f.camMoved;
+                            info.camTurned = f.camTurned;
                             info.gpu = gpuTicket;
                             video::framegen::SubmitReal(pixels, w, h, info);
                         } else {
@@ -613,32 +641,58 @@ void TraceSimSteps() {
 // Frame generation only (video/framegen.h): the simulation steps since the previous flip
 // submit (GetSimFrame__, read as TraceSimSteps does), so no in-between frame is made across a
 // 0- or 2-step frame. -1 when frame generation is off (nothing is read) or for the first flip.
-// Frame generation only: how far the camera moved since the last flip submit (the largest change
-// of the main view's translation, DAT_013a2a60's camera matrix at +0x20; perf/fg_inputs.md: 5,753
-// at a camera cut, at most ~250 in play). -1 when off or unknown.
-double FrameGenCamJump() {
-    if (!video::framegen::Enabled()) return -1;
+// Frame generation only: how the camera changed since the last flip submit, read from the render
+// camera block DAT_013a2a60 (-1 = off or unknown):
+// - jump: the largest change of the view*proj matrix's translation row (+0x20, floats 12-14;
+//   perf/fg_inputs.md: 5,753 at a camera cut, at most ~250 in play);
+// - moved: how far the camera's world position moved (+0xd0, row 3 of the camera-to-world matrix
+//   at +0xa0), in world units;
+// - turned: how far its view direction turned (row 2 of camera-to-world, +0xc0), in degrees.
+// The translation row mixes position and rotation; moved and turned are what sethlikepie's
+// relative cut rule reads (littlebigplanet3-pc 07cc7e7, CUTREL; the block's layout is theirs).
+struct CamMotion { double jump = -1, moved = -1, turned = -1; };
+CamMotion FrameGenCamMotion() {
+    CamMotion m;
+    if (!video::framegen::Enabled()) return m;
     uint8_t* base = core::EbootBase();
-    if (!base) return -1;
+    if (!base) return m;
     uint64_t view = 0;
     std::memcpy(&view, base + 0x13a2a60, sizeof(view));
     static bool haveLast = false;
-    static float last[3] = {};
+    static float last[3] = {}, lastPos[3] = {}, lastDir[3] = {};
     if (view <= 0x100000 || view >= (uint64_t{1} << 47)) {
         haveLast = false;
-        return -1;
+        return m;
     }
-    float t[3];
-    std::memcpy(t, reinterpret_cast<const uint8_t*>(view) + 0x20 + 12 * 4, sizeof t);
-    double jump = -1;
+    const uint8_t* cam = reinterpret_cast<const uint8_t*>(view);
+    float t[3], pos[3], dir[3];
+    std::memcpy(t, cam + 0x20 + 12 * 4, sizeof t);
+    std::memcpy(pos, cam + 0xd0, sizeof pos);
+    std::memcpy(dir, cam + 0xc0, sizeof dir);
     if (haveLast) {
-        jump = 0;
-        for (int i = 0; i < 3; ++i) jump = std::max(jump, double(std::fabs(t[i] - last[i])));
-        if (!(jump == jump)) jump = -1;  // NaN
+        double jump = 0, moved2 = 0, dot = 0, lenA = 0, lenB = 0;
+        for (int i = 0; i < 3; ++i) {
+            jump = std::max(jump, double(std::fabs(t[i] - last[i])));
+            const double d = double(pos[i]) - double(lastPos[i]);
+            moved2 += d * d;
+            dot += double(lastDir[i]) * dir[i];
+            lenA += double(lastDir[i]) * lastDir[i];
+            lenB += double(dir[i]) * dir[i];
+        }
+        m.jump = jump == jump ? jump : -1;  // NaN -> unknown
+        const double moved = std::sqrt(moved2);
+        m.moved = moved == moved ? moved : -1;
+        if (lenA > 1e-12 && lenB > 1e-12) {
+            const double c = std::clamp(dot / std::sqrt(lenA * lenB), -1.0, 1.0);
+            const double turned = std::acos(c) * 57.29577951308232;
+            m.turned = turned == turned ? turned : -1;
+        }
     }
     std::memcpy(last, t, sizeof t);
+    std::memcpy(lastPos, pos, sizeof pos);
+    std::memcpy(lastDir, dir, sizeof dir);
     haveLast = true;
-    return jump;
+    return m;
 }
 
 int FrameGenSimSteps() {
@@ -664,7 +718,7 @@ int PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void* const* 
     TraceSimSteps();
     core::seslog::NoteFlip();  // online only: steps per flip for the [ses-win] lines
     const int simSteps = FrameGenSimSteps();
-    const double camJump = FrameGenCamJump();
+    const CamMotion cam = FrameGenCamMotion();
     if (gpu::fg::Enabled()) {  // LBP3_FG_DUMP: counters and the main view (camera now +0x20, before +0x160)
         if (uint8_t* base = core::EbootBase()) {
             using Counter = int(PS4_SYSV_ABI*)();
@@ -688,7 +742,8 @@ int PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void* const* 
         if (PatchFlipRequest(static_cast<uint32_t*>(dcbs[count - 1]), dcbSizes[count - 1] / 4, displayBufferIndex)) {
             {
                 std::lock_guard pl(videoout::g_pendingMutex);
-                videoout::g_pendingFlips.push_back({static_cast<int>(displayBufferIndex), flipArg, splitFrame, simSteps, camJump});
+                videoout::g_pendingFlips.push_back({static_cast<int>(displayBufferIndex), flipArg, splitFrame, simSteps,
+                                                    cam.jump, cam.moved, cam.turned});
             }
             TraceFlipSubmit(count, dcbs, dcbSizes, splitFrame);
             const int submitResult = Process(count, dcbs, dcbSizes, ccbs, ccbSizes);

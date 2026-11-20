@@ -1,0 +1,3 @@
+# view.sh <tag>...: the summaries of cells, shortened for reading in a terminal.
+cd "$(dirname "$0")/../../runs/06"
+for t in "$@"; do echo "## $t"; grep "^join:\|^pod\|^level\|^host's conn\|^guest's conn\|^link\|^events\|^freeze\|^CELL\|^ROW" $t.txt | sed 's/windows with a run of 30 or more: /runs30+ /; s/, of 8 to 29: / runs8-29 /; s/flips per 5 s min/min/; s/host waits over 50 ms/waits/; s/longest between two frames/frame gap/; s/longest wait for a datagram/wait/; s/ (asked again \([0-9]*\), given up \([0-9]*\))/ (asked \1, given up \2)/; s/; path direct, LAN//; s/unacknowledged/unacked/; s/negative samples/neg/' | cut -c1-${VIEW_W:-300}; done

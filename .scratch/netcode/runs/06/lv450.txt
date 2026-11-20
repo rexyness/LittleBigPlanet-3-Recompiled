@@ -1,0 +1,23 @@
+lock: acquired by netcode-cells
+22276 10868 
+[shadnet] signed in as Kistopawa: 2 friend(s), 1 request(s) received, 0 sent
+[shadnet] signed in as Kistopawa2: 2 friend(s), 0 request(s) received, 0 sent
+ready
+level_cmd 22:51:21
+join_pressed 22:52:06
+j_lv450: join pressed 22:52:17
+j_lv450: allow 22:52:30 (waited 5 s)
+pod_start 22:52:43
+pod_end 22:54:13
+end 22:54:15
+=== cell lv450
+join: in; host thread's slot 5 to 11 in 11.6 s; join block host 4.4 s, guest 6.2 s
+pod, host:  17 windows, flips per 5 s min 150; no step 14 of 2584 flips (0.5%), longest run 1, windows with a run of 30 or more: 0, of 8 to 29: 0; host waits over 50 ms 3, longest between two frames 67 ms, catch-up frames 3; guest's INPUTS longest gap 67 ms
+pod, guest: 17 windows, flips per 5 s min 150; no step 0 of 2553 flips (0.0%), longest run 0, windows with a run of 30 or more: 0, of 8 to 29: 0
+host's connection to the guest:  budget 65536 to 131072 (min 65536), cuts 0; game RTT median 467 ms, link 451 ms, wrong in 0 of 18, negative samples 0; unacknowledged max 15, held max 0
+guest's connection to the host:  budget 32768 to 32768 (min 32768), cuts 0; game RTT median 444 ms, link 451 ms, wrong in 0 of 19, negative samples 0; unacknowledged max 14, held max 5
+link, host's side:  longest wait for a datagram 36 ms; gaps 0 (asked again 0, given up 0), longest hold behind a gap 0 ms; path direct, LAN
+link, guest's side: longest wait for a datagram 67 ms; gaps 0 (asked again 0, given up 0), longest hold behind a gap 0 ms; path direct, LAN
+events: none
+ROW|lv450|join ok|level n/a|kick no
+lock: released by netcode-cells

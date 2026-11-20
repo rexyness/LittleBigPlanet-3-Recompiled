@@ -108,6 +108,7 @@ std::string ToIni(const Settings& s) {
       << "motion_filter=" << b(s.motion_filter) << "\n"
       << "tilt_keys=" << b(s.tilt_keys) << "\n"
       << "mouse_touch=" << b(s.mouse_touch) << "\n"
+      << "word_suggestions=" << b(s.word_suggestions) << "\n"
       << "; display: empty, a number (1 = the first display) or a refresh rate such as 165hz\n"
       << "display=" << OneLine(s.display) << "\n"
       << "; windowed, borderless or fullscreen\n"
@@ -203,6 +204,7 @@ Settings FromIni(const std::string& text) {
             else if (key == "motion_filter") ParseBool(v, s.motion_filter);
             else if (key == "tilt_keys") ParseBool(v, s.tilt_keys);
             else if (key == "mouse_touch") ParseBool(v, s.mouse_touch);
+            else if (key == "word_suggestions") ParseBool(v, s.word_suggestions);
             else if (key == "display" && ValidDisplay(v)) s.display = v;
             else if (key == "window_mode" && ValidWindowMode(v)) s.window_mode = v;
             else if (key == "volume" && ParseInt(v, 0, 100, n)) s.volume = n;
@@ -301,6 +303,7 @@ LaunchPlan MapSettings(const Settings& s) {
     if (!s.motion_filter) set("LBP3_MOTION", "raw");
     if (!s.tilt_keys) set("LBP3_TILT_KEYS", "off");
     if (s.mouse_touch) set("LBP3_MOUSE_TOUCH", "1");
+    if (!s.word_suggestions) set("LBP3_OSK_SUGGEST", "off");
     if (!s.display.empty() && ValidDisplay(s.display)) set("LBP3_DISPLAY", s.display);
     if (s.window_mode == "borderless" || s.window_mode == "fullscreen") set("LBP3_WINDOW", s.window_mode);
     if (s.volume >= 0 && s.volume < 100) set("LBP3_VOLUME", std::to_string(s.volume));

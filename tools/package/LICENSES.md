@@ -14,6 +14,9 @@
   which every GPL part above allows ("or any later version").
 - **stb** (stb_image and friends): public domain or MIT, at your choice (`third_party\stb\LICENSE.txt`, from
   the header).
+- **The on-screen keyboard's word list** (`data\osk\words_en.txt`): CC BY-SA 4.0, adapted from Hermit Dave's
+  FrequencyWords (OpenSubtitles counts), with SCOWL's notice for the parts drawn from it. It's a separate data
+  file read at run time, not part of the programs; see `data\osk\NOTICE.md`.
 - **The Microsoft Visual C++ runtime DLLs** (msvcp140*.dll, vcruntime140*.dll) are redistributed under the
   Visual Studio redistributable terms.
 

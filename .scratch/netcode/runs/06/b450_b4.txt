@@ -1,0 +1,27 @@
+lock: acquired by netcode-cells
+29808 41808 
+[shadnet] signed in as Kistopawa: 2 friend(s), 1 request(s) received, 0 sent
+[shadnet] signed in as Kistopawa2: 2 friend(s), 0 request(s) received, 0 sent
+ready
+join_pressed 21:23:41
+j_b450_b4: join pressed 21:23:52
+j_b450_b4: allow 21:24:03 (waited 5 s)
+pod_start 21:24:17
+pod_end 21:26:20
+level_cmd 21:26:21
+level_play 21:26:51
+end 21:27:55
+=== cell b450_b4
+join: in; host thread's slot 5 to 11 in 11.9 s; join block host 4.1 s, guest 5.5 s
+pod, host:  23 windows, flips per 5 s min 150; no step 800 of 3500 flips (22.9%), longest run 17, windows with a run of 30 or more: 0, of 8 to 29: 23; host waits over 50 ms 48, longest between two frames 620 ms, catch-up frames 816; guest's INPUTS longest gap 620 ms
+pod, guest: 23 windows, flips per 5 s min 151; no step 1409 of 3488 flips (40.4%), longest run 31, windows with a run of 30 or more: 3, of 8 to 29: 20
+level start: happened; host's longest run with no step around it 30 flips; guest's 58 flips; guest's INPUTS longest gap 2151 ms
+level, host:  12 windows, flips per 5 s min 152; no step 445 of 1833 flips (24.3%), longest run 17, windows with a run of 30 or more: 0, of 8 to 29: 12; host waits over 50 ms 58, longest between two frames 607 ms, catch-up frames 425; guest's INPUTS longest gap 620 ms
+level, guest: 11 windows, flips per 5 s min 150; no step 638 of 1655 flips (38.5%), longest run 29, windows with a run of 30 or more: 0, of 8 to 29: 11
+host's connection to the guest:  budget 24576 to 81098 (min 24576), cuts 1; game RTT median 634 ms, link 451 ms, wrong in 0 of 44, negative samples 0; unacknowledged max 39, held max 0
+guest's connection to the host:  budget 16384 to 16384 (min 16384), cuts 0; game RTT median 602 ms, link 451 ms, wrong in 0 of 43, negative samples 0; unacknowledged max 31, held max 0
+link, host's side:  longest wait for a datagram 618 ms; gaps 178 (asked again 89, given up 0), longest hold behind a gap 451 ms; path direct, LAN; in all: 368 dropped by the test, 184 filled from copies, 3515 sent again of 1270 asked, 0 skipped
+link, guest's side: longest wait for a datagram 1069 ms; gaps 251 (asked again 130, given up 0), longest hold behind a gap 451 ms; path direct, LAN; in all: 560 dropped by the test, 278 filled from copies, 2544 sent again of 1838 asked, 0 skipped
+events: guest +37 s: catch-up loading screen: shown; guest +60 s: catch-up loading screen: shown; guest +67 s: catch-up loading screen: shown; guest +73 s: catch-up loading screen: shown
+ROW|b450_b4|join ok|level ok|kick no
+lock: released by netcode-cells

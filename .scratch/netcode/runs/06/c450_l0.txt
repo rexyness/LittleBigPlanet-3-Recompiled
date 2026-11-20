@@ -1,0 +1,27 @@
+lock: acquired by netcode-cells
+40520 40432 
+[shadnet] signed in as Kistopawa: 2 friend(s), 1 request(s) received, 0 sent
+[shadnet] signed in as Kistopawa2: 2 friend(s), 0 request(s) received, 0 sent
+ready
+join_pressed 20:40:46
+j_c450_l0: join pressed 20:40:57
+j_c450_l0: allow 20:41:08 (waited 5 s)
+pod_start 20:41:20
+pod_end 20:44:20
+level_cmd 20:44:21
+level_play 20:44:52
+end 20:45:55
+=== cell c450_l0
+join: in; host thread's slot 5 to 11 in 10.8 s; join block host 4.1 s, guest 5.3 s
+pod, host:  35 windows, flips per 5 s min 150; no step 0 of 5274 flips (0.0%), longest run 0, windows with a run of 30 or more: 0, of 8 to 29: 0; host waits over 50 ms 0, longest between two frames 36 ms, catch-up frames 0; guest's INPUTS longest gap 36 ms
+pod, guest: 34 windows, flips per 5 s min 150; no step 0 of 5132 flips (0.0%), longest run 0, windows with a run of 30 or more: 0, of 8 to 29: 0
+level start: happened; host's longest run with no step around it 26 flips; guest's 48 flips; guest's INPUTS longest gap 1817 ms
+level, host:  12 windows, flips per 5 s min 151; no step 3 of 1823 flips (0.2%), longest run 1, windows with a run of 30 or more: 0, of 8 to 29: 0; host waits over 50 ms 1, longest between two frames 66 ms, catch-up frames 1; guest's INPUTS longest gap 35 ms
+level, guest: 11 windows, flips per 5 s min 150; no step 3 of 1659 flips (0.2%), longest run 1, windows with a run of 30 or more: 0, of 8 to 29: 0
+host's connection to the guest:  budget 32768 to 131072 (min 32768), cuts 0; game RTT median 467 ms, link 451 ms, wrong in 0 of 55, negative samples 0; unacknowledged max 18, held max 0
+guest's connection to the host:  budget 16384 to 16384 (min 16384), cuts 0; game RTT median 444 ms, link 451 ms, wrong in 0 of 54, negative samples 0; unacknowledged max 14, held max 0
+link, host's side:  longest wait for a datagram 266 ms; gaps 0 (asked again 0, given up 0), longest hold behind a gap 0 ms; path direct, LAN
+link, guest's side: longest wait for a datagram 404 ms; gaps 0 (asked again 0, given up 0), longest hold behind a gap 0 ms; path direct, LAN
+events: none
+ROW|c450_l0|join ok|level ok|kick no
+lock: released by netcode-cells

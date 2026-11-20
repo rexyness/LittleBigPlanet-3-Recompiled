@@ -4,8 +4,9 @@
 // that build their own colour+depth pair (DrawOffscreenComposite 0x424790 and the SMAA passes
 // 0x426dc0) and four float pairs. Every site's original instruction is checked first; if any
 // enabled site differs, none is patched. Groups can be left out with LBP3_RES_SKIP=<group,...>
-// (core, targets, pairs, ui, bloom, aspect); LBP3_RES_POOL_MB=<MB> also resizes the game's Garlic
-// pool (0x6a200000 = 1698 MB). Generated from analysis\eboot.elf and Ghidra listings; the
+// (core, targets, pairs, ui, bloom, aspect). The game's Garlic pool (0x6a200000 = 1698 MB) grows
+// with sizes above 1440p (PoolMb); LBP3_RES_POOL_MB=<MB> sets it by hand at any size. Generated
+// from analysis\eboot.elf and Ghidra listings; the
 // stencil-op calls in the same functions that pass 0x1e00 (GL_KEEP, not a pitch) are deliberately
 // not in the list.
 //
@@ -250,6 +251,17 @@ int32_t CanvasWidth(Size size) {
     return int32_t((720ull * size.w + size.h / 2) / size.h);
 }
 
+uint32_t PoolMb(Size size) {
+    const uint64_t pixels = uint64_t(size.w) * size.h;
+    if (pixels <= uint64_t(2560) * 1440) return 0;
+    // sethlikepie's scripts/patches.py heap_extra_mib: per_frame * frames, in KiB truncated, then
+    // rounded up to 2 MiB.
+    const double frames = double(pixels) / (1920.0 * 1080.0) - 1.0;
+    const uint64_t kib = static_cast<uint64_t>(320.0 * frames * 1024.0);
+    const uint64_t extraMb = (kib + 2047) / 2048 * 2;
+    return static_cast<uint32_t>(std::min<uint64_t>(1698 + extraMb, 3072));
+}
+
 std::vector<Edit> Build(Size size, const Options& options) {
     std::vector<Edit> out;
     if (size == Lbp3Res::kNative) return out;
@@ -392,8 +404,17 @@ void Apply(Module& m) {
     }
     uint8_t* pool = m.Addr(kPoolSite);  // MOV EDX,0x6a200000: the Garlic pool size in FUN_0005bed0
     const uint8_t poolExpect[5] = {0xba, 0x00, 0x00, 0x20, 0x6a};
-    const char* poolMb = std::getenv("LBP3_RES_POOL_MB");
-    if (poolMb && std::memcmp(pool, poolExpect, 5) != 0) {
+    const char* poolEnv = std::getenv("LBP3_RES_POOL_MB");
+    uint64_t poolTarget = 0;  // MB, 0 = the game's
+    const char* poolWhy = "";
+    if (poolEnv) {
+        poolTarget = std::min<uint64_t>(((std::strtoull(poolEnv, nullptr, 10) + 1) / 2) * 2, 3072);  // 2 MB aligned
+        poolWhy = "LBP3_RES_POOL_MB";
+    } else if (const uint32_t mb = PoolMb(size)) {
+        poolTarget = mb;
+        poolWhy = "scaled with the size, above 1440p";
+    }
+    if (poolTarget && std::memcmp(pool, poolExpect, 5) != 0) {
         std::fprintf(stderr, "[res] eboot.bin+0x5bf55 (pool): bytes differ, the %ux%u patch set is NOT applied\n",
                      size.w, size.h);
         ++bad;
@@ -413,11 +434,10 @@ void Apply(Module& m) {
                      e.what.c_str());
         ++changed;
     }
-    if (poolMb) {
-        const uint64_t mb = std::strtoull(poolMb, nullptr, 10);
-        const uint32_t bytes = static_cast<uint32_t>(std::min<uint64_t>(((mb + 1) / 2) * 2, 3072) << 20);  // 2 MB aligned
+    if (poolTarget) {
+        const uint32_t bytes = static_cast<uint32_t>(poolTarget << 20);
         std::memcpy(pool + 1, &bytes, 4);
-        std::fprintf(stderr, "[res] eboot.bin+0x5bf55 pool: Garlic 1698 -> %u MB\n", bytes >> 20);
+        std::fprintf(stderr, "[res] eboot.bin+0x5bf55 pool: Garlic 1698 -> %u MB (%s)\n", bytes >> 20, poolWhy);
     }
     const char* aspectNote = "16:9";
     if (wide) {

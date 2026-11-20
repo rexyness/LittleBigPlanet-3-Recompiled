@@ -16,6 +16,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <intrin.h>
 
 #include <Zydis/Zydis.h>
 
@@ -246,12 +247,33 @@ size_t BuildStub(const uint8_t* site, const Site& s, uint8_t* out, const float* 
     return size_t(o - out);
 }
 
+// The CPU's maker, as CPUID leaf 0 gives it ("AuthenticAMD", "GenuineIntel", ...).
+std::string CpuVendor() {
+    int r[4] = {};
+    __cpuid(r, 0);
+    char v[13] = {};
+    std::memcpy(v, &r[1], 4);
+    std::memcpy(v + 4, &r[3], 4);
+    std::memcpy(v + 8, &r[2], 4);
+    return v;
+}
+
 bool Wanted() {
     static const bool wanted = [] {
         bool v = false;
         if (EnvOn("LBP3_EXACT_MATH", &v)) return v;
         const char* sn = std::getenv("LBP3_SHADNET");
-        return hle::online::Enabled() || (sn && sn[0] == '1');
+        if (hle::online::Enabled() || (sn && sn[0] == '1')) return true;
+        // Offline too on CPUs other than AMD's (LBPPC f5d6703, 0.1.4): the game was made on the PS4's AMD
+        // processor, and with Intel's approximations the story's intro cutscene (c01_intro) stops for good
+        // after Newton's line cs01_100, a scripted step that never comes. The exact versions play it through.
+        const std::string vendor = CpuVendor();
+        if (vendor != "AuthenticAMD") {
+            std::fprintf(stderr, "[exactmath] on offline: the CPU is %s, not AMD (LBP3_EXACT_MATH=0 turns it off)\n",
+                         vendor.c_str());
+            return true;
+        }
+        return false;
     }();
     return wanted;
 }

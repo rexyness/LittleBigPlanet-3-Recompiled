@@ -46,6 +46,8 @@ struct RealInfo {
     int64_t periodNs = 0;  // the game's flip period (33.3 ms at the game's 30 Hz)
     int simSteps = -1;     // simulation steps the game ran for this frame (-1 = unknown)
     double camJump = -1;   // the camera's translation change since the last flip submit (-1 = unknown)
+    double camMoved = -1;  // how far the camera's world position moved (units; -1 = unknown)
+    double camTurned = -1; // how far its view direction turned (degrees; -1 = unknown)
     GpuTicket gpu;         // the GPU generator's work for this frame (LBP3_FRAMEGEN_MODE=warp)
 };
 // Takes the frame (pixels comes back holding a spare buffer to refill) and returns at once.
@@ -116,7 +118,19 @@ struct DecideIn {
     // Prologue map's camera swoop moves 1,800-6,000 units a frame, smoothly; a cut jumps from at
     // most ~250 to thousands (perf/fg_gpu.md).
     double camJumpThreshold = 0;
+    // Also a cut (sethlikepie's relative rule, CUTREL, littlebigplanet3-pc 07cc7e7): the camera's
+    // world position moved more than camRelUnits and more than camRelRatio times the previous
+    // frame's move, or its view direction turned more than camRelDeg and more than camRelRatio
+    // times the previous turn (at least 0.1 degree). It catches cuts between two nearby shots
+    // (their Heroes cutscene: 749 units and 23 degrees after steps of ~1 unit) that stay under
+    // camJumpThreshold. Needs both frames' values (-1 = unknown: not applied). camRelRatio 0 = off.
+    double camMoved = -1, prevCamMoved = -1;
+    double camTurned = -1, prevCamTurned = -1;
+    double camRelUnits = 150, camRelDeg = 6, camRelRatio = 0;
 };
+// Which rule made Decide() return Drop::Cut: "image", "camera jump", "camera move",
+// "camera turn" (the first that applies, in Decide's order), or "" if none.
+const char* CutRule(const DecideIn& in);
 Drop Decide(const DecideIn& in);
 // Mean absolute difference of B, G and R (0..255) over a sparse grid (every 8th pixel of every
 // 8th row): cheap scene-cut detection.

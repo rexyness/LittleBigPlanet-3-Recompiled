@@ -5,7 +5,7 @@
 # account files: the last step scans the staged folder and refuses to zip if anything like that slipped in.
 # Layout: one folder, everything relative to it (portable.txt marks it for the launcher):
 #   LBP3Launcher.exe, lbp3.exe, SDL3.dll, the VC++ runtime DLLs (app-local), tools\nid_names.txt,
-#   portable.txt, README-FRIENDS.md, CREDITS.md, RELEASE-NOTES.md (also the GitHub release's text; the
+#   data\osk\ (the on-screen keyboard's word list and its notice), portable.txt, README-FRIENDS.md, CREDITS.md, RELEASE-NOTES.md (also the GitHub release's text; the
 #   launcher's "What's new" shows it), SOURCE.md, licenses\
 # Make release packages in a dedicated worktree checked out at the exact (pushed) commit, e.g.
 #   git worktree add --detach D:\Recomps\lbp3-wt\release <commit>   (shadPS4 at its submodule commit)
@@ -46,7 +46,7 @@ if (-not $SkipBuild) {
     & "$repo\build.bat"
     if ($LASTEXITCODE -ne 0) { throw "build.bat failed" }
 }
-foreach ($f in "build\lbp3.exe", "build\LBP3Launcher.exe", "build\SDL3.dll", "tools\nid_names.txt") {
+foreach ($f in "build\lbp3.exe", "build\LBP3Launcher.exe", "build\SDL3.dll", "tools\nid_names.txt", "data\osk\words_en.txt") {
     if (-not (Test-Path $f)) { throw "missing $f" }
 }
 
@@ -65,6 +65,9 @@ New-Item -ItemType Directory -Force $stage, "$stage\tools", "$stage\licenses\thi
 
 Copy-Item build\lbp3.exe, build\LBP3Launcher.exe, build\SDL3.dll $stage
 Copy-Item tools\nid_names.txt "$stage\tools\"
+# The on-screen keyboard's word list (CC BY-SA 4.0) and its notice, read from data\osk beside lbp3.exe.
+New-Item -ItemType Directory -Force "$stage\data\osk" | Out-Null
+Copy-Item data\osk\words_en.txt, data\osk\NOTICE.md, data\osk\SCOWL-Copyright.txt "$stage\data\osk\"
 foreach ($dll in "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "msvcp140_atomic_wait.dll",
                  "vcruntime140.dll", "vcruntime140_1.dll") {
     if (Test-Path "$($crt.FullName)\$dll") { Copy-Item "$($crt.FullName)\$dll" $stage }
@@ -120,7 +123,7 @@ if ($sdl) { New-Item -ItemType Directory -Force "$stage\licenses\third_party\SDL
 
 # Safety: nothing from the game, the user's saves or accounts may be in the package.
 $forbidden = Get-ChildItem $stage -Recurse -File | Where-Object {
-    $_.Name -match '(?i)^(eboot\.bin|param\.sfo|game_dir\.txt|launcher\.ini|online_account.*\.txt|input\.ini|driver\.vkcache)$' -or
+    $_.Name -match '(?i)^(eboot\.bin|param\.sfo|game_dir\.txt|launcher\.ini|online_account.*\.txt|input\.ini|driver\.vkcache|learned_words\.txt|keyboard\.ini)$' -or
     $_.Extension -match '(?i)^\.(farc|pkg|sprx|prx|spv|fsb|bik|bin|pdb)$' -or
     $_.FullName -match '(?i)\\(savedata|shader_cache[^\\]*|sce_sys|CUSA\d{5}[^\\]*|user|analysis)\\'
 }

@@ -15,8 +15,9 @@
 //   - the vrsqrtps stub also fixes a RIP-relative operand of the site itself (LBPPC's doesn't).
 //   - spu.prx's sites are patched in spu.prx wherever it's loaded (LBPPC's image has it at 0x16c0000).
 //
-// On when online (the levels server or shadNet), as in LBPPC. LBP3_EXACT_MATH=1 turns it on offline
-// too, =0 off. The co-op link tells the other player whether it's on and refuses a connection when
+// On when online (the levels server or shadNet), as in LBPPC, and offline on CPUs other than AMD's
+// (LBPPC 0.1.4: on Intel the story's intro cutscene otherwise stops for good). LBP3_EXACT_MATH=1
+// turns it on whatever the CPU, =0 off. The co-op link tells the other player whether it's on and refuses a connection when
 // the two differ (net/p2p_link.h): such a session would drift apart.
 #pragma once
 
@@ -43,7 +44,7 @@ constexpr uint32_t kSpuBase = 0x16c0000;
 // The longest stub BuildStub writes.
 constexpr size_t kMaxStub = 96;
 
-// LBP3_EXACT_MATH=1/0, else whether the game plays online.
+// LBP3_EXACT_MATH=1/0, else whether the game plays online or the CPU isn't AMD's.
 bool Wanted();
 // Every site of eboot.bin and spu.prx was sent to its stub (the co-op link's HELLO says so).
 bool Active();

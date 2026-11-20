@@ -891,6 +891,8 @@ int main(int argc, char** argv) {
         std::printf("SDL video init failed: %s\n", SDL_GetError());
         return 1;
     }
+    // The on-screen keyboard here reads and writes nothing in user\config, and has no word list.
+    ui::osk::testing::UseFiles(false);
     if (argc >= 3 && std::strcmp(argv[1], "--shot") == 0) return Shots(argv[2]);
     Checks();
     std::printf("%d checks, %d failed\n", g_checks, g_failures);

@@ -17,6 +17,7 @@
 #include <ctime>
 #include <fstream>
 #include <sstream>
+#include <tuple>
 
 namespace launcher {
 namespace {
@@ -371,6 +372,54 @@ bool RestoreBackup(const Paths& p, const Backup& b, std::string* error, std::str
     // The replaced saves are already in the safety backup.
     fs::remove_all(old, ec);
     return true;
+}
+
+namespace {
+
+// Every file below dir as (relative path, size, last write), sorted. A tree and its copy give the
+// same list: fs::copy keeps the files' write times.
+std::vector<std::tuple<std::string, std::uintmax_t, std::int64_t>> TreeSignature(const fs::path& dir) {
+    std::vector<std::tuple<std::string, std::uintmax_t, std::int64_t>> out;
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(dir, ec); !ec && it != fs::recursive_directory_iterator();
+         it.increment(ec)) {
+        std::error_code e2;
+        if (!it->is_regular_file(e2)) continue;
+        out.emplace_back(fs::relative(it->path(), dir, e2).generic_string(), it->file_size(e2), WriteTime(it->path()));
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+}  // namespace
+
+std::string AutoBackupSaves(const Paths& p, int keep) {
+    std::error_code ec;
+    if (p.saves.empty() || !fs::exists(p.saves, ec)) return "automatic save backup: no saves yet";
+    if (TestMarkerSet(p)) return "automatic save backup: skipped (a test has the saves set aside)";
+    if (GameRunning()) return "automatic save backup: skipped (lbp3.exe is already running)";
+    std::vector<Backup> autos;
+    for (const Backup& b : ListBackups(p))  // newest first
+        if (b.name.rfind("auto_", 0) == 0) autos.push_back(b);
+    std::string line;
+    if (!autos.empty() && TreeSignature(autos.front().path) == TreeSignature(p.saves)) {
+        line = "automatic save backup: the saves are unchanged since " + autos.front().name;
+    } else {
+        std::string error;
+        const std::string name = BackupSaves(p, "auto", &error);
+        // A partial copy can't match the saves' signature, so the next Play copies again; it is
+        // pruned with the old ones.
+        if (name.empty()) return "automatic save backup failed (playing anyway): " + error;
+        line = "automatic save backup: " + name;
+        autos.insert(autos.begin(), Backup{name, p.backups / name, 0});
+    }
+    int removed = 0;
+    for (size_t i = static_cast<size_t>(std::max(keep, 1)); i < autos.size(); ++i) {
+        fs::remove_all(autos[i].path, ec);
+        if (!ec) ++removed;
+    }
+    if (removed) line += " (" + std::to_string(removed) + " older automatic ones removed, " + std::to_string(keep) + " kept)";
+    return line;
 }
 
 void RotateLogs(const Paths& p) {

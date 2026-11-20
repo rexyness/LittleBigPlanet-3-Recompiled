@@ -1,0 +1,27 @@
+lock: acquired by netcode-cells
+33148 41472 
+[shadnet] signed in as Kistopawa: 2 friend(s), 1 request(s) received, 0 sent
+[shadnet] signed in as Kistopawa2: 2 friend(s), 0 request(s) received, 0 sent
+ready
+join_pressed 23:57:00
+j_nb450_b2: join pressed 23:57:11
+j_nb450_b2: allow 23:57:23 (waited 5 s)
+pod_start 23:57:38
+pod_end 23:59:42
+level_cmd 23:59:43
+level_play 00:00:13
+end 00:01:17
+=== cell nb450_b2
+join: in; host thread's slot 5 to 11 in 13.3 s; join block host 4.6 s, guest 6.1 s
+pod, host:  24 windows, flips per 5 s min 147; no step 829 of 3628 flips (22.9%), longest run 28, windows with a run of 30 or more: 0, of 8 to 29: 23; host waits over 50 ms 53, longest between two frames 1000 ms, catch-up frames 1021; guest's INPUTS longest gap 1003 ms
+pod, guest: 23 windows, flips per 5 s min 150; no step 873 of 3479 flips (25.1%), longest run 28, windows with a run of 30 or more: 0, of 8 to 29: 23
+level start: NOT SEEN; host's longest run with no step around it 0 flips; guest's 0 flips; guest's INPUTS longest gap 0 ms
+level, host:  11 windows, flips per 5 s min 149; no step 449 of 1660 flips (27.0%), longest run 26, windows with a run of 30 or more: 0, of 8 to 29: 11; host waits over 50 ms 31, longest between two frames 1000 ms, catch-up frames 489; guest's INPUTS longest gap 1002 ms
+level, guest: 12 windows, flips per 5 s min 150; no step 487 of 1822 flips (26.7%), longest run 23, windows with a run of 30 or more: 0, of 8 to 29: 12
+host's connection to the guest:  no lines
+guest's connection to the host:  no lines
+link, host's side:  no lines
+link, guest's side: no lines
+events: guest +43 s: catch-up loading screen: shown; guest +48 s: catch-up loading screen: shown; guest +55 s: catch-up loading screen: shown
+ROW|nb450_b2|join ok|level NOT SEEN|kick no
+lock: released by netcode-cells

@@ -4,6 +4,8 @@
 #include <array>
 #include <cstdlib>
 
+#include "ui/osk_words.h"  // TypedPart
+
 namespace ui::osk {
 namespace {
 
@@ -168,6 +170,21 @@ Keyboard::Keyboard(std::u16string text, uint32_t maxLength, bool multiline)
 const KeySpec* Keyboard::selected() const { return KeyAt(layout(), row_, col_); }
 
 void Keyboard::Move(int dRow, int dCol, bool repeating) {
+    if (bar_ >= 0) {
+        // In the prediction bar: left/right between the suggestions, down back to the key.
+        if (dRow > 0) {
+            bar_ = -1;
+        } else if (dRow == 0 && dCol != 0) {
+            const int n = int(suggestions_.size());
+            int next = bar_ + (dCol > 0 ? 1 : -1);
+            if (next < 0 || next >= n) {
+                if (repeating) return;
+                next = (next + n) % n;
+            }
+            bar_ = next;
+        }
+        return;
+    }
     const Layout& l = layout();
     const KeySpec* origin = selected();
     if (dCol != 0 && dRow == 0) {
@@ -195,6 +212,10 @@ void Keyboard::Move(int dRow, int dCol, bool repeating) {
     if (origin) r = dRow > 0 ? origin->row + std::max<int>(1, origin->rowSpan) - 1 : origin->row;
     for (int i = 0; i < l.rows; ++i) {
         int next = r + (dRow > 0 ? 1 : -1);
+        if (next < 0 && !suggestions_.empty()) {
+            bar_ = 0;  // up from the top row: the prediction bar, on its first suggestion
+            return;
+        }
         if (next < 0 || next >= l.rows) {
             if (repeating) return;
             next = (next + l.rows) % l.rows;
@@ -221,10 +242,15 @@ bool Keyboard::Select(int row, int col) {
     if (!Enabled(KeyAt(layout(), row, col))) return false;
     row_ = row;
     col_ = col;
+    bar_ = -1;
     return true;
 }
 
 Outcome Keyboard::Activate() {
+    if (bar_ >= 0) {
+        Pick(size_t(bar_));
+        return Outcome::None;
+    }
     const KeySpec* key = selected();
     if (!key) return Outcome::None;
     const KeySpec copy = *key;
@@ -243,7 +269,7 @@ Outcome Keyboard::Press(const KeySpec& key) {
     case Action::Character: {
         const std::u16string s = Utf16(key.label ? key.label : "");
         const bool pair = s == u"()" || s == u"[]" || s == u"{}";
-        if (Insert(s, pair ? 1 : s.size()) && case_ == Case::Upper) case_ = Case::Lower;
+        if ((AfterPick(s) || Insert(s, pair ? 1 : s.size())) && case_ == Case::Upper) case_ = Case::Lower;
         return Outcome::None;
     }
     case Action::Shift: Shift(); return Outcome::None;
@@ -268,7 +294,7 @@ bool Keyboard::Insert(std::u16string_view s, size_t cursorOffset) {
     if (text_.size() + s.size() > maxLength_) return false;
     text_.insert(cursor_, s);
     cursor_ += std::min(cursorOffset, s.size());
-    ++edits_;
+    Changed();
     return true;
 }
 
@@ -281,7 +307,7 @@ bool Keyboard::Type(std::u16string_view s) {
         clean.push_back(c);
     }
     if (clean.empty()) return true;
-    if (!Insert(clean, clean.size())) return false;
+    if (!AfterPick(clean) && !Insert(clean, clean.size())) return false;
     if (case_ == Case::Upper) case_ = Case::Lower;
     return true;
 }
@@ -292,7 +318,7 @@ void Keyboard::Backspace() {
     if (cursor_ >= 2 && IsLow(text_[cursor_ - 1]) && IsHigh(text_[cursor_ - 2])) n = 2;
     text_.erase(cursor_ - n, n);
     cursor_ -= n;
-    ++edits_;
+    Changed();
 }
 
 void Keyboard::Delete() {
@@ -300,10 +326,81 @@ void Keyboard::Delete() {
     size_t n = 1;
     if (cursor_ + 1 < text_.size() && IsHigh(text_[cursor_]) && IsLow(text_[cursor_ + 1])) n = 2;
     text_.erase(cursor_, n);
-    ++edits_;
+    Changed();
 }
 
-void Keyboard::Space() { Insert(u" ", 1); }
+void Keyboard::Space() {
+    if (!AfterPick(u" ")) Insert(u" ", 1);
+}
+
+// ---- Suggestions ----
+
+void Keyboard::SetSuggester(Suggester suggester) {
+    suggester_ = std::move(suggester);
+    Refresh();
+}
+
+void Keyboard::Changed(bool keepAutoSpace) {
+    ++edits_;
+    if (!keepAutoSpace) autoSpace_ = false;
+    Refresh();
+}
+
+void Keyboard::Refresh() {
+    std::vector<std::u16string> next;
+    if (suggester_) {
+        const std::u16string_view part = TypedPart(text_, cursor_);
+        if (!part.empty()) next = suggester_(part, maxLength_ - (text_.size() - part.size()));
+    }
+    if (next == suggestions_) return;
+    suggestions_ = std::move(next);
+    // The selection in the bar stays there, on the first suggestion, until the bar empties.
+    if (bar_ >= 0) bar_ = suggestions_.empty() ? -1 : 0;
+}
+
+bool Keyboard::SelectSuggestion(size_t index) {
+    if (index >= suggestions_.size()) return false;
+    bar_ = int(index);
+    return true;
+}
+
+bool Keyboard::Pick(size_t index) {
+    if (index >= suggestions_.size()) return false;
+    size_t start = cursor_;
+    const size_t partLen = TypedPart(text_, cursor_, &start).size();
+    const std::u16string word = suggestions_[index];
+    if (partLen == 0 || text_.size() - partLen + word.size() > maxLength_) return false;
+    text_.replace(start, partLen, word);
+    cursor_ = start + word.size();
+    bool spaced = true;
+    if (cursor_ < text_.size() && text_[cursor_] == u' ') {
+        ++cursor_;  // a space follows already: step over it
+    } else if (text_.size() < maxLength_) {
+        text_.insert(cursor_, u" ");
+        ++cursor_;
+    } else {
+        spaced = false;  // no room for one
+    }
+    if (case_ == Case::Upper) case_ = Case::Lower;  // a pick ends a one-letter shift, as typing does
+    bar_ = -1;
+    Changed();
+    autoSpace_ = spaced;
+    return true;
+}
+
+bool Keyboard::AfterPick(std::u16string_view s) {
+    if (!autoSpace_ || cursor_ == 0 || text_[cursor_ - 1] != u' ') return false;
+    if (s == u" ") {  // a space out of habit: swallowed, once
+        autoSpace_ = false;
+        return true;
+    }
+    if (s.size() != 1 || std::u16string_view(u".,!?:;").find(s[0]) == std::u16string_view::npos) return false;
+    if (text_.size() + 1 > maxLength_) return false;
+    text_.insert(cursor_ - 1, s);  // "hello " + "." = "hello. "
+    ++cursor_;
+    Changed(true);
+    return true;
+}
 
 void Keyboard::NewLine() {
     if (multiline_) Insert(u"\n", 1);
@@ -313,21 +410,21 @@ void Keyboard::CursorLeft() {
     if (cursor_ == 0) return;
     --cursor_;
     if (cursor_ > 0 && IsLow(text_[cursor_]) && IsHigh(text_[cursor_ - 1])) --cursor_;
-    ++edits_;
+    Changed();
 }
 
 void Keyboard::CursorRight() {
     if (cursor_ >= text_.size()) return;
     ++cursor_;
     if (cursor_ < text_.size() && IsLow(text_[cursor_]) && IsHigh(text_[cursor_ - 1])) ++cursor_;
-    ++edits_;
+    Changed();
 }
 
 void Keyboard::CursorHome() {
     const size_t to = multiline_ ? LineStart(cursor_) : 0;
     if (cursor_ != to) {
         cursor_ = to;
-        ++edits_;
+        Changed();
     }
 }
 
@@ -339,7 +436,7 @@ void Keyboard::CursorEnd() {
     }
     if (cursor_ != to) {
         cursor_ = to;
-        ++edits_;
+        Changed();
     }
 }
 
@@ -363,7 +460,7 @@ void Keyboard::CursorUp() {
     const size_t prevLen = (start - 1) - prevStart;
     cursor_ = prevStart + std::min(column, prevLen);
     if (cursor_ > 0 && cursor_ < text_.size() && IsHigh(text_[cursor_ - 1]) && IsLow(text_[cursor_])) --cursor_;
-    ++edits_;
+    Changed();
 }
 
 void Keyboard::CursorDown() {
@@ -383,7 +480,7 @@ void Keyboard::CursorDown() {
     if (nextEnd == std::u16string::npos) nextEnd = text_.size();
     cursor_ = nextStart + std::min(column, nextEnd - nextStart);
     if (cursor_ > 0 && cursor_ < text_.size() && IsHigh(text_[cursor_ - 1]) && IsLow(text_[cursor_])) --cursor_;
-    ++edits_;
+    Changed();
 }
 
 void Keyboard::Shift() {

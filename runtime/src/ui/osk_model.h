@@ -7,10 +7,17 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace ui::osk {
+
+// Word suggestions (ui/osk_words.h) for the part of a word just before the cursor: given that
+// part and the most UTF-16 units a suggestion may have (it replaces the part), the ones to
+// show, best first.
+using Suggester = std::function<std::vector<std::u16string>(std::u16string_view typed, size_t room)>;
 
 enum class Action : uint8_t {
     None, Character, Shift, SymbolsMode, SpecialsMode, Space, Backspace,
@@ -75,12 +82,29 @@ public:
     bool multiline() const { return multiline_; }
 
     // D-pad / stick: one step, skipping gaps and the rest of the key the cursor is on. A fresh
-    // press wraps around the edges; a held (repeating) one stops at the edge.
+    // press wraps around the edges; a held (repeating) one stops at the edge. Up from the top
+    // row goes into the prediction bar instead while it has suggestions (onto the first); in
+    // the bar left/right move between them, down goes back to the key it came from.
     void Move(int dRow, int dCol, bool repeating = false);
     // Selects the key at a cell (mouse). False, and nothing changes, if that cell is a gap.
     bool Select(int row, int col);
-    // Cross on the selected key.
+    // Cross on the selected key, or on the selected suggestion (it's picked).
     Outcome Activate();
+
+    // ---- Suggestions (none until a suggester is set) ----
+    void SetSuggester(Suggester suggester);
+    const std::vector<std::u16string>& suggestions() const { return suggestions_; }
+    // The selected suggestion while the selection is in the prediction bar, else -1. While it
+    // is, row() and col() still name the key it came from.
+    int barIndex() const { return bar_; }
+    bool inBar() const { return bar_ >= 0; }
+    // Selects a suggestion (mouse hover). False if there's no such suggestion.
+    bool SelectSuggestion(size_t index);
+    // Picks a suggestion: it replaces the part of the word typed so far and is followed by a
+    // space, unless one follows already (the cursor steps over it) or there's no room for it.
+    // Then punctuation typed straight away goes before that space, and a space typed straight
+    // away is swallowed. The selection goes back to the keys. False if there's no such one.
+    bool Pick(size_t index);
     // Runs a key's action as if it had been pressed (Activate, and shortcuts).
     Outcome Press(const KeySpec& key);
 
@@ -110,6 +134,13 @@ private:
     void FixSelection(Action pressed);
     bool Insert(std::u16string_view s, size_t cursorOffset);
     size_t LineStart(size_t pos) const;
+    // After every change to the text or the cursor: the edit counter, the end of a pick's
+    // space handling (unless `keepAutoSpace`), new suggestions.
+    void Changed(bool keepAutoSpace = false);
+    void Refresh();
+    // Typing straight after a pick: punctuation goes before its space, a space is swallowed.
+    // True if `s` was handled here.
+    bool AfterPick(std::u16string_view s);
 
     std::u16string text_;
     size_t cursor_ = 0;
@@ -120,6 +151,10 @@ private:
     int page_ = 0;
     int row_ = 1, col_ = 0;  // starts on "q", as on the PS4
     uint64_t edits_ = 0;
+    Suggester suggester_;
+    std::vector<std::u16string> suggestions_;
+    int bar_ = -1;
+    bool autoSpace_ = false;  // the cursor is just past the space after a pick
 };
 
 // Held-button auto-repeat: the first press fires at once, then after delayMs every rateMs

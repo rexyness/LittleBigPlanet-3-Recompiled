@@ -184,6 +184,8 @@ void PageSaves(App& a) {
     Dim("%s", a.p.saves.string().c_str());
     const bool running = a.game_running, marker = a.marker;
     ImGui::Text("Last backup: %s", a.backups.empty() ? "none" : (When(a.backups.front().time) + "  (" + a.backups.front().name + ")").c_str());
+    Dim("Play also makes a copy (auto_...) when your saves changed since the last one; the newest %d are kept.",
+        kAutoBackupsKept);
     if (running) ImGui::TextColored(kWarn, "Close the game first: saves are only copied while it isn't running.");
     if (marker) ImGui::TextColored(kWarn, "A test run has your saves set aside right now; wait until it finishes.");
     ImGui::BeginDisabled(running || marker || a.shot_mode);
@@ -381,7 +383,7 @@ void PageNews(App& a) {
         return;
     }
     Heading("What this build has");
-    if (a.manifest.empty()) Dim("(the feature list, best/README.md, isn't next to the game folder)");
+    if (a.manifest.empty()) Dim("(the feature list, .scratch/lbp3-port/best/README.md, isn't in the game folder)");
     for (const auto& [feature, sw] : a.manifest) {
         ImGui::Bullet();
         ImGui::TextWrapped("%s", feature.c_str());
@@ -744,6 +746,13 @@ void PageControls(App& a) {
         Toggle("Filtered motion controls", &s.motion_filter, "The gyro's slow drift is learned away while the pad is still.");
         Toggle("Tilt with the number pad (4/6 and 8/2)", &s.tilt_keys, "For pads without motion sensors.");
         Toggle("The mouse as the touch pad", &s.mouse_touch, "F7 captures and releases the mouse; click = touch; the wheel pinches.");
+    }
+    EndCard();
+    if (BeginCard("osk", ImVec2(0, 0), false)) {
+        Heading("On-screen keyboard");
+        Toggle("Word suggestions", &s.word_suggestions,
+               "Words appear above the keys as you type; R3 or Tab picks the first. It learns the words you use. "
+               "The right stick moves the keyboard.");
     }
     EndCard();
     const fs::path ini = a.p.root / "user" / "config" / "input.ini";
