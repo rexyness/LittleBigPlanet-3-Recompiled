@@ -105,20 +105,38 @@ relay (LBPPC never offers a LAN address), RTT about 360 ms.
    both screens; both ran and jumped for a minute. **LBPPC's sync check: 204 comparisons, all the
    same.** No "The game diverged", no kick, no DEAD on either side.
 
-Not covered yet: a real internet path (two PCs), a direct path, a third player, a long session, and
-LBPPC's tolerance of brief differences after level changes (none were seen, so ours has none).
+Not covered yet: a real internet path (two PCs), a direct path with an LBPPC player, a third player,
+a long session, EU players, the Bunkum ending in the mode, and LBPPC's tolerance of brief differences
+after level changes (none were seen, so ours has none).
 Logs and screenshots stay out of the repo (they hold this PC's public address).
 
 Found on the way: Windows keeps a per-app mute by the executable's path, so muting a test LBPPC mutes
-the player's own LBPPC too; the test tools unmute before stopping it.
+the player's own LBPPC too (it happened once here and was cleared); the test tools unmute before
+stopping it.
+
+### Two of ours on this build (the rig, 2026-11-20, 17:16-17:30)
+
+- `sl_run.sh lbcsl1`, the mode off: join, Pod, the Introduction, the guest killed. Gap-free delivery
+  as before, no kick until 10 s after the guest was killed (as meant); flips with no step at most 28 in a
+  row in the session (the join and the level start).
+- `sl_run.sh lbcsl2 LBP3_LBPPC_COOP=1`, the mode on for both: our own protocol between them (no LBPPC
+  frame, gap-free delivery), the same picture: at most 28 in a row, the kick 10 s after the kill.
+- `rf_run.sh lbcrf1 6 LBP3_LBPPC_COOP=1 LBP3_P2P_TEST_LOSS=19`, the mode on for both on the LAN path
+  (faster than a frame) with gap-free delivery off and one datagram in 19 dropped: held 6 minutes, no
+  kick; the RTT floor below was on.
+
+The tick gate with the mode off (`tick_gate.sh lbcoop1`): Introduction steps != 1 0.13% and 0.39%,
+the Thruster recipe 3/3.
 
 ## Costs and open questions
 
 - Mixed sessions get LBPPC's link: no gap-free delivery, a sticky relay, no silence timeout.
-- Without gap-free delivery, the port's clock fault on paths faster than a frame (#1, ticket 13) turns
-  any loss into the 10 s kick. LBPPC players rarely get such a path to us (no LAN address; relayed
-  even on one network), and the RTT floor (`LBP3_RTT_FLOOR_MS`, a test setting today, installed only
-  with the session log or `LBP3_CONN_PROBE`) is #1's chosen fix for ours and theirs alike: owed there.
+- Without gap-free delivery, the port's clock fault on paths faster than a frame (#1, tickets 13 and
+  32) turns any loss into the 10 s kick, and a mixed session gets such a path when LBPPC's UPnP opens a
+  direct way between nearby players. So in the mode an RTT sample under one frame counts as one frame
+  by default (`core/sync_probe.cpp`, #1's chosen first step; the session log that carries it is on
+  whenever the game is online; `LBP3_RTT_FLOOR_MS=0` turns it off). Between two of ours without the
+  mode it stays #1's to land.
 - Any LBPPC release can change its protocol or simulation: check each one.
 - LBPPC's accounts design (`docs/accounts/DESIGN.md`) ends name-and-password sign-in for old
   clients 3 months after its Phase 1; this port signs in that way. Independent of this mode, but it

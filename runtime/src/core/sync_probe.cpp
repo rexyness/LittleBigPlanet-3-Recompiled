@@ -37,6 +37,7 @@
 #include <set>
 #include <thread>
 
+#include "core/lbppc_mode.h"
 #include "core/log_stamp.h"
 #include "core/session_log.h"
 #include "core/runner.h"
@@ -390,9 +391,18 @@ float PS4_SYSV_ABI LogRttSample(int64_t ns, uint64_t msg, uint64_t conn, uint64_
                          bins[4].load(), bins[5].load(), bins[6].load());
     }
     // LBP3_RTT_FLOOR_MS=<n> (a test): a sample below n ms, negative ones included, counts as n ms.
+    // In the LBPPC co-op mode (core/lbppc_mode.h) one frame by default: LBPPC players have no gap-free
+    // delivery, and on a path faster than a frame the port's clock can show the game an ack before its
+    // message was sent, after which any lost datagram brings the 10 s kick (#1 tickets 13 and 32; the
+    // floor is #1's chosen first step). LBP3_RTT_FLOOR_MS=0 turns it off there.
     static const int64_t floorNs = [] {
         const char* v = std::getenv("LBP3_RTT_FLOOR_MS");
-        return v ? static_cast<int64_t>(std::atof(v) * 1e6) : int64_t{0};
+        if (v && *v) return static_cast<int64_t>(std::atof(v) * 1e6);
+        if (core::lbppc::Mode()) {
+            std::fprintf(stderr, "[rtt] the LBPPC co-op mode: an RTT sample under one frame counts as one frame\n");
+            return int64_t{33'333'333};
+        }
+        return int64_t{0};
     }();
     if (floorNs > 0 && ns < floorNs) ns = floorNs;
     // The session log only counts: the sample goes to the game as it is.
