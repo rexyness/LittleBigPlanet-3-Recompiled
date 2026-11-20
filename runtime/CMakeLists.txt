@@ -37,6 +37,7 @@ add_library(hle STATIC
     src/core/nid.cpp
     src/core/patches.cpp
     src/core/res_patches.cpp
+    src/core/sticker_patches.cpp
     src/core/exact_math.cpp
     src/core/sync_probe.cpp
     src/core/runner.cpp
@@ -171,6 +172,10 @@ target_link_libraries(rescachetest PRIVATE hle)
 add_executable(restest tests/restest.cpp)
 target_link_libraries(restest PRIVATE hle)
 
+# Sharper stickers (core/sticker_patches.h): the ten sites, the setting's values, all or nothing.
+add_executable(stickertest tests/stickertest.cpp)
+target_link_libraries(stickertest PRIVATE hle)
+
 # Exact math (core/exact_math.h): the stubs against the original code and the exact result; the checks.
 add_executable(exactmathtest tests/exactmathtest.cpp)
 target_link_libraries(exactmathtest PRIVATE hle)
@@ -270,7 +275,7 @@ target_link_libraries(p2ptest PRIVATE hle)
 add_executable(clocktest tests/clocktest.cpp)
 target_link_libraries(clocktest PRIVATE hle)
 
-foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest restest exactmathtest unlocktest vkcachetest uxtest motiontest shadnettest p2ptest clocktest LBP3Launcher)
+foreach(exe lbp3 padtest jpegtest imetest dialogtest osktest dlgtest cooptest framegentest fgeval audiotest addconttest rescachetest restest stickertest exactmathtest unlocktest vkcachetest uxtest motiontest shadnettest p2ptest clocktest LBP3Launcher)
     add_custom_command(TARGET ${exe} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${exe}>)
 endforeach()

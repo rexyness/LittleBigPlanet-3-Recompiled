@@ -49,6 +49,7 @@ struct Settings {
     bool skip_intro = true;
     bool framegen = true;
     std::string res = "2560x1440";  // WxH, one of Resolutions() (older files: res=1440 or 1080)
+    bool sharper_stickers = true;   // the sticker atlas at 512-px tiles; false = LBP3_STICKERS=ps4 (the PS4's)
     // play_best.bat's
     bool fg_text = true;
     int status_flips = 30;

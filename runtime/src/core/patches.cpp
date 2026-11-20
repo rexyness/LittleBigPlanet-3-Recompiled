@@ -13,6 +13,7 @@
 #include "core/exact_math.h"
 #include "core/module.h"
 #include "core/res_patches.h"
+#include "core/sticker_patches.h"
 #include "hle/online.h"
 
 namespace core {
@@ -127,6 +128,7 @@ void ApplyPatches(Module& m) {
     exactmath::Apply(m);  // first: it checks the sites' original bytes (eboot.bin and spu.prx)
     if (m.fileName == "eboot.bin") ApplySyncProbe(m);
     if (m.fileName == "eboot.bin") res::Apply(m);
+    if (m.fileName == "eboot.bin") stickers::Apply(m);  // LBP3_STICKERS: core/sticker_patches.h
     if (m.fileName == "eboot.bin") ApplyOnlineKey(m);
     for (const Patch& p : kPatches) {
         if (m.fileName != p.module) continue;

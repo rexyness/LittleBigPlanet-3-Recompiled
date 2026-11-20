@@ -135,6 +135,22 @@ _Avoid_: drop, disconnect (for this case)
 Two players' simulations no longer matching, which the game detects and reports as "The game diverged".
 _Avoid_: desync
 
+## Stickers
+
+**Sticker atlas**:
+The game's render target that every placed sticker is drawn into before it shows on a surface: a 16x16 grid of sticker tiles, 255 of them usable. 4096x4096 on the PS4.
+_Avoid_: decal atlas, tile texture (the game's own names: RenderDecals, TileTex)
+
+**Sticker tile**:
+One square of the sticker atlas, holding the stickers of one patch of one object's surface. 256 px on the PS4, 512 px with sharper stickers.
+
+**Sticker density**:
+How many sticker tiles the game gives each world unit of a stickered surface, as a share of its maximum (one tile per 250 units). The game lowers it for everything when the visible stickers need more tiles than the atlas has, and raises it again when they fit.
+_Avoid_: sticker resolution, decal quality
+
+**Sharper stickers**:
+The port's setting that makes sticker tiles 512 px, so every sticker has twice the PS4's detail per axis at any sticker density. On by default; `LBP3_STICKERS=ps4` or the launcher's checkbox keeps the PS4's atlas.
+
 ## Planning
 
 **Port spec**:
