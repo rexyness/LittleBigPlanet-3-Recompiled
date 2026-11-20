@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -287,16 +288,20 @@ bool CanRunInChild(std::string* why, std::string* gpu) {
         *why = "the DLSS check couldn't start";
         return false;
     }
+    // Wait first (with the time limit), then read: the child prints one short line, far less than
+    // the pipe holds, so it never blocks on a full pipe.
     std::string out;
-    char buf[512];
-    DWORD got = 0;
-    while (ReadFile(rd, buf, sizeof(buf), &got, nullptr) && got) out.append(buf, got);
-    CloseHandle(rd);
     DWORD code = 1;
     if (WaitForSingleObject(pi.hProcess, 30000) != WAIT_OBJECT_0) {
         TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 5000);
         out = "dlss: not available: the DLSS check took too long";
+    } else {
+        char buf[512];
+        DWORD got = 0;
+        while (ReadFile(rd, buf, sizeof(buf), &got, nullptr) && got) out.append(buf, got);
     }
+    CloseHandle(rd);
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
@@ -517,7 +522,7 @@ void Run(vk::CommandBuffer cmd, const Pass& p, std::initializer_list<std::pair<c
 
 struct Frame {
     bool composite = false, hud = false, vel = false, depth = false;
-    uint32_t draws = 0, displayDraws = 0, jittered = 0, skipped = 0;
+    uint32_t draws = 0, displayDraws = 0, jittered = 0, skipped = 0, biased = 0;
 } g_frame;
 std::map<uint64_t, uint32_t> g_zCount;  // depth address -> depth-tested draws this frame
 uint64_t g_velAddr = 0;
@@ -528,6 +533,7 @@ void (*g_prevOnFill)(u64, u64, u32, u32, bool) = nullptr;
 struct Stats {
     uint32_t flips = 0, upscaled = 0, noHud = 0, noVel = 0, noDepth = 0, failed = 0;
     uint32_t jitteredFrames = 0, smaaSkipped = 0, stretched = 0;
+    uint64_t biasedSamplers = 0;  // samplers a scene draw bound with the mip bias
     std::map<uint64_t, uint64_t> jitterTargets;  // rt0 -> jittered draws (LBP3_DLSS_TRACE)
 } g_stats;
 uint64_t g_flipCount = 0;
@@ -715,7 +721,9 @@ float SamplerBias() {
     if (g_mipBias == 0.0f || !g_prevUpscaled) return 0.0f;
     const auto& vp = internal::GetLiverpool()->regs.viewports[0];
     uint64_t rt0 = 0;
-    return SceneDraw(2.0f * vp.xscale, 2.0f * vp.yscale, &rt0) ? g_mipBias : 0.0f;
+    if (!SceneDraw(2.0f * vp.xscale, 2.0f * vp.yscale, &rt0)) return 0.0f;
+    ++g_frame.biased;
+    return g_mipBias;
 }
 
 bool Skip(u64 vs, u64 ps, u32 n) {
@@ -742,9 +750,10 @@ void Log() {
     std::fprintf(stderr,
                  "[dlss] %s %ux%u -> %ux%u: %u of %u flips upscaled; not: %u without the HUD-less image, %u "
                  "without vectors, %u without depth, %u failed (%u of those stretched); %u frames jittered, SMAA "
-                 "left out in %u\n",
+                 "left out in %u, %.0f samplers a frame with mip bias %.2f\n",
                  ModeLabel(), g_featW, g_featH, g_featOutW, g_featOutH, g_stats.upscaled, g_stats.flips, g_stats.noHud, g_stats.noVel,
-                 g_stats.noDepth, g_stats.failed, g_stats.stretched, g_stats.jitteredFrames, g_stats.smaaSkipped);
+                 g_stats.noDepth, g_stats.failed, g_stats.stretched, g_stats.jitteredFrames, g_stats.smaaSkipped,
+                 double(g_stats.biasedSamplers) / std::max<uint32_t>(1, g_stats.flips), g_mipBias);
     if (g_trace && !g_stats.jitterTargets.empty()) {
         std::string list;
         for (const auto& [rt0, n] : g_stats.jitterTargets) {
@@ -792,6 +801,11 @@ bool Apply(const std::string& key, const std::string& v) {
     } else if (key == "smaa") {
         if (v != "skip" && v != "keep") return false;
         g_skipSmaa = v == "skip";
+    } else if (key == "mipbias") {  // a number; "nvidia" = the guide's log2(render / output) - 1
+        if (v == "nvidia") g_mipBias = float(std::log2(1.0 / dlss_modes::kModes[g_mode].ratio) - 1.0);
+        else if (!v.empty() && (std::isdigit(static_cast<unsigned char>(v[0])) || v[0] == '-' || v[0] == '.'))
+            g_mipBias = float(std::atof(v.c_str()));
+        else return false;
     } else return false;
     return true;
 }
@@ -1165,6 +1179,7 @@ Output Process(void* cmdp, void* imagep) {
     }
     g_stats.jitteredFrames += jittered;
     g_stats.smaaSkipped += f.skipped > 0;
+    g_stats.biasedSamplers += f.biased;
     if (g_trace && !g_prevUpscaled)
         std::fprintf(stderr,
                      "[dlss] flip %llu not upscaled: composite %d, HUD-less %d, vectors %d, depth %d; %u draws, %u "

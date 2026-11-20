@@ -2,7 +2,7 @@
 # dlss_lane.sh <tag> [NAME=value ...]: the DLSS build through the game's other states, res_lane.sh's
 # route (_tools/res_lane.sh): the Pod, the Pod computer's Home, Edit Now (Create), the pause menu's
 # fade (during and after), a photo (Popit -> Stickers & Decorations -> Take A Photo). 2560x1440,
-# the upscaler on with stage 2's defaults (jitter ++, SMAA left out), LBP3_DLSS_TRACE=1 (every flip
+# the upscaler on (LBP3_UPSCALER_MODE, default Quality; jitter ++, SMAA left out), LBP3_DLSS_TRACE=1 (every flip
 # DLSS doesn't take is logged with what was missing), the capture hook taking 2 frames per spot
 # (LBP3_FG_DUMP=2, analysis/fg_dump/dlssl_<tag>_<spot>/), screenshots, muted, frame generation off,
 # the story test save, the game lock held.

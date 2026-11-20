@@ -1,7 +1,8 @@
 #!/bin/sh
 # dlss_run.sh <tag> [NAME=value ...]: one run of the dlss worktree's build on res_run2.sh's route
 # (the story test save: the Pod, the Prologue map, Needlepoint's start, walk, basket, popit), at
-# 2560x1440 (LBP3_RES=1440 + shaders), muted, frame generation off, the capture hook on
+# a 2560x1440 output (LBP3_RES=1440 + shaders; with LBP3_UPSCALER=dlss the mode is LBP3_UPSCALER_MODE,
+# default Quality), muted, frame generation off unless passed, the capture hook on unless NODUMP=1
 # (LBP3_FG_DUMP=2: the flipped image and the HUD-less image at full size per spot).
 # Holds the game lock and swaps in the test saves (saves.sh) for the whole run; the human's
 # saves and the lock come back on any exit. Uses its own shader cache copy (analysis/dlss_cache).

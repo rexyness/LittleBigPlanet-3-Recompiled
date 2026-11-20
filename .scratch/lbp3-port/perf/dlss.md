@@ -144,6 +144,27 @@ The design is settled in issue #24, `GLOSSARY.md` ("The picture") and ADRs 0002 
   - frame work 25.4 ms (walk) and 23.5 ms (basket), 0 frames over 40 ms, worst 35.7 ms;
   - all 126 boot flips DLSS couldn't take were stretched.
 
+## Checks before handing over (2026-11-21)
+
+- **The packaging guard refuses a DLSS build** [measured]: `tools\make_package.ps1 -SkipBuild -AllowDirty`, run in the dlss worktree, stopped with "build\ is a DLSS build (LBP3_DLSS): a DLSS build is never published; package from a build without it". Nothing was staged.
+- **DLAA with frame generation** (`NODUMP=1 dlss_run.sh d2`):
+  - every fetch used the HUD-less image and the vectors, generation about 2.8 ms;
+  - frame work 27.9 ms (walk, one frame over 40 ms, worst 50 ms) and 26.3 ms (basket, none over 40 ms).
+  - It's the heaviest combination: the full-size render plus DLSS plus the generator.
+- **Performance through the states route** (`dlss_lane.sh p3`, trace on):
+  - jitter reached only the scene (`1710d0000`, about 105–120 draws) and velocity (`177ad0000`, 48–71) targets. The fixed 1280x720 offscreen photo view, the same size as this render, was not hit;
+  - the photo encoded (640x360) and shows correctly in My Pictures;
+  - the only flips not upscaled were at boot (stretched); 0 GPU warnings.
+- **Mip bias is applied** [measured, the new per-window count]: 419 samplers a frame at −1.00 in DLAA, 965 at −2.00 in Performance. NVIDIA's value against none (`dlss_exp3.sh m1`, Quality, standing at the basket, 12 frames each):
+
+  | Mip bias | DLSS frame-to-frame change | DLSS sharpness |
+  |---|---|---|
+  | 0 | 0.909 | 6.28 |
+  | −1.58 (NVIDIA's) | 0.842 | 9.28 |
+
+  NVIDIA's bias is sharper and no less steady. Its crops show crisper leather grain and stitching, and no moiré (`analysis\dlss_stills\dlssx_m1_standing.png`). In upscaling modes `dlss_temporal.py`'s "game" column comes from the render-size image, so it shows another region.
+- **Fixed:** the child probe now waits first (30 s limit) and reads afterwards. Before, reading blocked until the child exited, so the time limit could never fire.
+
 ## Trying it (the user's session)
 
 - Start `D:\Recomps\lbp3-wt\dlss\build\LBP3Launcher.exe`, the DLSS build's own launcher. It finds the main clone's `user\` (settings and saves) and starts the `lbp3.exe` beside it.
