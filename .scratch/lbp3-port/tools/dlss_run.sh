@@ -18,11 +18,14 @@ if [ ! -d analysis/dlss_cache/CUSA00473 ]; then
   mkdir -p analysis/dlss_cache && cp -r user/shader_cache_best/CUSA00473* analysis/dlss_cache/ || exit 1
 fi
 cache_w=$(cygpath -w "$PWD/analysis/dlss_cache")
+# NODUMP=1: no capture hook (frame generation wants the same GPU hooks); stills only as screenshots.
+dumpenv="LBP3_FG_DUMP=2"
+[ -n "$NODUMP" ] && dumpenv="LBP3_NO_FG_DUMP=1"
 launch_exe() {
   taskkill //f //im lbp3.exe >/dev/null 2>&1; sleep 1; rm -f analysis/input_cmd.txt analysis/frame_split.csv
   exe_m=$(cygpath -m "$EXE"); root_m=$(cygpath -m "$PWD")
   disp=$(head -n 1 analysis/test_display.txt 2>/dev/null | tr -d '\r ')
-  env LBP3_VOLUME=0 LBP3_REMOTE_INPUT=1 LBP3_DISPLAY="${LBP3_DISPLAY:-$disp}" LBP3_FG_DUMP=2 LBP3_FRAME_SPLIT=1 \
+  env LBP3_VOLUME=0 LBP3_REMOTE_INPUT=1 LBP3_DISPLAY="${LBP3_DISPLAY:-$disp}" $dumpenv LBP3_FRAME_SPLIT=1 \
     LBP3_RES=1440 LBP3_RES_SHADERS=1 LBP3_SHADER_CACHE_DIR="$cache_w" "$@" powershell -NoProfile -Command \
     "Start-Process -FilePath '$exe_m' -ArgumentList '--run','--skip-intro' -WorkingDirectory '$root_m' -RedirectStandardOutput '$root_m/analysis/remote_stdout.txt' -RedirectStandardError '$root_m/analysis/remote_stderr.txt'" >/dev/null
 }

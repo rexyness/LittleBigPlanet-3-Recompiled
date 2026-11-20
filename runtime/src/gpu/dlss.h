@@ -18,6 +18,9 @@ namespace gpu::dlss {
 struct Output {
     void* image = nullptr;  // VkImage, in TRANSFER_SRC_OPTIMAL; nullptr = read the display image as before
     uint32_t width = 0, height = 0;
+    // For frame generation at the output size (gpu/fg_live.h OnUpscaled), same size and layout:
+    void* hudless = nullptr;   // the picture before the screen HUD went back on top
+    void* velocity = nullptr;  // the game's vectors resampled to the output size (null: none this frame)
 };
 
 #if LBP3_DLSS

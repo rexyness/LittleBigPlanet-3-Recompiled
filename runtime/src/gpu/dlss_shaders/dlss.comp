@@ -52,4 +52,21 @@ void main() {
     const bool hud = max(diff.r, max(diff.g, diff.b)) > pc.hudT;
     imageStore(outImg, ivec2(p), hud ? f : vec4(d.rgb, f.a));
 }
+
+#elif PASS == 3
+// The game's velocity target resampled to the output size (nearest), still in its own RGBA8
+// encoding, which counts in screen fractions: frame generation, working at the output size, reads
+// it as it reads the game's (video/framegen_warp.h).
+layout(set = 0, binding = 0) uniform sampler2D velTex;
+layout(set = 0, binding = 1, rgba8) uniform writeonly image2D velOut;
+layout(push_constant) uniform PC {
+    vec2 unused;
+    uvec2 size;  // output size
+} pc;
+
+void main() {
+    const uvec2 p = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(p, pc.size))) return;
+    imageStore(velOut, ivec2(p), textureLod(velTex, (vec2(p) + 0.5) / vec2(pc.size), 0.0));
+}
 #endif

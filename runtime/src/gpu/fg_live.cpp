@@ -154,31 +154,34 @@ void SetDisplayBuffer(int index, uint64_t address) {
     if (index >= 0 && index < 16) g_display[index] = address;
 }
 
-void OnReadbackCopy(void* cmdp, void* imagep) {
-    if (!g_on) return;
-    auto& image = *static_cast<VideoCore::Image*>(imagep);
-    const uint32_t w = image.info.size.width, h = image.info.size.height;
-    if (!g_gen || g_gen->Width() != w || g_gen->Height() != h) {
-        std::lock_guard lk(g_genMutex);
-        if (!g_gen) {
-            auto* inst = internal::GetInstance();
-            fggpu::Device d;
-            d.device = static_cast<VkDevice>(inst->GetDevice());
-            d.physicalDevice = static_cast<VkPhysicalDevice>(inst->GetPhysicalDevice());
-            d.allocator = inst->GetAllocator();
-            d.queueFamily = inst->GetGraphicsQueueFamilyIndex();
-            g_gen = std::make_unique<fggpu::WarpGpu>(d, g_params);
-        }
-        if (!g_gen->Resize(w, h)) {
-            std::fprintf(stderr, "[framegen] GPU warp: could not allocate for %ux%u\n", w, h);
-            return;
-        }
-        g_haveFinal[0] = g_haveFinal[1] = false;
-        g_hudValid[0] = g_hudValid[1] = false;
-        g_frame.hud = g_frame.vel = false;  // copied before the buffers existed, or at another size
+namespace {
+
+// The generator, created or resized for w x h (a new size starts it afresh). False = no generator.
+bool EnsureGen(uint32_t w, uint32_t h) {
+    if (g_gen && g_gen->Width() == w && g_gen->Height() == h) return true;
+    std::lock_guard lk(g_genMutex);
+    if (!g_gen) {
+        auto* inst = internal::GetInstance();
+        fggpu::Device d;
+        d.device = static_cast<VkDevice>(inst->GetDevice());
+        d.physicalDevice = static_cast<VkPhysicalDevice>(inst->GetPhysicalDevice());
+        d.allocator = inst->GetAllocator();
+        d.queueFamily = inst->GetGraphicsQueueFamilyIndex();
+        g_gen = std::make_unique<fggpu::WarpGpu>(d, g_params);
     }
-    if (!FourByteColour(image.info.pixel_format)) return;
-    vk::CommandBuffer cmd(static_cast<VkCommandBuffer>(cmdp));
+    if (!g_gen->Resize(w, h)) {
+        std::fprintf(stderr, "[framegen] GPU warp: could not allocate for %ux%u\n", w, h);
+        return false;
+    }
+    g_haveFinal[0] = g_haveFinal[1] = false;
+    g_hudValid[0] = g_hudValid[1] = false;
+    g_frame.hud = g_frame.vel = false;  // copied before the buffers existed, or at another size
+    return true;
+}
+
+// Copies a w x h image (transfer-source layout) into one of the generator's buffers, after the
+// previous generation (an earlier submission) has read it.
+void CopyRaw(vk::CommandBuffer cmd, vk::Image image, void* dstBuffer, uint32_t w, uint32_t h) {
     const vk::MemoryBarrier2 war{.srcStageMask = vk::PipelineStageFlagBits2::eComputeShader |
                                                  vk::PipelineStageFlagBits2::eTransfer,
                                  .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
@@ -187,9 +190,34 @@ void OnReadbackCopy(void* cmdp, void* imagep) {
     const vk::BufferImageCopy region{.bufferOffset = 0,
                                      .imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
                                      .imageExtent = {w, h, 1}};
-    cmd.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
-                          vk::Buffer(static_cast<VkBuffer>(g_gen->FinalBuffer(g_slot))), region);
+    cmd.copyImageToBuffer(image, vk::ImageLayout::eTransferSrcOptimal,
+                          vk::Buffer(static_cast<VkBuffer>(dstBuffer)), region);
+}
+
+}  // namespace
+
+void OnReadbackCopy(void* cmdp, void* imagep) {
+    if (!g_on) return;
+    auto& image = *static_cast<VideoCore::Image*>(imagep);
+    const uint32_t w = image.info.size.width, h = image.info.size.height;
+    if (!EnsureGen(w, h)) return;
+    if (!FourByteColour(image.info.pixel_format)) return;
+    CopyRaw(vk::CommandBuffer(static_cast<VkCommandBuffer>(cmdp)), image.GetImage(), g_gen->FinalBuffer(g_slot), w, h);
     g_frame.final = true;
+}
+
+void OnUpscaled(void* cmdp, void* finalImage, void* hudlessImage, void* velocityImage, uint32_t w, uint32_t h) {
+    if (!g_on || !finalImage) return;
+    if (!EnsureGen(w, h)) return;
+    const vk::CommandBuffer cmd(static_cast<VkCommandBuffer>(cmdp));
+    CopyRaw(cmd, vk::Image(static_cast<VkImage>(finalImage)), g_gen->FinalBuffer(g_slot), w, h);
+    g_frame.final = true;
+    // The game-sized HUD-less image and vectors its own hooks copied (none when they don't fit
+    // the output size) are replaced by the upscaler's.
+    g_frame.hud = hudlessImage != nullptr;
+    if (hudlessImage) CopyRaw(cmd, vk::Image(static_cast<VkImage>(hudlessImage)), g_gen->HudBuffer(g_slot), w, h);
+    g_frame.vel = velocityImage != nullptr;
+    if (velocityImage) CopyRaw(cmd, vk::Image(static_cast<VkImage>(velocityImage)), g_gen->VelBuffer(), w, h);
 }
 
 Ticket Kick() {

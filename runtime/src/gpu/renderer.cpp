@@ -257,7 +257,12 @@ bool ReadbackDisplayBuffer(const DisplayBufferDesc& d, std::vector<uint8_t>& out
         .imageExtent = {width, height, 1},
     };
     cmd.copyImageToBuffer(readFrom, vk::ImageLayout::eTransferSrcOptimal, g_staging.buffer, region);
-    fglive::OnReadbackCopy(static_cast<VkCommandBuffer>(cmd), &image);  // frame generation's copy (when on)
+    // Frame generation's copies (when on): the upscaler's picture and its inputs at the output size,
+    // or the display image.
+    if (up.image)
+        fglive::OnUpscaled(static_cast<VkCommandBuffer>(cmd), up.image, up.hudless, up.velocity, up.width, up.height);
+    else
+        fglive::OnReadbackCopy(static_cast<VkCommandBuffer>(cmd), &image);
     split::Mark(split::FinishBegin);
     g_scheduler->Finish();  // wait for the GPU; fine for a first version
     split::Mark(split::FinishEnd);

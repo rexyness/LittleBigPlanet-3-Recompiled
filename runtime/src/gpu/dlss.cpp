@@ -21,6 +21,8 @@
 #include "gpu/dlss_modes.h"
 #include "gpu/dlss_shaders/dlss_compose_comp.h"
 #include "gpu/dlss_shaders/dlss_mvdecode_comp.h"
+#include "gpu/dlss_shaders/dlss_velscale_comp.h"
+#include "gpu/fg_live.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -326,7 +328,7 @@ struct Img {
     vk::AccessFlags2 access{};
 };
 
-Img g_hud, g_final, g_vel8, g_depth, g_mv, g_out, g_comp;
+Img g_hud, g_final, g_vel8, g_depth, g_mv, g_out, g_comp, g_velOut;
 vk::Buffer g_depthBuf{};
 VmaAllocation g_depthBufAlloc{};
 vk::DeviceSize g_depthBufSize = 0;
@@ -431,7 +433,7 @@ struct Pass {
     vk::PipelineLayout layout{};
     vk::Pipeline pipe{};
 };
-Pass g_mvPass, g_composePass;
+Pass g_mvPass, g_composePass, g_velPass;
 vk::Sampler g_nearest{}, g_linear{};
 
 struct PC {
@@ -480,7 +482,8 @@ bool MakePipelines() {
     g_nearest = nearest;
     g_linear = linear;
     return MakePass(g_mvPass, std::span<const uint32_t>(DLSS_MVDECODE_COMP), 1) &&
-           MakePass(g_composePass, std::span<const uint32_t>(DLSS_COMPOSE_COMP), 3);
+           MakePass(g_composePass, std::span<const uint32_t>(DLSS_COMPOSE_COMP), 3) &&
+           MakePass(g_velPass, std::span<const uint32_t>(DLSS_VELSCALE_COMP), 1);
 }
 
 uint32_t DivUp(uint32_t a, uint32_t b) { return (a + b - 1) / b; }
@@ -524,7 +527,7 @@ void (*g_prevOnFill)(u64, u64, u32, u32, bool) = nullptr;
 
 struct Stats {
     uint32_t flips = 0, upscaled = 0, noHud = 0, noVel = 0, noDepth = 0, failed = 0;
-    uint32_t jitteredFrames = 0, smaaSkipped = 0;
+    uint32_t jitteredFrames = 0, smaaSkipped = 0, stretched = 0;
     std::map<uint64_t, uint64_t> jitterTargets;  // rt0 -> jittered draws (LBP3_DLSS_TRACE)
 } g_stats;
 uint64_t g_flipCount = 0;
@@ -738,9 +741,10 @@ void Log() {
     if (++g_stats.flips < 300) return;
     std::fprintf(stderr,
                  "[dlss] %s %ux%u -> %ux%u: %u of %u flips upscaled; not: %u without the HUD-less image, %u "
-                 "without vectors, %u without depth, %u failed; %u frames jittered, SMAA left out in %u\n",
+                 "without vectors, %u without depth, %u failed (%u of those stretched); %u frames jittered, SMAA "
+                 "left out in %u\n",
                  ModeLabel(), g_featW, g_featH, g_featOutW, g_featOutH, g_stats.upscaled, g_stats.flips, g_stats.noHud, g_stats.noVel,
-                 g_stats.noDepth, g_stats.failed, g_stats.jitteredFrames, g_stats.smaaSkipped);
+                 g_stats.noDepth, g_stats.failed, g_stats.stretched, g_stats.jitteredFrames, g_stats.smaaSkipped);
     if (g_trace && !g_stats.jitterTargets.empty()) {
         std::string list;
         for (const auto& [rt0, n] : g_stats.jitterTargets) {
@@ -971,7 +975,8 @@ Output Evaluate(void* cmdp, void* imagep, const Frame& f, float jx, float jy) {
     const vk::Format fmt = Unorm(display.info.pixel_format);
     if (!Make(g_final, W, H, fmt, vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled) ||
         !Make(g_mv, W, H, vk::Format::eR16G16Sfloat, vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled) ||
-        !Make(g_out, OW, OH, vk::Format::eR8G8B8A8Unorm, vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled) ||
+        !Make(g_out, OW, OH, vk::Format::eR8G8B8A8Unorm,
+              vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferSrc) ||
         !Make(g_comp, OW, OH, vk::Format::eR8G8B8A8Unorm,
               vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc)) {
         ++g_stats.failed;
@@ -1070,7 +1075,54 @@ Output Evaluate(void* cmdp, void* imagep, const Frame& f, float jx, float jy) {
         PC{kHudT, 0.0f, OW, OH});
     To(cmd, g_comp, vk::ImageLayout::eTransferSrcOptimal, vk::PipelineStageFlagBits2::eTransfer,
        vk::AccessFlagBits2::eTransferRead);
+    // Frame generation works on this picture at the output size (fg_live.h OnUpscaled): DLSS's
+    // picture before the HUD went back is its HUD-less image, and the game's vectors are resampled.
+    if (fglive::Active()) {
+        To(cmd, g_out, vk::ImageLayout::eTransferSrcOptimal, vk::PipelineStageFlagBits2::eTransfer,
+           vk::AccessFlagBits2::eTransferRead);
+        out.hudless = static_cast<VkImage>(g_out.image);
+        if (Make(g_velOut, OW, OH, vk::Format::eR8G8B8A8Unorm,
+                 vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc)) {
+            ToWrite(cmd, g_velOut);
+            Run(cmd, g_velPass, {{&g_vel8, g_nearest}}, g_velOut, PC{0.0f, 0.0f, OW, OH});
+            To(cmd, g_velOut, vk::ImageLayout::eTransferSrcOptimal, vk::PipelineStageFlagBits2::eTransfer,
+               vk::AccessFlagBits2::eTransferRead);
+            out.velocity = static_cast<VkImage>(g_velOut.image);
+        }
+    }
     ++g_stats.upscaled;
+    out.image = static_cast<VkImage>(g_comp.image);
+    out.width = OW;
+    out.height = OH;
+    return out;
+}
+
+// A flip DLSS can't take while upscaling (a loading screen, a menu with no 3D scene): the game's
+// picture stretched (bilinear) to the output size, so the window and frame generation keep one size.
+Output Stretch(void* cmdp, void* imagep) {
+    Output out;
+    auto& display = *static_cast<VideoCore::Image*>(imagep);
+    if (!FourByte(display.info.pixel_format)) return out;
+    const uint32_t W = display.info.size.width, H = display.info.size.height, OW = g_outW, OH = g_outH;
+    vk::CommandBuffer cmd(static_cast<VkCommandBuffer>(cmdp));
+    if (!Make(g_final, W, H, Unorm(display.info.pixel_format), vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled) ||
+        !Make(g_comp, OW, OH, vk::Format::eR8G8B8A8Unorm, vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc))
+        return out;
+    To(cmd, g_final, vk::ImageLayout::eTransferDstOptimal, vk::PipelineStageFlagBits2::eTransfer,
+       vk::AccessFlagBits2::eTransferWrite);
+    cmd.copyImage(display.GetImage(), vk::ImageLayout::eTransferSrcOptimal, g_final.image,
+                  vk::ImageLayout::eTransferDstOptimal,
+                  vk::ImageCopy{.srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                                .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                                .extent = {W, H, 1}});
+    ToRead(cmd, g_final);
+    ToWrite(cmd, g_comp);
+    // hudT -1: every pixel comes from the finished frame, sampled at the output pixel's centre.
+    Run(cmd, g_composePass, {{&g_final, g_linear}, {&g_final, g_linear}, {&g_final, g_nearest}}, g_comp,
+        PC{-1.0f, 0.0f, OW, OH});
+    To(cmd, g_comp, vk::ImageLayout::eTransferSrcOptimal, vk::PipelineStageFlagBits2::eTransfer,
+       vk::AccessFlagBits2::eTransferRead);
+    ++g_stats.stretched;
     out.image = static_cast<VkImage>(g_comp.image);
     out.width = OW;
     out.height = OH;
@@ -1105,11 +1157,15 @@ Output Process(void* cmdp, void* imagep) {
         g_remote.clear();
     }
     Log();
-    const Output out = Evaluate(cmdp, imagep, f, jx, jy);
+    Output out = Evaluate(cmdp, imagep, f, jx, jy);
     g_prevUpscaled = out.image != nullptr;  // the gate for the next frame's jitter and SMAA skip
+    if (!out.image && g_outW) {
+        const auto& d = static_cast<VideoCore::Image*>(imagep)->info.size;
+        if (d.width != g_outW || d.height != g_outH) out = Stretch(cmdp, imagep);
+    }
     g_stats.jitteredFrames += jittered;
     g_stats.smaaSkipped += f.skipped > 0;
-    if (g_trace && !out.image)
+    if (g_trace && !g_prevUpscaled)
         std::fprintf(stderr,
                      "[dlss] flip %llu not upscaled: composite %d, HUD-less %d, vectors %d, depth %d; %u draws, %u "
                      "into a display buffer, %u jittered, SMAA %s\n",

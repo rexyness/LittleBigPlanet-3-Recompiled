@@ -30,6 +30,12 @@ void SetDisplayBuffer(int index, uint64_t address);
 // cmd = VkCommandBuffer, image = VideoCore::Image*.
 void OnReadbackCopy(void* cmd, void* image);
 
+// Instead of OnReadbackCopy when a DLSS build's upscaler made the picture (gpu/dlss.h): its picture
+// (the screen HUD back on top), the picture before the HUD went back (the HUD-less image; may be
+// null) and the game's vectors resampled to its size in the game's own RGBA8 encoding (may be
+// null): w x h VkImages in transfer-source layout. The generator then works at the output size.
+void OnUpscaled(void* cmd, void* finalImage, void* hudlessImage, void* velocityImage, uint32_t w, uint32_t h);
+
 // After the flip's readback (its Finish done): submits the generation for this frame.
 Ticket Kick();
 
