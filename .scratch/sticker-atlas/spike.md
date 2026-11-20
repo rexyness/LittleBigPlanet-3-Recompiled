@@ -56,6 +56,30 @@ Ten checked same-length edits in `runtime/src/core/patches.cpp`, applied only wi
 - **So the decal pass draws real detail into 512-px tiles.** There is no hidden 256-px assumption that reduces them to an upscale.
 - **The pair isn't matched.** The owners differ (2x2 at [30,0] against 3x2 at [29,0]), so the sticker landed differently in each run. The photo's Sackboy is about 70 texels tall in A's tile and about 60 in B's. How much sharper the *same* sticker gets is still unmeasured.
 
+## Matched A/B in the user's Pod (2026-11-20, the verdict run)
+
+The Create level ("Edit Now") has no stickerable material, and scripted placement doesn't register in the Pod either (neither ✕ nor an emulated touch-pad tap). So the user placed library stickers by hand: a huge Garfield on the floor and one on the back wall.
+
+To save Pod edits, leave the Pod (go into a level and back). "Quit Game" and closing the window don't save: the first attempt was lost that way. The save was copied, and the same copy was booted in both builds to the default Pod view.
+
+- **The pairing is exact.** Both runs had G = 1.0, the same 31x31 owner and 227 tiles free. A no-sticker control region is pixel-identical (mean |A−B| 0.00).
+- **Screen detail** (std of a 4-neighbour Laplacian):
+
+| | A: 4096² | B: 512-px tiles | Gain |
+|---|---|---|---|
+| Floor Garfield, left half | 11.84 | 13.05 | +10% |
+| Floor Garfield, right half | 10.66 | 11.75 | +10% |
+| Wall Garfield | 8.90 | 9.67 | +9% |
+
+  Visibly crisper outlines, clearest on the smaller wall Garfield.
+
+- **Same atlas tiles across runs:** the contents are identical (means and spreads match). B's "detail above half resolution" is about 0.53× A's on most tiles and 0.8× on two. A pure 2x enlargement gives about 0.41×, and full double detail would give about 1×.
+  - So the 512-px tiles add real detail, but on a sticker blown up this large the game's own sticker image limits the gain.
+- **No density cut:** one big floor sticker plus one wall sticker kept G at 1.0. The original 0.377 needed heavier coverage.
+- **Verdict:** the change works mechanically, with no shader patch.
+  - It gives a real, moderate improvement: about +10% detail at full density (and +24% at a forced cut), for +192 MB of GPU memory.
+  - It can't make an oversized sticker sharper than its own image.
+
 ## Open
 
 - **Look at the atlas directly.** In one run per build, check whether a 512-px tile holds real extra detail. F9 dumps every target, but it also traces every draw of that frame, so add a way to skip the per-draw dumps first.
