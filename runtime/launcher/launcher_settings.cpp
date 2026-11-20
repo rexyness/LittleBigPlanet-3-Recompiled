@@ -124,6 +124,8 @@ std::string ToIni(const Settings& s) {
       << "name=" << OneLine(s.online_name) << "\n"
       << "; empty = the server's own shadNet\n"
       << "shadnet_server=" << OneLine(s.shadnet_server) << "\n"
+      << "; 1 = play with LBPPC players too (the LBPPC co-op mode)\n"
+      << "lbppc_coop=" << b(s.lbppc_coop) << "\n"
       << "[window]\n"
       << "x=" << s.win_x << "\ny=" << s.win_y << "\nw=" << s.win_w << "\nh=" << s.win_h << "\n"
       << "maximized=" << b(s.win_max) << "\n"
@@ -215,6 +217,7 @@ Settings FromIni(const std::string& text) {
             else if (key == "server") s.online_server = v;
             else if (key == "name") s.online_name = v;
             else if (key == "shadnet_server") s.shadnet_server = v;
+            else if (key == "lbppc_coop") ParseBool(v, s.lbppc_coop);
         } else if (section == "window") {
             if (key == "x" && ParseInt(v, -100000, 100000, n)) s.win_x = n;
             else if (key == "y" && ParseInt(v, -100000, 100000, n)) s.win_y = n;
@@ -322,6 +325,8 @@ LaunchPlan MapSettings(const Settings& s) {
             // Online, a shader freeze stops the game's updates to the other player, who sees this one
             // stand still and shown away (with the death countdown), so build in the background.
             if (s.async_shaders == AsyncShaders::Online) set("LBP3_ASYNC_PIPELINES", "1");
+            // Online co-op with LBPPC players too (core/lbppc_mode.h).
+            if (s.lbppc_coop) set("LBP3_LBPPC_COOP", "1");
         }
     }
     if (s.stats) set("LBP3_STATS", "1");

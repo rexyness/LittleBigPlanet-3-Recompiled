@@ -16,6 +16,7 @@
 #include <windows.h>
 
 #include "core/runner.h"
+#include "core/lbppc_mode.h"
 #include "core/tls.h"
 #include "hle/kernel_errors.h"
 #include "hle/register.h"
@@ -123,9 +124,12 @@ void CommitWholeStack() {
 // 0x9fc0 (all exceptions masked, flush-to-zero, denormals-are-zero) and x87 control word 0x037f.
 // Windows threads start with MXCSR 0x1f80, so denormals flowed through the game's physics and
 // cutscene code. Fibers already got 0x9fc0 (fiber.cpp).
+// LBP3_FP_STATE (core/lbppc_mode.h) picks another state: LBPPC's, in the LBPPC co-op mode, since every
+// player in a session must compute alike.
 void SetGuestFpState() {
-    unsigned int mxcsr = 0x9fc0;
-    unsigned short fcw = 0x037f;
+    const core::lbppc::FpState s = core::lbppc::GuestFp();
+    unsigned int mxcsr = s.mxcsr;
+    unsigned short fcw = s.fcw;
     __asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
     __asm__ volatile("fldcw %0" : : "m"(fcw));
 }

@@ -905,6 +905,21 @@ static void TestOnlineSwitch() {
     Settings r;
     r.shadnet_server = "tls://sn.example.org:31313";
     CHECK(FromIni(ToIni(r)).shadnet_server == r.shadnet_server);
+    // The LBPPC co-op mode: off by default; on, only together with online; kept in the file.
+    {
+        Settings c;
+        CHECK(!c.lbppc_coop);
+        c.online = true;
+        c.online_server = "play.lbppc.com";
+        c.online_name = "Sack_boy-1";
+        CHECK(!EnvMap(c).count("LBP3_LBPPC_COOP"));
+        c.lbppc_coop = true;
+        CHECK(EnvMap(c)["LBP3_LBPPC_COOP"] == "1");
+        CHECK(FromIni(ToIni(c)).lbppc_coop);
+        CHECK(!FromIni(ToIni(Settings{})).lbppc_coop);
+        c.online = false;
+        CHECK(!EnvMap(c).count("LBP3_LBPPC_COOP"));
+    }
 
     // the account file, in the tool's format and the old launcher's (comments, several blocks)
     AccountFile a = ParseAccountFile("name=Sack_boy-1\npassword=abc-DEF_123\nserver=play.lbppc.com\n");

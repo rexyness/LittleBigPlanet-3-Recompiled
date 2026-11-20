@@ -99,11 +99,15 @@ void PageOnline(App& a) {
     PageTitle("Online", "Play on a community server: your accounts, the server's status and news.");
     const float w = ImGui::GetContentRegionAvail().x, half = (w - S(12)) * 0.5f;
 
-    if (BeginCard("switch", ImVec2(half, S(250)))) {
+    if (BeginCard("switch", ImVec2(half, S(285)))) {
         Heading("Play online");
         Toggle("Online", &s.online,
                "When the game starts it signs in to the server with your active account: its levels and profiles (Refresh) and "
                "shadNet (sign-in, friends, playing together). The password is read by the game from your account file.");
+        Toggle("Play with LBPPC players", &s.lbppc_coop,
+               "Online co-op with friends who play on LBPPC's own client, not only on this one. Off by default; from the next "
+               "start. With it on, this game computes as LBPPC's does, so friends on this port need it on too to join you "
+               "(and off to join each other without it). The end of The Legend of Bunkum may need its pause-menu skip.");
         if (a.acct.file.ok()) {
             ImGui::TextColored(kDim, "as");
             ImGui::SameLine();
@@ -131,7 +135,7 @@ void PageOnline(App& a) {
     }
     EndCard();
     ImGui::SameLine();
-    if (BeginCard("status", ImVec2(half, S(250)))) {
+    if (BeginCard("status", ImVec2(half, S(285)))) {
         Heading("Server");
         {
             std::lock_guard lock(o.ping.m);

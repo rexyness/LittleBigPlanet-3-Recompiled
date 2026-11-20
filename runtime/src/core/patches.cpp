@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "core/exact_math.h"
+#include "core/lbppc_mode.h"
 #include "core/module.h"
 #include "core/res_patches.h"
 #include "hle/online.h"
@@ -123,11 +124,34 @@ void ApplyOnlineKey(Module& m) {
 
 void ApplySyncProbe(Module& m);  // sync_probe.cpp: LBP3_SYNC_PROBE=1 only
 
+// ---- The LBPPC co-op mode (core/lbppc_mode.h): simulate as LBPPC's game does ----
+// HasLBP2(part), a script native (0x822bc0), calls 0x7d8d90: true when the player's server profile says
+// LBP2 and that part's pin has progress. LBPPC answers yes for every part (src/probe.c has_lbp2_hook,
+// "LBP2 content", 2026-11-15; addresses found by LBPPC), so its scripts see yes; in a co-op session ours
+// must see the same. LBP3_HAS_LBP2=all|game overrides it (default: all in the mode, the game's
+// otherwise). The call at 0x822bcb becomes `mov eax, 1` (the caller stores al).
+void ApplyLbppcMode(Module& m) {
+    if (m.fileName != "eboot.bin") return;
+    const char* v = std::getenv("LBP3_HAS_LBP2");
+    const bool all = v && *v ? std::strcmp(v, "all") == 0 : lbppc::Mode();
+    if (!all) return;
+    static const uint8_t expect[5] = {0xe8, 0xc0, 0x61, 0xfb, 0xff};  // call 0x7d8d90
+    static const uint8_t replace[5] = {0xb8, 0x01, 0x00, 0x00, 0x00};  // mov eax, 1
+    uint8_t* at = m.Addr(0x822bcb);
+    if (std::memcmp(at, expect, 5) != 0) {
+        std::fprintf(stderr, "[patch] eboot.bin+0x822bcb (HasLBP2): bytes differ, skipped\n");
+        return;
+    }
+    std::memcpy(at, replace, 5);
+    std::fprintf(stderr, "[patch] eboot.bin+0x822bcb applied: HasLBP2 answers yes for every part, as LBPPC's game\n");
+}
+
 void ApplyPatches(Module& m) {
     exactmath::Apply(m);  // first: it checks the sites' original bytes (eboot.bin and spu.prx)
     if (m.fileName == "eboot.bin") ApplySyncProbe(m);
     if (m.fileName == "eboot.bin") res::Apply(m);
     if (m.fileName == "eboot.bin") ApplyOnlineKey(m);
+    ApplyLbppcMode(m);
     for (const Patch& p : kPatches) {
         if (m.fileName != p.module) continue;
         if (p.onlyWithEnv && !std::getenv(p.onlyWithEnv)) continue;

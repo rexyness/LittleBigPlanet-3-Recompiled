@@ -77,6 +77,9 @@ struct Settings {
     std::string online_server;
     std::string online_name;
     std::string shadnet_server;      // empty = the online server's host (play.lbppc.com -> its shadNet)
+    // The LBPPC co-op mode (LBP3_LBPPC_COOP=1, docs/research/lbppc-coop.md): online co-op with players on
+    // LBPPC's client too. Off by default; read at the next start. Only with online on.
+    bool lbppc_coop = false;
 
     // the launcher itself
     bool setup_done = false;         // the first-run wizard was finished or skipped

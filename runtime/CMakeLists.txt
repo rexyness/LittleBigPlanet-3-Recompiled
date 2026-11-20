@@ -38,6 +38,7 @@ add_library(hle STATIC
     src/core/patches.cpp
     src/core/res_patches.cpp
     src/core/exact_math.cpp
+    src/core/lbppc_mode.cpp
     src/core/sync_probe.cpp
     src/core/runner.cpp
     src/core/tls.cpp

@@ -19,6 +19,7 @@
 #endif
 #include <windows.h>
 
+#include "core/lbppc_mode.h"
 #include "core/tls.h"
 #include "hle/register.h"
 
@@ -239,8 +240,11 @@ void CheckStackOverflow(const Context* ctx) {
 
 void Launch(EntryData& data, const Fiber* fiber) {
     if (fiber->flags & kSetFpuRegs) {
-        data.fpucw = 0x037f;
-        data.mxcsr = 0x9fc0;
+        // The console's state, as the game asks; or the one LBP3_FP_STATE picked (core/lbppc_mode.h:
+        // LBPPC's fibers ignore the request, so in the LBPPC co-op mode they start in the threads' state).
+        const core::lbppc::FpState s = core::lbppc::GuestFp();
+        data.fpucw = s.fcw;
+        data.mxcsr = s.mxcsr;
         lbp3_FiberSwitchEntry(&data, true);
     } else {
         lbp3_FiberSwitchEntry(&data, false);

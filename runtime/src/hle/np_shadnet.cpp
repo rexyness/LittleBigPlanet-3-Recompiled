@@ -55,6 +55,7 @@
 #include "hle/register.h"
 #include "hle/users.h"
 #include "core/exact_math.h"
+#include "core/lbppc_mode.h"
 #include "net/p2p_link.h"
 #include "net/shadnet_service.h"
 #include "video/presenter.h"
@@ -1210,6 +1211,9 @@ void StartLink() {
     }
     c.exactMath = core::exactmath::Active();  // HELLO says so; a player whose game differs is refused
     std::fprintf(stderr, "[p2p] exact maths: %s\n", c.exactMath ? "on" : "off");
+    // The LBPPC co-op mode (core/lbppc_mode.h): LBPPC players too, in their protocol (net/p2p_lbppc.h).
+    c.lbppc = core::lbppc::Mode();
+    if (c.lbppc) std::fprintf(stderr, "[p2p] the LBPPC co-op mode: LBPPC players can join us and we them\n");
     if (const char* p = std::getenv("LBP3_P2P_DATA3"); p && *p == '0') {
         c.data3 = false;
         std::fprintf(stderr, "[p2p] LBP3_P2P_DATA3=0: no gap-free delivery\n");
