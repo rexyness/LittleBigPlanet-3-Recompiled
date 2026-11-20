@@ -210,3 +210,13 @@ The release zip is built from bestofboth `b37790b`. The test report, with screen
   - Notes from `tools/package/RELEASE-NOTES.md` (unchanged since `e7e4176`). Assets: the zip (8,095,385 bytes) and its `.sha256`.
   - Checked: not a draft or prerelease; `releases/latest` names it; the downloaded asset's sha256 is `aa5caf99…`, the tested zip's.
   - **Main not yet fast-forwarded:** this background job doesn't push main. The user runs `git merge --ff-only fork/release/v0.1.8-batch2` and `git push fork main` in the clone; main `9a4d760` is an ancestor.
+
+## v0.1.9-lbp3port (published 2026-11-20, ~23:55)
+
+**Play online with friends on LBPPC** (the "Play with LBPPC players" switch, `docs/research/lbppc-coop.md`), plus the netcode chain landed with it (cleaner leaving, the session log). The user: "go ahead and do the release"; no regression runs beyond what main already had ("no need to do regression"): the tick gate and rig sessions on the merged code (`docs/research/lbppc-coop.md`).
+
+- **Branch:** `release/v0.1.9` = main `dbe36a1` + `5dc9742` (the release notes and credits; the draft `RELEASE-NOTES-next.md` folded in and removed). shadPS4 `b0242a25`, the same as v0.1.8's, so players' shader caches carry over.
+- **Compatibility:** with the switch off the wire format is v0.1.8's (HELLO capabilities 1|2, DATA3, BYE unchanged; capability 4 only with the switch on), so v0.1.3 to v0.1.9 play together (from the code; no mixed-version session was run). With the switch on, a v0.1.8 player's ACK is refused: the join fails instead of drifting.
+- **Package:** `make_package.ps1 -Version v0.1.9-lbp3port` in `lbp3-wt\release` at `5dc9742`. `D:\Recomps\lbp3-dist\LBP3-Recompiled-v0.1.9-lbp3port.zip`: 49 files (the same set as v0.1.8's), 8,145,179 bytes, sha256 `313be89087c81f5d01c0d6349836666c70782e183f8862dcf70bcde12980ffe9`. `SOURCE.md`: `release/v0.1.9` @ `5dc9742`, shadPS4 `b0242a25`, "Package version: v0.1.9-lbp3port". The packaged launcher has the switch.
+- **Checked:** the zip unpacked with Windows' `tar.exe` into `test-v019\unz` and started offline from there (muted, pads hidden, under the game lock): the game's first picture after 1.8 s, alive at 50 s, no crash lines. On the release build: p2ptest 308/308, launchertest 434/434.
+- **Published:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/releases/tag/v0.1.9-lbp3port, "LittleBigPlanet 3 Recompiled v0.1.9 (play online with friends on LBPPC)". Tags `v0.1.9-lbp3port` (lightweight): runtime `5dc9742`, shadPS4 `b0242a25`. Assets: the zip and its `.sha256`. Notes from `tools/package/RELEASE-NOTES.md`. Not a draft or prerelease; `releases/latest` names it; the downloaded asset's sha256 is `313be890…`, the tested zip's.
