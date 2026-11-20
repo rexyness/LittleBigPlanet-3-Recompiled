@@ -129,3 +129,33 @@ The design is settled in issue #24, `GLOSSARY.md` ("The picture") and ADRs 0002 
   - About says "This build uses NVIDIA DLSS."
   - `launcher.ini` gains `upscaler` and `upscaler_mode`. `launchertest` 451 checks (+17), 0 failed, in both builds.
 - **Not yet:** frame generation (stage 4); the Mode row seen live (the `--shot` pictures come before the probe answers); mip bias compared on against off.
+
+## Stage 4: frame generation on DLSS's picture (2026-11-21)
+
+- **How:** `fglive::OnUpscaled` replaces the display-image copy when DLSS made the picture. The generator gets three things at the output size:
+  - DLSS's picture with the screen HUD back on top;
+  - DLSS's picture before the HUD went back, as the HUD-less image;
+  - the game's velocity target resampled to the output size (a third pass, nearest-neighbour, in the game's own RGBA8 encoding, which counts in screen fractions, so the generator's `W/1920` scaling still holds).
+- **Frames DLSS can't take while upscaling** (loading screens) are the game's picture stretched to the output size, so the window and the generator keep one size.
+- **Measured** (Quality 1712x960 → 2560x1440, `LBP3_FRAMEGEN=1 LBP3_FRAMEGEN_MODE=warp`, the route without the capture hook, `NODUMP=1 dlss_run.sh f1`):
+  - each 30-flip window: 30 real in, 30 generated, 0 dropped, 3–5 a refresh late at 165 Hz;
+  - every fetch used the HUD-less image and the game's vectors;
+  - generation 3.4–3.6 ms of GPU;
+  - frame work 25.4 ms (walk) and 23.5 ms (basket), 0 frames over 40 ms, worst 35.7 ms;
+  - all 126 boot flips DLSS couldn't take were stretched.
+
+## Trying it (the user's session)
+
+- Start `D:\Recomps\lbp3-wt\dlss\build\LBP3Launcher.exe`, the DLSS build's own launcher. It finds the main clone's `user\` (settings and saves) and starts the `lbp3.exe` beside it.
+- Graphics & sound: Upscaler → NVIDIA DLSS, then Mode. Quality draws 1712x960 at 2560x1440; DLAA draws the full size and is the sharpest. Frame generation can stay on.
+- The game log (`analysis\play_launcher_log.txt`) shows the `[dlss]` lines: the mode, the render size, NVIDIA's optimal size, and the per-300-flip counts.
+- To compare without DLSS, set Upscaler back to Off.
+
+## Still open
+
+- **Stage 5, the done checks (issue #24):**
+  - the user's session and verdict;
+  - one online session with DLSS on, with LBPPC players if possible;
+  - stills of the HUD's translucent parts, a photo and the pause fade in an upscaling mode (done in DLAA, `dlss_lane.sh l1`).
+- **16-bit vectors** (deferred, see stage 2).
+- **Mip bias** on against off has not been compared by eye.
