@@ -1,9 +1,28 @@
-**v0.1.9: play online with friends on LBPPC.**
-If you have v0.1.4 to v0.1.8, the launcher shows "v0.1.9 is out" when it opens: press **Update**. From
-v0.1.1 to v0.1.3, go to **Tools > Check for updates**. It installs v0.1.9 and keeps your saves, settings and
+**v0.1.10: fire and Horrible Gas show up, quitting saves first, sharper stickers.**
+If you have v0.1.4 to v0.1.9, the launcher shows "v0.1.10 is out" when it opens: press **Update**. From
+v0.1.1 to v0.1.3, go to **Tools > Check for updates**. It installs v0.1.10 and keeps your saves, settings and
 accounts. New here? Read on. **No game files are included:** you need your own copy of the game.
 
-### What's in it (new in v0.1.9)
+### What's in it (new in v0.1.10)
+- **Fire and Horrible Gas show up.** The fire material's flames and the Horrible Gas cloud were invisible. The game
+  builds their shapes on the processor from results the graphics card works out, and those results never came
+  back. Now they're copied back every frame. It costs frame time in levels with fire or gas only: at 1440p the
+  game's work went from 18 to 25 ms a frame, still 30 fps. `LBP3_FLUID_READBACK=0` turns it off.
+- **Quitting saves first.** The in-game menu's **Quit game**, the pause menu's **Quit Game** and the window's close
+  button now have the game save what you haven't saved yet, then close. Before, what you'd changed in your Pod since
+  the last save (a sticker, an object) was lost when you quit. Saving takes a few seconds. If the game hasn't
+  finished within 20 s it closes anyway, and your log says "NOT saved". Closing the window a second time stops the
+  wait, but a save that's being written still finishes first.
+- **Sharper stickers** (on by default). Stickers you place are drawn into 512-px tiles instead of the PS4's 256, so
+  they keep a little more detail (about 10% in our tests). A sticker blown up past its own picture stays as soft as
+  that picture. It uses about 192 MB more graphics memory. The launcher's **Graphics** page has a **Sharper
+  stickers** switch: off, stickers look exactly as on the PS4.
+- **Frame generation at 4K does less work.** Two copies of the picture are gone: one it didn't need, and one that
+  held up the game's next frame (about 2 ms each at 4K).
+- Your shader cache carries over: nothing to rebuild.
+- Nothing in how players connect changed: v0.1.3 to v0.1.10 players can play together.
+
+### New in v0.1.9
 - **Play with friends on LBPPC's own client** (experimental, off by default). The launcher's **Online** page has
   a new switch, **Play with LBPPC players**; it applies from the next start. With it on, friends who play
   LittleBigPlanet 3 on LBPPC can join your game and you theirs, from the game's own menus, as with friends on this
@@ -155,6 +174,8 @@ The first visit to each area can pause briefly while your graphics driver builds
 
 ### Known issues
 - Some scenes are still brighter than on a PS4, though less than before v0.1.7.
+- Fire and Horrible Gas haven't been played online with two players yet.
+- Sharper stickers haven't been played through a whole story level yet.
 - Since v0.1.8, a level can now and then judder for about a second (in tests, about one run of the Introduction
   in four). It's being looked into.
 - Online co-op is still new:
