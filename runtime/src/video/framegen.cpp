@@ -137,6 +137,11 @@ void Worker() {
                  cutThreshold, camJumpThreshold, relText);
 
     std::vector<uint8_t> prev;  // the last real frame (a copy: its own buffer goes to the presenter)
+    // Or, when the generator doesn't read N-1 on the host (the GPU warp) and no still is pending,
+    // only the samples the image difference reads (NeedsHostPrev; perf/firegas.md).
+    std::vector<uint8_t> prevSamples;
+    bool prevFull = false;
+    size_t prevBytes = 0;
     uint32_t prevW = 0, prevH = 0;
     int64_t prevSlot = 0;
     double prevCamJump = -1, prevCamMoved = -1, prevCamTurned = -1;
@@ -157,10 +162,10 @@ void Worker() {
         const int64_t realDue = paused ? genDue : genDue + s.info.periodNs / 2;
 
         const HostFrame cur{s.pixels.data(), s.width, s.height};
-        const HostFrame old{prev.data(), prevW, prevH};
+        const HostFrame old{prevFull ? prev.data() : nullptr, prevW, prevH};
         DecideIn d;
         d.havePrev = havePrev;
-        d.sameSize = havePrev && prevW == s.width && prevH == s.height && prev.size() == s.pixels.size();
+        d.sameSize = havePrev && prevW == s.width && prevH == s.height && prevBytes == s.pixels.size();
         d.sinceLastSlotNs = s.info.slotNs - prevSlot;
         d.periodNs = s.info.periodNs;
         d.simSteps = s.info.simSteps;
@@ -179,7 +184,7 @@ void Worker() {
         d.camRelDeg = camRelDeg;
         d.camRelRatio = camRelRatio;
         if (d.sameSize) {
-            d.cutDiff = MeanAbsDiff(old, cur);
+            d.cutDiff = prevFull ? MeanAbsDiff(old, cur) : MeanAbsDiffSamples(prevSamples, prevW, prevH, cur);
             std::lock_guard lk(g_mutex);
             g_stats.diffSum += d.cutDiff;
             g_stats.diffMax = std::max(g_stats.diffMax, d.cutDiff);
@@ -226,7 +231,7 @@ void Worker() {
                 int stillIndex = 0;
                 {
                     std::lock_guard lk(g_mutex);
-                    if (g_stillLeft > 0) {
+                    if (g_stillLeft > 0 && prevFull) {  // a still needs all of N-1 (kept from the next frame on)
                         --g_stillLeft;
                         stillName = g_stillName;
                         stillIndex = g_stillIndex++;
@@ -245,9 +250,23 @@ void Worker() {
         }
         if (drop != Drop::None) CountDrop(drop);
 
-        // Keep a copy as the next frame's N-1, then queue the real frame itself.
-        prev.resize(s.pixels.size());
-        if (!s.pixels.empty()) std::memcpy(prev.data(), s.pixels.data(), s.pixels.size());
+        // Keep the next frame's N-1 (all of it, or only the image difference's samples), then queue
+        // the real frame itself.
+        bool stillPending;
+        {
+            std::lock_guard lk(g_mutex);
+            stillPending = g_stillLeft > 0;
+        }
+        prevFull = gen->NeedsHostPrev() || stillPending;
+        if (prevFull) {
+            prev.resize(s.pixels.size());
+            if (!s.pixels.empty()) std::memcpy(prev.data(), s.pixels.data(), s.pixels.size());
+            prevSamples.clear();
+        } else {
+            DiffSamples(cur, prevSamples);
+            std::vector<uint8_t>().swap(prev);  // 33 MB at 4K: not kept while unused
+        }
+        prevBytes = s.pixels.size();
         prevW = s.width;
         prevH = s.height;
         prevSlot = s.info.slotNs;
@@ -415,6 +434,39 @@ const char* CutRule(const DecideIn& in) {
             return "camera turn";
     }
     return "";
+}
+
+// The same grid and order as MeanAbsDiff below: rows 4, 12, 20..., columns 4, 12, 20...
+void DiffSamples(const HostFrame& f, std::vector<uint8_t>& out) {
+    out.clear();
+    if (!f.pixels || f.width == 0 || f.height == 0) return;
+    out.reserve(size_t((f.width + 3) / 8) * ((f.height + 3) / 8) * 3);
+    for (uint32_t y = 4; y < f.height; y += 8) {
+        const uint8_t* r = f.pixels + size_t(y) * f.width * 4;
+        for (uint32_t x = 4; x < f.width; x += 8) {
+            const uint8_t* p = r + size_t(x) * 4;
+            out.insert(out.end(), p, p + 3);
+        }
+    }
+}
+
+double MeanAbsDiffSamples(const std::vector<uint8_t>& aSamples, uint32_t aWidth, uint32_t aHeight, const HostFrame& b) {
+    if (!b.pixels || aWidth != b.width || aHeight != b.height || aWidth == 0 || aHeight == 0) return 0;
+    uint64_t sum = 0, n = 0;
+    size_t i = 0;
+    for (uint32_t y = 4; y < b.height; y += 8) {
+        const uint8_t* rb = b.pixels + size_t(y) * b.width * 4;
+        for (uint32_t x = 4; x < b.width; x += 8) {
+            if (i + 3 > aSamples.size()) return 0;  // samples of another size
+            const uint8_t* pa = aSamples.data() + i;
+            const uint8_t* pb = rb + size_t(x) * 4;
+            sum += uint64_t(std::abs(int(pa[0]) - int(pb[0]))) + uint64_t(std::abs(int(pa[1]) - int(pb[1]))) +
+                   uint64_t(std::abs(int(pa[2]) - int(pb[2])));
+            ++n;
+            i += 3;
+        }
+    }
+    return n ? double(sum) / double(n * 3) : 0.0;
 }
 
 double MeanAbsDiff(const HostFrame& a, const HostFrame& b) {

@@ -216,6 +216,15 @@ struct WarpGpu::Impl {
             Free();
             return false;
         }
+        // Where the per-frame inputs landed: the three copies into them run inside the game's frame,
+        // so system memory there would cost PCIe time on the frame (perf/firegas.md).
+        auto local = [&](const Buf& b) {
+            VkMemoryPropertyFlags f = 0;
+            vmaGetAllocationMemoryProperties(allocator, b.alloc, &f);
+            return (f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? "video" : "system";
+        };
+        std::fprintf(stderr, "[framegen] GPU warp at %ux%u: inputs in %s / %s / %s memory, output in %s memory\n", w,
+                     h, local(finals[0]), local(huds[0]), local(vel), local(out));
         return true;
     }
 

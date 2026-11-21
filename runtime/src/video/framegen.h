@@ -85,6 +85,10 @@ public:
     // How long after the real frame's slot (beyond one refresh) its in-between frame is shown: room
     // for the generator. The GPU warp's frame is ready about 1 ms after the slot.
     virtual double MarginMs() const { return 4.0; }
+    // Whether Generate reads GenInputs::prev (the previous real frame on the host). The GPU warp
+    // in game keeps N-1 on the GPU, so the worker then keeps only the image difference's samples
+    // instead of a full copy of every real frame (33 MB at 4K: perf/firegas.md).
+    virtual bool NeedsHostPrev() const { return true; }
 };
 // "blend" (50/50 average of N-1 and N, the default) or "repeat" (N-1 again: the window then
 // shows 30 distinct frames a second at the 60 Hz cadence, for timing checks). "warp" is the
@@ -135,6 +139,11 @@ Drop Decide(const DecideIn& in);
 // Mean absolute difference of B, G and R (0..255) over a sparse grid (every 8th pixel of every
 // 8th row): cheap scene-cut detection.
 double MeanAbsDiff(const HostFrame& a, const HostFrame& b);
+// The pixels MeanAbsDiff reads from a frame (B, G, R of every 8th pixel of every 8th row), in its
+// order: 1/64 of the frame.
+void DiffSamples(const HostFrame& f, std::vector<uint8_t>& out);
+// MeanAbsDiff(a, b) from a's DiffSamples and size: the same value, without a copy of all of a.
+double MeanAbsDiffSamples(const std::vector<uint8_t>& aSamples, uint32_t aWidth, uint32_t aHeight, const HostFrame& b);
 // out = rounded average of a and b, byte by byte (same size).
 void Blend(const uint8_t* a, const uint8_t* b, uint8_t* out, size_t bytes);
 // The display delay of the in-between frame after the real frame's slot: overrideMs when >= 0,

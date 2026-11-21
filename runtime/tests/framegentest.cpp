@@ -82,6 +82,30 @@ static void TestDiff() {
     auto c = a;
     for (size_t i = 3; i < c.size(); i += 4) c[i] = 255;
     Check(fg::MeanAbsDiff({a.data(), w, h}, {c.data(), w, h}) == 0.0, "alpha doesn't count");
+
+    // The worker keeps only the diff's samples of N-1 when the generator doesn't read N-1 on the
+    // host (the GPU warp): the cut decision must not change, so the value must be identical.
+    uint32_t seed = 12345;
+    auto rnd = [&] { return seed = seed * 1664525u + 1013904223u; };
+    const uint32_t sizes[][2] = {{64, 48}, {67, 45}, {8, 8}, {5, 3}, {3840, 2160}, {2561, 1439}};
+    bool same = true;
+    for (const auto& s : sizes) {
+        std::vector<uint8_t> p(size_t(s[0]) * s[1] * 4), q(p.size());
+        for (auto& v : p) v = uint8_t(rnd() >> 24);
+        for (auto& v : q) v = uint8_t(rnd() >> 24);
+        std::vector<uint8_t> samples;
+        fg::DiffSamples({p.data(), s[0], s[1]}, samples);
+        same &= fg::MeanAbsDiffSamples(samples, s[0], s[1], {q.data(), s[0], s[1]}) ==
+                fg::MeanAbsDiff({p.data(), s[0], s[1]}, {q.data(), s[0], s[1]});
+        same &= fg::MeanAbsDiffSamples(samples, s[0], s[1], {p.data(), s[0], s[1]}) == 0.0;
+    }
+    Check(same, "the diff from N-1's samples equals the diff from N-1 itself");
+    std::vector<uint8_t> samples;
+    fg::DiffSamples({a.data(), w, h}, samples);
+    Check(samples.size() < a.size() / 16, "the samples are a small part of the frame");
+    Check(fg::MeanAbsDiffSamples(samples, w, h, {b.data(), w, h - 1}) == 0.0,
+          "diff from samples of different sizes is 0 (no cut call)");
+    Check(fg::MeanAbsDiffSamples(samples, w, h, {nullptr, w, h}) == 0.0, "diff from samples against no frame is 0");
 }
 
 static void TestDecide() {

@@ -7,6 +7,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <utility>
 
 #include "common/lbp3_res.h"
 #include "gpu/fg_gpu.h"
@@ -48,6 +49,25 @@ struct Frame {
 uint64_t g_kicks = 0;
 std::atomic<uint64_t> g_readId[fggpu::WarpGpu::kReadSlots];
 bool g_inputsHooked = false;
+
+// The upscaler's three output-size images for this frame's inputs, copied at the Kick rather than
+// in the frame's last command buffer: the game's frame then doesn't wait for ~100 MB of copies at
+// 4K (perf/firegas.md), and the copies run after the frame, before the game's next one, so they
+// read the same pixels. The images are the upscaler's own, kept across frames in transfer-source
+// layout (gpu/dlss.h). LBP3_FRAMEGEN_COPY_IN_FRAME=1 copies inside the frame, as before.
+struct PendingCopies {
+    VkImage final = VK_NULL_HANDLE, hud = VK_NULL_HANDLE, vel = VK_NULL_HANDLE;
+    uint32_t w = 0, h = 0;
+    int slot = 0;
+} g_pending;
+bool g_havePending = false;
+bool CopyInFrame() {
+    static const bool v = [] {
+        const char* e = std::getenv("LBP3_FRAMEGEN_COPY_IN_FRAME");
+        return e && *e == '1';
+    }();
+    return v;
+}
 
 bool IsDisplay(uint64_t addr) {
     if (!addr) return false;
@@ -210,13 +230,19 @@ void OnUpscaled(void* cmdp, void* finalImage, void* hudlessImage, void* velocity
     if (!g_on || !finalImage) return;
     if (!EnsureGen(w, h)) return;
     const vk::CommandBuffer cmd(static_cast<VkCommandBuffer>(cmdp));
-    CopyRaw(cmd, vk::Image(static_cast<VkImage>(finalImage)), g_gen->FinalBuffer(g_slot), w, h);
     g_frame.final = true;
     // The game-sized HUD-less image and vectors its own hooks copied (none when they don't fit
     // the output size) are replaced by the upscaler's.
     g_frame.hud = hudlessImage != nullptr;
-    if (hudlessImage) CopyRaw(cmd, vk::Image(static_cast<VkImage>(hudlessImage)), g_gen->HudBuffer(g_slot), w, h);
     g_frame.vel = velocityImage != nullptr;
+    if (!CopyInFrame()) {
+        g_pending = PendingCopies{static_cast<VkImage>(finalImage), static_cast<VkImage>(hudlessImage),
+                                  static_cast<VkImage>(velocityImage), w, h, g_slot};
+        g_havePending = true;
+        return;
+    }
+    CopyRaw(cmd, vk::Image(static_cast<VkImage>(finalImage)), g_gen->FinalBuffer(g_slot), w, h);
+    if (hudlessImage) CopyRaw(cmd, vk::Image(static_cast<VkImage>(hudlessImage)), g_gen->HudBuffer(g_slot), w, h);
     if (velocityImage) CopyRaw(cmd, vk::Image(static_cast<VkImage>(velocityImage)), g_gen->VelBuffer(), w, h);
 }
 
@@ -224,10 +250,22 @@ Ticket Kick() {
     Ticket t;
     const Frame f = g_frame;
     g_frame = Frame{};
+    const bool copies = std::exchange(g_havePending, false);
     if (!g_on || !g_gen || !g_gen->Ready() || !f.final) return t;
     const int cur = g_slot;
     g_haveFinal[cur] = true;
     g_hudValid[cur] = f.hud;
+    auto* const sched = internal::GetScheduler();
+    if (copies) {
+        // This frame's inputs, after the frame (its Finish is done) and before the game records the
+        // next one; Record's first barrier orders them before the passes.
+        sched->EndRendering();
+        const vk::CommandBuffer cmd(static_cast<VkCommandBuffer>(sched->CommandBuffer()));
+        const PendingCopies& p = g_pending;
+        CopyRaw(cmd, vk::Image(p.final), g_gen->FinalBuffer(p.slot), p.w, p.h);
+        if (p.hud) CopyRaw(cmd, vk::Image(p.hud), g_gen->HudBuffer(p.slot), p.w, p.h);
+        if (p.vel) CopyRaw(cmd, vk::Image(p.vel), g_gen->VelBuffer(), p.w, p.h);
+    }
     if (g_haveFinal[cur ^ 1]) {
         fggpu::FrameFlags flags;
         flags.cur = cur;
@@ -237,14 +275,13 @@ Ticket Kick() {
         t.id = ++g_kicks;
         t.slot = int(t.id % fggpu::WarpGpu::kReadSlots);
         g_readId[t.slot].store(t.id, std::memory_order_release);
-        auto* sched = internal::GetScheduler();
         sched->EndRendering();
         // A command buffer of its own: the readback's Finish ended the frame's, and this one is
         // submitted at once, before the game records its next frame.
         g_gen->Record(static_cast<VkCommandBuffer>(sched->CommandBuffer()), flags, t.slot);
         t.tick = sched->CurrentTick();
-        sched->Flush();
     }
+    if (copies || t.id) sched->Flush();
     g_slot = cur ^ 1;
     return t;
 }

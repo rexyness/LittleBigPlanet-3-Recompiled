@@ -23,6 +23,7 @@ class LiveGpuWarp final : public GpuWarpBase {
 public:
     const char* Name() const override { return "warp-gpu"; }
     double MarginMs() const override { return 2.0; }
+    bool NeedsHostPrev() const override { return false; }  // N-1 is on the GPU (gpu/fg_live.h)
     bool Generate(const GenInputs& in, std::vector<uint8_t>& out) override {
         if (!in.gpu.id) {
             NoteGpu(false, -1, 0, false, false, false);
