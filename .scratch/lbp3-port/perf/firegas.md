@@ -133,32 +133,36 @@ upscaler, no frame gen; draw numbers from that trace) [measured]:
    bounding geometry (160 indices) into two 2560x1440 targets; #494/#496 ray-march it into a
    1280x720 target; #500 composites that into the scene.
 
-**Where it breaks** [measured, cause inferred]:
+**What the dumps show** (render targets after chosen draws, `analysis\dump_draws.txt` + `f9`)
+[measured]:
 
-- At level load the texture cache grows the density volume's image layer by layer as the 64 draws
-  reach higher slices (`ExpandImage` 1 → 2 → 3 → 5 → 9 → 17 → 33 → 64 layers, each with
-  "SanitizeCopyLayers: Coercing copy … to minimum"), then turns it into a **3D image** (512x256x64,
-  type 10). Same for `0x1923cf800` (64x32x16) and `0x178499000`. This happens once (19 expansions
-  in the session), not per frame.
-- Every frame afterwards the game renders into the volume one slice at a time, but shadPS4 builds
-  render-target views as 2D/2D-array views (`ImageViewInfo(ColorBuffer)`: base layer = slice),
-  which don't address a 3D image's depth slices.
-- The reduction of the density volume shows the blocks **identically in all 64 columns**: in a
-  2.5D level they should occupy a few slices. So every slice reads the same data.
-- #494's 1280x720 output is all zero, and #492/#493 leave their targets at flat values: the final
-  draws produce nothing.
-- **Inferred cause:** shadPS4's texture cache doesn't support rendering into slices of a 3D image
-  (and the array→3D conversion keeps one layer). The fix belongs in shadPS4 (render-target views
-  of 3D images with `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT`, a copy of all layers into depth
-  slices). The base project's shadPS4 (`PurpleGitty/shadPS4`, 132 commits past our fork point of
-  2026-10-09) has texture-cache fixes for missing slices (`ca36c7e3` #5524, `d3ff0e0c` #5433,
-  `699009c9` #5444, several derived from an "lbp3-compat" fork), none in our branch; whether they
-  cover 3D render slices is untested.
-- **Ruled out:** the geometry-shader gap (fixed, `d84eae8`; 0 draws dropped here).
+- The simulation has the shapes: the splat slices (#17), the atlas (#20) and the density volume's
+  reduction (#100: data in slice columns 35–55 of 64, contiguous, the rest empty).
+- **The effect's final draws produce nothing:** after #494 its 1280x720 target is all zero, and
+  #492/#493 leave their 2560x1440 targets at flat values (0 and 255). #495 then fills the 1280x720
+  target with a dim copy of the scene, and #496 adds nothing visible.
+- #494 reads `0x178499000` (a 256x128 lighting volume that is a uniform 127, alpha 0) and
+  `0x176499000` (all 0), among others; #129–256, which write them, read `0x188700000` as
+  256x8192 RGBA16F, which is ~0 after #128.
+- At level load the texture cache grows three of these images layer by layer as the slice draws
+  reach higher slices (`ExpandImage` 1 → 2 → 3 → 5 → … → 64 layers, "SanitizeCopyLayers: Coercing
+  copy … to minimum" each time), then turns them into 3D images: `0x1861ea000` 512x256x64,
+  `0x1923cf800` 64x32x16, `0x178499000`. Once per session (19 expansions), not per frame.
+- `0x188700000` also holds a 2560x1440 scene-sized target in the same frame (aliased memory).
+- **Ruled out:** the geometry-shader gap (fixed, `d84eae8`; 0 draws dropped here); the res patches,
+  DLSS, frame generation, async pipelines, LBPPC mode and the fault window (missing in all).
+
+**Not known:** why #492–494 draw nothing. Candidates, none tested: their vertices (the volumes'
+bounding geometry), the 3D images' contents after the array→3D conversion and per-frame slice
+renders (shadPS4 renders into slices through 2D/2D-array views, `ImageViewInfo(ColorBuffer)`),
+the RGBA16F view of `0x188700000` while the same memory is a scene target. The base project's
+shadPS4 (`PurpleGitty/shadPS4`, 132 commits past our fork point of 2026-10-09) has texture-cache
+fixes for missing slices (`ca36c7e3` #5524, `d3ff0e0c` #5433, `699009c9` #5444), none in our
+branch.
 
 ## Open
 
-- The gas/fire effects: the shadPS4 3D-slice render path above (tracked as an issue).
+- The gas/fire effects: why the final draws produce nothing (above; tracked as an issue).
 - Play mode still has 39 of 600 frames over 40 ms with the user's settings. What's left on the
   serial path at 4K: the readback's 33 MB memcpy (3.3–5.1 ms, host-cached staging: near the
   bandwidth floor; removing it means handing the staging buffer to the presenter), and the fluid
