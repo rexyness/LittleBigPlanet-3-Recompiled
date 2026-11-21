@@ -542,6 +542,13 @@ struct Frame {
 } g_frame;
 std::map<uint64_t, uint32_t> g_zCount;  // depth address -> depth-tested draws this frame
 uint64_t g_velAddr = 0;
+uint64_t g_sceneRt = 0;  // the scene buffer: where the 3D scene's draws go (AfterDraw)
+struct LastDraw {        // the last draw made (AfterDraw), for Skip
+    uint64_t rt0 = 0;
+    uint32_t n = 0;
+    bool depth = false;
+    bool renderSized = false;  // a viewport the size of the render
+} g_lastDraw;
 bool g_hooked = false;
 void (*g_prevAfterDraw)(u64, u64, u32) = nullptr;
 void (*g_prevOnFill)(u64, u64, u32, u32, bool) = nullptr;
@@ -674,6 +681,8 @@ bool CaptureDepth(VideoCore::Image& src) {
     return true;
 }
 
+bool SceneDraw(float w, float h, uint64_t* rt0);  // below, with the jitter
+
 void AfterDraw(u64 vs, u64 ps, u32 n) {
     if (g_prevAfterDraw) g_prevAfterDraw(vs, ps, n);
     const auto& regs = internal::GetLiverpool()->regs;
@@ -686,6 +695,16 @@ void AfterDraw(u64 vs, u64 ps, u32 n) {
         ++g_zCount[db.DepthAddress()];
     ++g_frame.draws;
     if (IsDisplay(rt0)) ++g_frame.displayDraws;
+    // For Skip: the draw just made, and the scene buffer (the target the 3D scene's draws go
+    // into, other than the velocity target), learnt whether or not jitter is on.
+    {
+        const auto& vp = regs.viewports[0];
+        const float vw = std::abs(2.0f * vp.xscale), vh = std::abs(2.0f * vp.yscale);
+        g_lastDraw = LastDraw{rt0, n, bool(regs.depth_control.depth_enable),
+                              std::abs(vw - float(rs.w)) <= 0.5f && std::abs(vh - float(rs.h)) <= 0.5f};
+        uint64_t sceneRt = 0;
+        if (rt0 && rt0 != g_velAddr && SceneDraw(vw, vh, &sceneRt)) g_sceneRt = sceneRt;
+    }
     if (g_frame.composite || ps == 0 || !IsDisplay(rt0)) return;
     // The final composite: the first draw with a pixel shader into a display buffer. The screen
     // HUD comes after it, so the display image now is the HUD-less image.
@@ -742,9 +761,22 @@ float SamplerBias() {
     return g_mipBias;
 }
 
+// SMAA's copy-back, and only it. Its pixel shader is a generic textured quad the game also uses
+// for in-world UI: the popit cursor's tip, the sticker tool's tip and the sticker preview are
+// 6-index, depth-tested quads with it (the e2 traces: #1049/#1050 n=6 test 1 with a 128x16
+// texture). Matching on the shader alone left those out. The copy-back is the 4-index,
+// depth-test-off draw into the scene buffer right after SMAA's last pass, a full-screen draw into
+// SMAA's own render-sized target (#1075 -> 188700000, then #1076 reads it into 175448000).
 bool Skip(u64 vs, u64 ps, u32 n) {
     (void)vs;
-    if (!g_skipSmaa || !g_prevUpscaled || ps != kSmaaCopyBackPs || n > 6) return false;
+    if (!g_skipSmaa || !g_prevUpscaled || ps != kSmaaCopyBackPs || n != 4) return false;
+    const auto& regs = internal::GetLiverpool()->regs;
+    if (regs.depth_control.depth_enable) return false;
+    const auto& cb0 = regs.color_buffers[0];
+    const uint64_t rt0 = cb0 ? cb0.Address() : 0;
+    if (!rt0 || rt0 != g_sceneRt) return false;
+    const LastDraw& last = g_lastDraw;
+    if (last.n != 4 || last.depth || !last.renderSized || last.rt0 == rt0 || !last.rt0) return false;
     ++g_frame.skipped;
     return true;
 }
