@@ -186,6 +186,14 @@ The design is settled in issue #24, `GLOSSARY.md` ("The picture") and ADRs 0002 
   - so removing the 8-bit rounding promises a modest gain at best;
   - the change itself (a velocity image of 8 bytes a texel over 4-byte guest memory, through the texture cache's upload paths, view formats and pipeline keys) carries real risk of corruption or crashes.
 
+## The user's first session (2026-11-21)
+
+- **Bug found by the user:** the popit cursor's tip, the sticker tool's tip and the sticker preview (before placing) were missing.
+- **Cause:** stage 2's SMAA skip matched SMAA's copy-back by its pixel shader (`6d4d5238b13eadc4`) and n ≤ 6. That shader is a generic textured quad the game also draws in-world UI with: 6-index, depth-tested quads (the e2 traces' #1049/#1050, a 128x16 texture).
+- **Fix (`9742e86`):** only the 4-index, depth-test-off draw into the scene buffer is left out, and only right after SMAA's last pass, a full-screen draw into its own render-sized target (`#1075 → 188700000`, then `#1076` reads it into `175448000`).
+  - A trace after the fix still shows the copy-back left out.
+  - The user confirmed in game: "it's working good now".
+
 ## Trying it (the user's session)
 
 - Start `D:\Recomps\lbp3-wt\dlss\build\LBP3Launcher.exe`, the DLSS build's own launcher. It finds the main clone's `user\` (settings and saves) and starts the `lbp3.exe` beside it.
