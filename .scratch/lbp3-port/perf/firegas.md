@@ -289,3 +289,25 @@ switch for both: `LBP3_FLUID_READBACK=0`.
 - Not tried yet: copying exact ranges instead of `ReadMemory`'s 512 KB windows (a page the GPU wrote
   and the CPU then rewrote would get the GPU's older bytes back); a non-waiting buffer copy now that
   the images are in (the sideways drift came from the missing wind image, not from timing).
+
+### The two follow-ups, tried (2026-11-21, after 4efad9f7)
+
+Debug variants in the gas worktree (`LBP3_FLUID_MODE=window|exact|async`, not committed), with the
+two images copied back in all of them. Status-line work at 1440, and the fire's orange pixels in
+three screenshots each (`firepos`: centre of the orange; the coal block sits at about x 1650, y 810):
+
+| Copy of the buffers | Check | Work (ms) | gfx blocked (ms) | Fire centre (3 frames) |
+|---|---|---|---|---|
+| off | RED | 18.1 | 4.0 | – |
+| waiting, 512 KB windows (committed) | GREEN ×2 | 24.6 / 25.4 | 11.9 / 12.2 | x 1639–1643, y 794–805 |
+| waiting, exact ranges | GREEN ×2 | 26.3 / 26.5 | 12.3 / 12.6 | x 1630–1635, y 781–793 |
+| not waiting | GREEN ×2 | 19.9 / 20.6 | 4.2 / 4.5 | x 1783–1802, y 740–760 |
+
+- **Not waiting is wrong:** the flames float off the burning block, up and to the right, in every
+  frame (`m2_async1_*.png` against `m2_exact1_*.png`). With the images in, the fire no longer
+  wanders between sessions, so this is the copy's timing: the jobs build the lists from the
+  previous frame's results. The cost stays.
+- **Exact ranges work** and remove the overwrite risk of the 512 KB windows, at about 1 ms more at
+  1440 (two runs each): each output buffer is now its own download, each waiting for the GPU,
+  where one window covered several. Batching the ranges into one wait per fence would remove that.
+  Not adopted: no overwrite has been seen.
