@@ -165,6 +165,27 @@ The design is settled in issue #24, `GLOSSARY.md` ("The picture") and ADRs 0002 
   NVIDIA's bias is sharper and no less steady. Its crops show crisper leather grain and stitching, and no moiré (`analysis\dlss_stills\dlssx_m1_standing.png`). In upscaling modes `dlss_temporal.py`'s "game" column comes from the render-size image, so it shows another region.
 - **Fixed:** the child probe now waits first (30 s limit) and reads afterwards. Before, reading blocked until the child exited, so the time limit could never fire.
 
+## Second round (2026-11-21, "keep going")
+
+- **Every offered mode runs.**
+  - Balanced at 2560x1440 over the route: renders 1472x824 (NVIDIA's 1485x835, allowed 1280x720–2560x1440), walk work 22.1 ms, 0 GPU warnings.
+  - At 3840x2160 output (shown in a 1440p window):
+    - Performance over the route: renders 1920x1080, which is NVIDIA's own size and the lower end of its allowed range. Walk work 30.2 ms with 10 frames over 40 ms (capture hook on), against native 4K's 35.7 ms with 120 frames over 40 ms (`resolutions.md`).
+    - Balanced (smoke test): 2224x1248, NVIDIA's 2227x1253, allowed from 1920x1080.
+    - Ultra Performance (smoke test): 1280x720, and NVIDIA allows exactly 1280x720.
+- **Online, one player with DLSS** [measured, `rig3/cell.sh dlss1 30`, `EXE_SRC` = this build, NVIDIA's DLL beside the rig's exe copy]:
+  - setup: the host (Kistopawa) ran DLSS Quality 1712x960 → 2560x1440, the guest (Kistopawa2) the same exe without the upscaler; both on the LAN path through play.lbppc.com;
+  - the guest joined (join block 0.7 s host, 1.1 s guest), 30 s in the Pod, then the Introduction with 60 s of play;
+  - events none, no kick, no divergence; the longest run without a step was 1 flip (host) and 2 (guest).
+  - The guest's "game RTT … WRONG" readings (536870.9 ms and the like) also appear in the earlier non-DLSS cell `lbcsl1`; they aren't the upscaler's.
+- **The stats line** (the corner overlay and the game menu) ends with `DLSS Quality`, or `no DLSS: <why>` when DLSS was asked for and can't run. Seen in game: `30 fps | game work 15.8 ms | latency 5 ms | no DLSS: NVIDIA's DLSS DLL (nvngx_dlss.dll) isn't next to lbp3.exe`.
+- **Camera cuts reset DLSS's history** at the cut frame's own flip. The camera motion is read at submit, as frame generation reads it, and goes through frame generation's camera rules: a view·proj jump past 1000, or a move past 150 units or a turn past 6° that is six times the frame before. It fired once in each 4K smoke test, at boot transitions.
+- **An NGX failure after the render size shrank** still fills the output size: our passes are built before NGX starts, and the picture is stretched.
+- **16-bit vectors stay deferred, now measured** (`dlss_quant_test.py` on the e2 walks):
+  - adding a second ±0.5-code rounding to the decoded vectors raises the reprojection error by 14–15% with jitter off, and by only 3.2% with jitter on (`walk_full`, how DLSS runs);
+  - so removing the 8-bit rounding promises a modest gain at best;
+  - the change itself (a velocity image of 8 bytes a texel over 4-byte guest memory, through the texture cache's upload paths, view formats and pipeline keys) carries real risk of corruption or crashes.
+
 ## Trying it (the user's session)
 
 - Start `D:\Recomps\lbp3-wt\dlss\build\LBP3Launcher.exe`, the DLSS build's own launcher. It finds the main clone's `user\` (settings and saves) and starts the `lbp3.exe` beside it.
@@ -176,7 +197,8 @@ The design is settled in issue #24, `GLOSSARY.md` ("The picture") and ADRs 0002 
 
 - **Stage 5, the done checks (issue #24):**
   - the user's session and verdict;
-  - one online session with DLSS on, with LBPPC players if possible;
-  - stills of the HUD's translucent parts, a photo and the pause fade in an upscaling mode (done in DLAA, `dlss_lane.sh l1`).
-- **16-bit vectors** (deferred, see stage 2).
-- **Mip bias** on against off has not been compared by eye.
+  - an online session with real players (LBPPC). One two-instance session with DLSS on one player passed (second round).
+- **16-bit vectors** (deferred, measured in the second round).
+- **Done since:**
+  - mip bias on against off (checks before handing over);
+  - the photo and the pause screen in Performance (`dlss_lane.sh p3`).

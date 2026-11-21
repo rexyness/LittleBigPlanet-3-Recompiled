@@ -19,6 +19,8 @@ env LBP3_VOLUME=0 LBP3_DISPLAY="$disp" LBP3_RES=1440 LBP3_RES_SHADERS=1 LBP3_SHA
   LBP3_UPSCALER=dlss "$@" powershell -NoProfile -Command \
   "Start-Process -FilePath '$exe_m' -ArgumentList '--run','--skip-intro' -WorkingDirectory '$root_m' -RedirectStandardOutput '$root_m/analysis/remote_stdout.txt' -RedirectStandardError '$root_m/analysis/remote_stderr.txt'" >/dev/null
 sleep 40
+# SHOT=<name>: a screenshot of the game window first (analysis/screenshots/<name>.png).
+[ -n "$SHOT" ] && powershell -NoProfile -File tools/capture.ps1 -Out "analysis/screenshots/$SHOT.png" >/dev/null
 alive=$(tasklist 2>/dev/null | grep -ci "lbp3.exe")
 taskkill //f //im lbp3.exe >/dev/null 2>&1; sleep 1
 cp analysis/remote_stderr.txt analysis/dlss_smoke_stderr.txt
