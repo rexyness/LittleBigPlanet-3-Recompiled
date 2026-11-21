@@ -21,6 +21,7 @@ namespace {
 
 std::atomic<bool> g_requested{false};
 std::atomic<bool> g_closeApproved{false};  // the save-first quit has finished: the window may close
+std::atomic<bool> g_hurry{false};          // closed again mid-write: stop waiting for the game's save
 
 // eboot.bin offsets (CUSA00473 01.28)
 constexpr uint64_t kTranslateNative = 0x839aa0;  // Translate__i: text lookup, then the script string
@@ -123,6 +124,11 @@ void SaveFirst() {
     int64_t frame = start.frame;
     bool asked = false;
     for (SaveState now = start;; now = SaveStateNow()) {
+        if (g_hurry.load()) {
+            std::fprintf(stderr, "[quit] closed again: not waiting for the rest of the save (%d unsaved, %d being saved, %d queued)\n",
+                         now.dirty, now.pending, now.queued);
+            return;
+        }
         const uint64_t t = NowMs();
         if (now.frame != frame) frame = now.frame, frameMs = t;
         switch (DecideSave(start, now, t - t0, t - frameMs)) {
@@ -200,14 +206,27 @@ SaveStep DecideSave(const SaveState& start, const SaveState& now, uint64_t elaps
 
 bool QuitRequested() { return g_requested.load(); }
 
+CloseStep DecideClose(bool approved, bool requested, bool mounted) {
+    if (approved) return CloseStep::Now;
+    if (!requested) return CloseStep::SaveFirst;
+    return mounted ? CloseStep::AfterWrite : CloseStep::Now;
+}
+
 bool CloseWindowNow() {
-    if (g_closeApproved.load()) return true;
-    if (g_requested.load()) {
-        std::fprintf(stderr, "[quit] the window was closed again while saving: closing now\n");
+    const bool approved = g_closeApproved.load();
+    switch (DecideClose(approved, g_requested.load(), AnySaveMounted())) {
+    case CloseStep::Now:
+        if (!approved) std::fprintf(stderr, "[quit] the window was closed again while saving: closing now (nothing being written)\n");
         return true;
+    case CloseStep::AfterWrite:
+        if (!g_hurry.exchange(true))
+            std::fprintf(stderr, "[quit] the window was closed again while a save is being written: closing once it's written\n");
+        return false;
+    case CloseStep::SaveFirst:
+        RequestQuit("the window's close button");
+        return false;
     }
-    RequestQuit("the window's close button");
-    return false;
+    return true;
 }
 
 void RequestQuit(const char* why) {

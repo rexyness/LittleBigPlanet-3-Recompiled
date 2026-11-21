@@ -188,6 +188,14 @@ void QuitSavesFirst() {
     now.pending = 1;
     CHECK(DecideSave(start, now, 1000, kStallMs) == SaveStep::Stalled);
     CHECK(DecideSave(start, now, 1000, kStallMs - 1) == SaveStep::Wait);
+    // The window's close button: the first close saves first; a second one closes at once unless a
+    // save is being written (in place: closing then could leave it half-written), and the close the
+    // finished quit sends goes through.
+    CHECK(DecideClose(false, false, false) == CloseStep::SaveFirst);
+    CHECK(DecideClose(false, false, true) == CloseStep::SaveFirst);
+    CHECK(DecideClose(false, true, false) == CloseStep::Now);
+    CHECK(DecideClose(false, true, true) == CloseStep::AfterWrite);
+    CHECK(DecideClose(true, true, true) == CloseStep::Now);
 }
 
 void Menu() {

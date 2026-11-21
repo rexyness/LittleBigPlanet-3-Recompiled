@@ -12,7 +12,9 @@
 // made in the Pod takes the live Pod with it (eboot+0x260210). It then waits for the profiles to
 // be clean, the save queue empty and nothing mounted. If the game doesn't save within 20 s, or
 // stops drawing frames (the attract video), it closes anyway and says so. The window's close
-// button goes the same way; a second close while it saves closes at once.
+// button goes the same way. A second close while it saves stops waiting for the game, but a save
+// being written still finishes first (saves are written in place: closing mid-write could leave
+// one half-written).
 //
 // The pause menu (LBP3_QUIT_MENU=1, with LBP3_FILE_EDITS pointing at tools/quit_menu.py's
 // description): the script edit makes the menu's Good Grief! button (online-only, greyed out
@@ -35,8 +37,14 @@ void RequestQuit(const char* why);
 bool QuitRequested();
 
 // The presenter, on the window's close request: true = close now (the save-first quit has finished,
-// or this is a second close while it runs); false = a save-first quit has started instead.
+// or this is a second close while it runs and nothing is being written); false = a save-first quit
+// has started instead, or (a second close) it will close once the save being written is done.
 bool CloseWindowNow();
+
+// One close request's decision, for the test: `approved` = the save-first quit has finished,
+// `requested` = one is running, `mounted` = save data is mounted (a save is being written).
+enum class CloseStep { Now, SaveFirst, AfterWrite };
+CloseStep DecideClose(bool approved, bool requested, bool mounted);
 
 // The game's profile-save state at one moment (read from its memory; SaveStateNow in quit.cpp).
 struct SaveState {
