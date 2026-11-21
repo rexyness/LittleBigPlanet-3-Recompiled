@@ -235,8 +235,8 @@ The release zip is built from bestofboth `b37790b`. The test report, with screen
 - **Release worktree fixes:**
   - `release-shadps4` had stayed at `b0242a25` and was moved to `4efad9f7`; the pinned and checked-out commits were compared before packaging.
   - The main clone's `third_party/SDL3` was found empty (emptied 15:40, cause unknown). The same SDL3 3.4.16 was downloaded; its `SDL3.dll` sha256 is `1f989693…`, identical to v0.1.9's. With the user's OK it refilled `third_party/SDL3`, and the release worktree links there again.
-  - The v0.1.9 `lbp3.exe` and launcher are kept in `lbp3-wteleaseuild\_v019_backup\`.
-- **Package:** `make_package.ps1 -Version v0.1.10-lbp3port` in `lbp3-wtelease` at `f0482ec`.
+  - The v0.1.9 `lbp3.exe` and launcher are kept in `lbp3-wt\release\build\_v019_backup\`.
+- **Package:** `make_package.ps1 -Version v0.1.10-lbp3port` in `lbp3-wt\release` at `f0482ec`.
   - `D:\Recomps\lbp3-dist\LBP3-Recompiled-v0.1.10-lbp3port.zip`: 49 files (the same names as v0.1.9's), 8,162,310 bytes, sha256 `e8a2175a0b00fc0fc8aee5dacde2885a74a657d16384e21591e80e5d2ad9d793`. No DLSS files.
   - `SOURCE.md`: `release/v0.1.10` @ `f0482ec`, shadPS4 `4efad9f7`.
 - **Checked:**
@@ -244,10 +244,10 @@ The release zip is built from bestofboth `b37790b`. The test report, with screen
   - `gas_check.sh` with `FG_EXE` = the unpacked zip's exe: GREEN at 1440p, with sharper stickers on (`10 sites patched`) and no crash lines.
   - The unpacked zip started offline (muted, pads hidden, under the game lock) with a copy of `user\shader_cache_best` (built by v0.1.9). The first frame came after 4.1 s, it stayed alive for about 3.5 min, the cache loaded (8,732 cached pipelines) and there were no crash lines.
 - **Not tested:**
-  - The quit fix in the game: the four hand checks (Pod sticker → Quit game; the window's X; quit inside a level; quit with nothing changed) were prepared in `lbp3-dist	est-v0110\hand` but not run.
+  - The quit fix in the game: the four hand checks (Pod sticker → Quit game; the window's X; quit inside a level; quit with nothing changed) were prepared in `lbp3-dist\test-v0110\hand` but not run.
   - Sharper stickers through a whole story level or on a costume sticker.
   - Fire and gas online.
-- **The user's launcher** (`lbp3-wteleaseuild\LBP3Launcher.exe`) now runs v0.1.10. Its launch plan gained `LBP3_UPSCALER=dlss`/`quality` from the shared `launcher.ini`. The public exe ignores both (empty stubs in `gpu/dlss.h`).
+- **The user's launcher** (`lbp3-wt\release\build\LBP3Launcher.exe`) now runs v0.1.10. Its launch plan gained `LBP3_UPSCALER=dlss`/`quality` from the shared `launcher.ini`. The public exe ignores both (empty stubs in `gpu/dlss.h`).
 - **Published:** https://github.com/rexyness/LittleBigPlanet-3-Recompiled/releases/tag/v0.1.10-lbp3port, "LittleBigPlanet 3 Recompiled v0.1.10 (fire and Horrible Gas show up, quitting saves first, sharper stickers)".
   - Tags `v0.1.10-lbp3port` (lightweight): runtime `f0482ec`, shadPS4 `4efad9f7`.
   - Assets: the zip and its `.sha256`. Notes from `tools/package/RELEASE-NOTES.md`.
