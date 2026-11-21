@@ -3,6 +3,7 @@
 // a new controller takes the lowest free player slot (see gamepad.h).
 #include "input/gamepad.h"
 #include "hle/ime_dialog.h"
+#include "hle/quit.h"
 #include "input/actions.h"
 #include "input/action_table.h"
 #include "input/game_state.h"
@@ -438,6 +439,10 @@ void Parse(const std::string& line) {
     Command c;
     if (word == "f9" || word == "f10") {  // the debug hotkeys (dump / perf report)
         video::TriggerHotkey(word == "f9" ? SDLK_F9 : SDLK_F10);
+        return;
+    }
+    if (word == "quit") {  // "quit": the in-game menu's Quit game, for test runs (hle/quit.h)
+        hle::quit::RequestQuit("a remote quit command");
         return;
     }
     if (word == "action") {  // "action <name> [ms]": hold a keyboard action (input.ini names)

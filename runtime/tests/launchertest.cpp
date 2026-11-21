@@ -79,6 +79,7 @@ static void TestIni() {
     a.skip_intro = false;
     a.framegen = false;
     a.res = "1920x1080";
+    a.sharper_stickers = false;
     a.fg_text = false;
     a.status_flips = 300;
     a.pipeline_threads = 4;
@@ -99,6 +100,11 @@ static void TestIni() {
     CHECK(ToIni(a) == ToIni(b));
     CHECK(b.build == Build::Best && b.cache == CacheChoice::Shared && b.res == "1920x1080" && b.pipeline_threads == 4);
     CHECK(!b.word_suggestions && Settings{}.word_suggestions);
+    // sharper stickers: on unless switched off; a file from before the setting has it on
+    CHECK(!b.sharper_stickers && Settings{}.sharper_stickers);
+    CHECK(FromIni("[game]\nres=2560x1440\nframegen=1\n").sharper_stickers);
+    CHECK(!EnvMap(Settings{}).count("LBP3_STICKERS"));
+    CHECK(EnvMap(a).count("LBP3_STICKERS") && EnvMap(a).at("LBP3_STICKERS") == "ps4");
     // word suggestions: on unless switched off
     CHECK(!EnvMap(Settings{}).count("LBP3_OSK_SUGGEST"));
     CHECK(EnvMap(a).count("LBP3_OSK_SUGGEST") && EnvMap(a).at("LBP3_OSK_SUGGEST") == "off");

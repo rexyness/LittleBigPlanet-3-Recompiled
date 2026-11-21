@@ -98,6 +98,7 @@ std::string ToIni(const Settings& s) {
       << "upscaler=" << s.upscaler << "\n"
       << "; upscaler_mode: dlaa, quality, balanced, performance or ultraperformance\n"
       << "upscaler_mode=" << s.upscaler_mode << "\n"
+      << "sharper_stickers=" << b(s.sharper_stickers) << "\n"
       << "fg_text=" << b(s.fg_text) << "\n"
       << "status_flips=" << s.status_flips << "\n"
       << "; 0 = all CPU cores but one\n"
@@ -198,6 +199,7 @@ Settings FromIni(const std::string& text) {
             // a 1 left in an old file no longer imports on every launch.
             // bloom_1440 (older files) is ignored: the capture chain keeps its 1080p sizes at 16:9 now.
             else if (key == "fg_text") ParseBool(v, s.fg_text);
+            else if (key == "sharper_stickers") ParseBool(v, s.sharper_stickers);
             else if (key == "status_flips") {
                 if (ParseInt(v, 1, 100000, n)) s.status_flips = n;
             } else if (key == "pipeline_threads") {
@@ -315,6 +317,7 @@ LaunchPlan MapSettings(const Settings& s) {
         if (CanonicalRes(s.res) == "1920x1080" || CanonicalRes(s.res).empty()) set("LBP3_RES_SHADERS", "1");
     }
     if (!s.fg_text) set("LBP3_FRAMEGEN_TEXT", "off");
+    if (!s.sharper_stickers) set("LBP3_STICKERS", "ps4");
     set("LBP3_STATUS_FLIPS", std::to_string(s.status_flips));
     if (s.pipeline_threads > 0) set("LBP3_PIPELINE_THREADS", std::to_string(s.pipeline_threads));
     if (!s.vk_pipeline_cache) set("LBP3_VK_PIPELINE_CACHE", "off");

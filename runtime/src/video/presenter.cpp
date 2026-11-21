@@ -1,4 +1,5 @@
 #include "video/presenter.h"
+#include "hle/quit.h"
 #include "ui/boot_overlay.h"
 #include "ui/overlay.h"
 #include "video/live_stats.h"
@@ -309,7 +310,9 @@ void PresenterThread() {
             if (e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED || e.type == SDL_EVENT_DISPLAY_ADDED ||
                 e.type == SDL_EVENT_DISPLAY_REMOVED || e.type == SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED)
                 readRefresh(false);
-            if (e.type == SDL_EVENT_QUIT) {
+            // The first close asks the game to save first (hle/quit.h), which sends this event again
+            // when it's done; a second close while it saves closes at once.
+            if (e.type == SDL_EVENT_QUIT && hle::quit::CloseWindowNow()) {
                 std::fprintf(stderr, "[video] window closed\n");
                 RunExitHook();
                 std::fflush(stderr);

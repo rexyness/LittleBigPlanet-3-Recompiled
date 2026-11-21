@@ -13,6 +13,9 @@ rem 1920x1080), 1080 = the original 1920x1080, stretched to the window. Or one o
 rem (LBPPC's list): 1280x720, 3840x2160 (4K), 2560x1080, 3440x1440 or 3840x1600 (21:9),
 rem 3840x1080 or 4480x1260 (32:9). Wider than 16:9 widens the view (black bars on a 16:9 screen).
 set RES=1440
+rem Sharper stickers: placed stickers are drawn with twice the PS4's detail (512-px sticker tiles,
+rem about 192 MB more graphics memory): 1 = on, 0 = exactly as on the PS4.
+set STICKERS=1
 rem LBP1/LBP2 items (the old "My Unlocks", whose servers are gone): the in-game menu's
 rem "Import LBP1/LBP2 items" does it (no switch needed). 1 = arm it at launch instead: the
 rem game's own import runs the first time the start menu opens; wait for "successfully
@@ -56,6 +59,7 @@ if not "%RES%"=="1080" if not "%RES%"=="" (
     set LBP3_RES=%RES%
     set LBP3_RES_SHADERS=1
 )
+if "%STICKERS%"=="0" set LBP3_STICKERS=ps4
 if "%MY_UNLOCKS%"=="1" set LBP3_MY_UNLOCKS=lbp1,lbp2
 if "%MENU%"=="0" set LBP3_MENU=off
 if "%STATS%"=="1" set LBP3_STATS=1

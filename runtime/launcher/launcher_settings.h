@@ -53,6 +53,7 @@ struct Settings {
     // the output size and the game draws at upscaler_mode's render size (gpu/dlss_modes.h keys).
     std::string upscaler = "off";
     std::string upscaler_mode = "quality";
+    bool sharper_stickers = true;   // the sticker atlas at 512-px tiles; false = LBP3_STICKERS=ps4 (the PS4's)
     // play_best.bat's
     bool fg_text = true;
     int status_flips = 30;
