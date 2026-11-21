@@ -152,19 +152,140 @@ upscaler, no frame gen; draw numbers from that trace) [measured]:
 - **Ruled out:** the geometry-shader gap (fixed, `d84eae8`; 0 draws dropped here); the res patches,
   DLSS, frame generation, async pipelines, LBPPC mode and the fault window (missing in all).
 
-**Not known:** why #492–494 draw nothing. Candidates, none tested: their vertices (the volumes'
-bounding geometry), the 3D images' contents after the array→3D conversion and per-frame slice
-renders (shadPS4 renders into slices through 2D/2D-array views, `ImageViewInfo(ColorBuffer)`),
-the RGBA16F view of `0x188700000` while the same memory is a scene target. The base project's
-shadPS4 (`PurpleGitty/shadPS4`, 132 commits past our fork point of 2026-10-09) has texture-cache
-fixes for missing slices (`ca36c7e3` #5524, `d3ff0e0c` #5433, `699009c9` #5444), none in our
-branch.
+### Why they draw nothing (2026-11-21, `/diagnosing-bugs` on issue #27)
+
+**The check:** `sh .scratch/lbp3-port/tools/gas_check.sh <tag> [NAME=value ...]` (FG_EXE picks the
+exe; about a minute): the firegas save at 2560x1440, no upscaler / frame gen / async pipelines /
+LBPPC mode, Edit Now, F9 with draws 486–508 dumped, judged by `gas_verdict.py`. The ray-march
+shader (ps `f790c0f92f865e6d`) runs twice into the 1280x720 target: the **gas pass** (#494, into a
+cleared target: non-zero pixels) and the **fire pass** (#496, after #495's dim scene copy: pixels
+changed). GREEN only if both drew. `GAS_KEEP=1` keeps the session; then `gas_check.sh probe`,
+`gas_check.sh dump <n,n>` (seconds each) and `gas_check.sh stop`. Baseline: `RED: gas pass #494
+... colour 0 alpha 0 of 921600; fire pass #496 changed 0` (5 runs, same) [measured].
+
+**What it found** [measured, instrumented build in `D:\Recomps\lbp3-wt\gas`, tags `[DEBUG-gas]`]:
+- #492–494 assemble **no primitives at all** (pipeline statistics: input-assembly primitives 0,
+  vertex shader invocations 0). Their index buffers (16-bit, 160–1080 indices, triangle fans,
+  primitive restart on) hold only `0xffff`, the restart index. The draws that work have real
+  indices (#119: `2 1 0 65535 3 2 0 65535 …`).
+- The index buffers are written by the CPU (no GPU pass writes them; a hardware watch shows a
+  per-frame fill with `0xffff`, writer at `0x1b145b20018`, callers `0x1b141f18391` / `…03bf5` /
+  `…03f90`; which modules those are is not known: that session's `loaded … at` lines were
+  overwritten, and the prx modules load at a different address every run). They sit in a ring of
+  per-frame slots, so their addresses change (`0x1016c0180`, `0x1002c0180`, `0x133fc0180`, …; Y at
+  X − 0x140000, Z at X − 0xa0000 in every frame logged). Three lists: X (#492, additive glow), Y
+  (#493 and the first ray-march pass), Z (the second pass). **Y = the gas, Z = the fire is
+  [inferred]** (with Z filled the flames show and no gas cloud does); the check's gas half rests on it.
+- **The CPU builds them from compute-shader results the port never copies back to guest memory.**
+  Copying back the buffers two compute shaders write, at the next fence, fills X and Z, and the
+  fire block's flames draw on screen (`analysis/screenshots/m2_gas_csr.png` against
+  `m2_fg_user_exe.png`): `cs f8ca5fa410806334` (12 dispatches a frame, 1x1x1/4x1x1, four 0x21000
+  output buffers) and `cs db624fa6942b9961` (5 a frame, writes `0x13bd3f400`+0x20000). Two runs:
+  fire pass changed 84,598 and 118,434 pixels. Without `db624fa6`: 677–2,731 (a flicker); without
+  `f8ca5fa4`: 0. Debug switch: `LBP3_CS_READBACK=<cs hash>,…` (or `=1`: every compute-written
+  buffer up to 4 MB, ~100 ms frames). **Not free:** status-line `work` 17.5–18.4 ms → 22.5–25.6 ms
+  (+5–7 ms) at this 1440 setting, as each fence's copy waits for the GPU (`scheduler.Finish()` in
+  `DownloadMemory`); the paced 33.3 ms hid it. A fix needs the copy without the wait (or once a
+  frame); not measured at the user's 4K settings.
+- **Y (the gas) stays empty** with every readback tried: all compute-written buffers, every linear
+  image (`LBP3_READBACK_IMAGES=1`), shadPS4's relaxed buffer readbacks (`LBP3_READBACKS=relaxed`;
+  it also fills X, by luck: it copies 512 KB around pages the CPU *writes*). Precise readbacks (the
+  CPU's *reads* of GPU-written pages) stall the boot (no frame in 7 minutes), and switching them on
+  after the level loads trips `page_manager.cpp:78 Not enough watchers`.
+
+**Ruled out** [measured]: the density volume as a separate cache image (#21–84 render into image
+#209, 3D 512x256x64, one slice each; #85, #389 and #494 sample that same image); the depth
+(`17d170000` at #492: min 0.987, max 1.0, the scene's depth); occlusion queries (shadPS4 fakes
+them as always visible); `ca36c7e3` (already in our branch as sgdc3 80ffa53's `Contains`).
+Correction to the above: the splats #119–128 do draw (#119: 888 fragments); the targets' 0.0/255
+average just can't show it.
+
+**Not known:** what the CPU reads to build Y. Next probe: the code that writes X's real indices
+(hardware watch on an X slot with `LBP3_HWWATCH_SKIP=ffffffffffffffff`, under the readback), then
+what it reads for Y.
 
 ## Open
 
-- The gas/fire effects: why the final draws produce nothing (above; tracked as an issue).
+- The gas/fire effects (issue #27): the fire needs the two compute shaders' buffers copied back
+  (above); the gas list stays empty, input not found yet.
 - Play mode still has 39 of 600 frames over 40 ms with the user's settings. What's left on the
   serial path at 4K: the readback's 33 MB memcpy (3.3–5.1 ms, host-cached staging: near the
   bandwidth floor; removing it means handing the staging buffer to the presenter), and the fluid
   flag wait (4.6–5.0 ms; `gfx_wait.md` fix 5, Ticket 10's risk class).
 - Why three device-local 4K copies cost ~2 ms inside the frame.
+
+### Where the fix stands (2026-11-21, paused)
+
+- **Built, uncommitted** in `D:\Recomps\lbp3-wt\gas` (branch `fix/gas-draws`, shadPS4 submodule
+  dirty): `Rasterizer::MirrorFluidResults` + `BufferCache::MirrorToGuestAsync` copy the two
+  shaders' output buffers to guest memory without waiting (`LBP3_FLUID_READBACK=0`: off). Fire pass
+  changed 57,447 / 63,181 / 53,915 pixels; `work` unchanged (17.3–18.7 ms vs 17.0–18.4); off: 0.
+- **Doubt:** its flames look different from the waiting copy's. Non-waiting copy (`m2_gas_fix_a/b.png`):
+  an orange haze trailing right of the coal block. Waiting copy of every compute buffer
+  (`m2_gas_csr.png`): a bright flame ball on the block. Either the copy lands a frame late, or the
+  waiting copy's 512 KB windows also brought back other shaders' outputs. Screenshots taken to tell
+  them apart, not yet looked at: `m2_gas_sync2_a/b.png` (waiting copy, the same two shaders only).
+- Still to do: that comparison; the user's 4K settings (the gas worktree build has no DLSS);
+  removing every `[DEBUG-gas]` line; the gas (Y list) input.
+
+### The fire fix as built, and the gas so far (2026-11-21, later)
+
+- **Fire fix (in `fix/gas-draws`, uncommitted):** `Rasterizer::QueueFluidResults` / `DownloadFluidResults`
+  copy the two shaders' buffers to guest memory at the next fence, waiting for the GPU. Fire pass
+  changed 125,212 / 8,162 / 46,587 / 52,892 / 130,900 pixels; off (`LBP3_FLUID_READBACK=0`): 0.
+  Cost in this level: native 4K + frame gen 26.5 → 24.1 fps (work 36.0 → 38.9 ms, over-40 frames
+  178 → 368 of 630); 1440 work 17.8 → 25.0 ms. The cost is the lock-step: the compute queue writes
+  a label after each fluid batch and waits on the next ring slot, which a CPU job writes after
+  reading the results (~17 round trips a frame), and each now waits for the GPU on one Vulkan queue.
+- **Dead ends:** a copy that doesn't wait (free; the CPU builds from data a frame old, and a late
+  copy can overwrite newer CPU writes); deferring the compute labels to GPU completion (no fire at
+  all: the jobs check the label once and skip the frame). Screenshots can't tell copies apart: the
+  fire's centre moves per session (x 1520–1807).
+- **Gas:** `Flip_Index` (`spu.prx+0x18150`) calls the list builder (`0x17db0`) per mode; a particle
+  word is life (bits 24–31) | type (16–19) | age (0–15). Mode 0 = Y (the gas pass) keeps types 7
+  and 11; mode 2 = X keeps 3 and 8; mode 1 = Z keeps all but 3/7/8/11. The particles (217, read by
+  the GPU shaders, written by the CPU) are only types 1 and 3: **no gas particle is ever spawned.**
+  Nothing in `spu.prx` writes type 7 or 11, so the type comes from whoever requests the spawn.
+- **Read probe** (debug remote command `readprobe <addr> <size>`): of the fluid images, the CPU jobs
+  read only the density reduction (64x512 R8, linear) and #117's 64x32x16 RGBA8 storage volume
+  (linear), from `Flip_Alive` / `Flip_Apply_Boundary_Markers` / `Flip_Add_Wind`. With
+  `LBP3_READBACK_IMAGES=1` both are read back (logged as queued) and still no gas type appears.
+  Next: what requests the spawns (the eboot's SPLUID chain setup) and why it never asks for gas.
+
+### Correction: the gas draws with the fix (2026-11-21, user)
+
+The user watched the fixed build and confirms the Horrible Gas shows: the gas is a particle type
+the fix already covers (type 1, list Z, drawn by the second ray-march pass with the fire), not
+types 7/11. List Y (types 7 and 11, the first ray-march pass #494) is another fluid kind this level
+doesn't use, so its emptiness is not a bug. `gas_verdict.py` now goes GREEN on the second pass
+alone. Judged live: baseline and `LBP3_FLUID_READBACK=0` RED (fire/gas pass changed 0), the fix
+GREEN (8,162–130,900). The verdict compares the dumped BMPs, which each run overwrites, so it only
+means something run right after its own dump (as `gas_check.sh` does), not on an old log.
+
+### Confirmed (2026-11-21, user, playing the level)
+
+The look the user confirms ("this is it": a bright flame ball on the burning block, a white gas
+cloud beside it) needs **both**: the fluid buffers copied back (`QueueFluidResults`) **and** the two
+GPU images the fluid jobs read (the density reduction, 64x512 R8 render target, and #117's
+64x32x16 RGBA8 storage volume; both linear and 64 wide), here with `LBP3_READBACK_IMAGES=1` (2
+images read back a frame). Without the images the fire drifts sideways as an orange haze: one of
+them feeds `Flip_Add_Wind`. The particle-type histogram didn't change between the two, so it was
+the wrong measure for this. To do: read back just those two images (not every linear image),
+measure, strip `[DEBUG-gas]`, commit.
+
+### The final fix, built and checked (2026-11-21)
+
+`fix/gas-draws` (shadPS4 submodule, 3 files, no debug code; the probes are saved in
+`tools/gas_debug_shadps4.patch` and `tools/gas_debug_runtime.patch`): the two shaders' buffers
+(`Rasterizer::QueueFluidResults` / `DownloadFluidResults`, at the next fence, waiting) and the two
+64-wide linear images (`TextureCache` `IsFluidCpuReadImage`, at the next submit or fence). One
+switch for both: `LBP3_FLUID_READBACK=0`.
+- `gas_check.sh`: GREEN ×2 (fire/gas pass changed 40,408 and 66,461), `LBP3_FLUID_READBACK=0` RED (0).
+  Screenshot `m2_fin1_2.png`: the flame ball on the burning block, the white gas cloud beside it,
+  the look the user confirmed in game.
+- Image readbacks: 60 per 30 frames in the level (2 a frame), 0 with the switch off.
+- Cost at 1440: work 24.6–25.4 ms against 18.1 off, the same as the buffers alone (25.0): the
+  images add nothing measurable. 4K not re-measured with the images (buffers alone: 26.5 → 24.1 fps).
+- Not tried yet: copying exact ranges instead of `ReadMemory`'s 512 KB windows (a page the GPU wrote
+  and the CPU then rewrote would get the GPU's older bytes back); a non-waiting buffer copy now that
+  the images are in (the sideways drift came from the missing wind image, not from timing).

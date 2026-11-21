@@ -1,0 +1,510 @@
+diff --git a/src/video_core/amdgpu/liverpool.cpp b/src/video_core/amdgpu/liverpool.cpp
+index 142b4bcf..07b18832 100644
+--- a/src/video_core/amdgpu/liverpool.cpp
++++ b/src/video_core/amdgpu/liverpool.cpp
+@@ -70,6 +70,11 @@ static std::atomic<u32> recent_label_write_count{};
+ static void NoteLabelWrite(const char* source, u64 address, u64 data) {
+     recent_label_writes[recent_label_write_count++ % recent_label_writes.size()] = {source,
+                                                                                     address, data};
++    if (Vulkan::g_lbp3TraceDraws) {  // [DEBUG-gas] the traced frame's fences, in order
++        std::fprintf(stderr, "[DEBUG-gas] label %s %llx = %llx after #%u\n", source,
++                     (unsigned long long)address, (unsigned long long)data,
++                     Vulkan::g_lbp3TraceIndex);
++    }
+ }
+ 
+ // Whether a command stream wrote the 8 bytes at address since write number `since`.
+@@ -84,6 +89,10 @@ static bool LabelWrittenSince(u64 address, u32 since) {
+ }
+ 
+ Liverpool::BlockedWait Liverpool::BeginBlockedWait(u64 addr, bool gfx) {
++    if (Vulkan::g_lbp3TraceDraws) {  // [DEBUG-gas]
++        std::fprintf(stderr, "[DEBUG-gas] %s queue waits on %llx after #%u\n", gfx ? "gfx" : "compute",
++                     (unsigned long long)addr, Vulkan::g_lbp3TraceIndex);
++    }
+     std::scoped_lock lk{submit_mutex};
+     last_blocked_addr = addr;
+     ++queues_blocked_on_wait;
+diff --git a/src/video_core/buffer_cache/buffer_cache.cpp b/src/video_core/buffer_cache/buffer_cache.cpp
+index 6ff5ab02..e2114f89 100644
+--- a/src/video_core/buffer_cache/buffer_cache.cpp
++++ b/src/video_core/buffer_cache/buffer_cache.cpp
+@@ -146,6 +146,12 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
+             std::max<VAddr>(Common::AlignDown(device_addr, WindowSize), arena->cpu_addr);
+         const VAddr window_end = std::min<VAddr>(
+             std::max<VAddr>(window_start + WindowSize, device_addr + size), arena_end);
++        static std::atomic<u32> lbp3_logged{0};  // [DEBUG-gas] which GPU-written windows come back
++        if (lbp3_logged.fetch_add(1) < 3000) {
++            std::fprintf(stderr, "[DEBUG-gas] readback %llx..%llx for %llx+%llx (write %d)\n",
++                         (unsigned long long)window_start, (unsigned long long)window_end,
++                         (unsigned long long)device_addr, (unsigned long long)size, is_write);
++        }
+         DownloadMemory(arena, window_start, window_end - window_start);
+         if (is_write) {
+             memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+diff --git a/src/video_core/buffer_cache/memory_tracker.h b/src/video_core/buffer_cache/memory_tracker.h
+index 4651530e..51b2972b 100644
+--- a/src/video_core/buffer_cache/memory_tracker.h
++++ b/src/video_core/buffer_cache/memory_tracker.h
+@@ -66,7 +66,7 @@ public:
+ 
+     /// Removes all protection from a page and ensures GPU data has been flushed if requested
+     void InvalidateRegion(VAddr cpu_addr, u64 size, auto&& on_flush) noexcept {
+-        if (readbacks_mode == GpuReadbacksMode::Disabled) {
++        if (Lbp3ReadbacksMode() == GpuReadbacksMode::Disabled) {  // [DEBUG-gas]
+             return MarkRegionAsCpuModified(cpu_addr, size);
+         }
+         bool should_flush = false;
+diff --git a/src/video_core/buffer_cache/region_manager.h b/src/video_core/buffer_cache/region_manager.h
+index 7bb9eea3..b925fd5d 100644
+--- a/src/video_core/buffer_cache/region_manager.h
++++ b/src/video_core/buffer_cache/region_manager.h
+@@ -3,7 +3,11 @@
+ 
+ #pragma once
+ 
++#include <atomic>
+ #include <bit>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
+ #include <utility>
+ 
+ #include "common/adaptive_mutex.h"
+@@ -14,6 +18,26 @@
+ 
+ namespace VideoCore {
+ 
++// [DEBUG-gas] LBP3_READBACKS_DELAY=<seconds>: readbacks stay off until then (precise stalls the boot).
++inline u32 Lbp3ReadbacksMode() {
++    static const u32 want = EmulatorSettings.GetReadbacksMode();
++    static const int delay = [] {
++        const char* v = std::getenv("LBP3_READBACKS_DELAY");
++        return v ? std::atoi(v) : 0;
++    }();
++    if (delay == 0) {
++        return want;
++    }
++    static const auto start = std::chrono::steady_clock::now();
++    static std::atomic<bool> on{false};
++    if (!on.load(std::memory_order_relaxed) &&
++        std::chrono::steady_clock::now() - start >= std::chrono::seconds(delay)) {
++        on = true;
++        std::fprintf(stderr, "[DEBUG-gas] readbacks mode %u from now\n", want);
++    }
++    return on.load(std::memory_order_relaxed) ? want : u32(GpuReadbacksMode::Disabled);
++}
++
+ #ifdef PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP
+ using LockType = Common::AdaptiveMutex;
+ #else
+@@ -341,7 +365,7 @@ private:
+             } else if (state_op == StateOp::Clear) {
+                 return PageOp::Track;
+             }
+-        } else if (type == Type::GPU && readbacks_mode == GpuReadbacksMode::Precise) {
++        } else if (type == Type::GPU && Lbp3ReadbacksMode() == GpuReadbacksMode::Precise) {
+             if (state_op == StateOp::Set) {
+                 return PageOp::Track;
+             } else if (state_op == StateOp::Clear) {
+diff --git a/src/video_core/renderer_vulkan/vk_instance.cpp b/src/video_core/renderer_vulkan/vk_instance.cpp
+index 047a5018..d8b0b451 100644
+--- a/src/video_core/renderer_vulkan/vk_instance.cpp
++++ b/src/video_core/renderer_vulkan/vk_instance.cpp
+@@ -433,6 +433,7 @@ bool Instance::CreateDevice() {
+                 .wideLines = features.wideLines,
+                 .multiViewport = features.multiViewport,
+                 .samplerAnisotropy = features.samplerAnisotropy,
++                .pipelineStatisticsQuery = features.pipelineStatisticsQuery, // [DEBUG-gas]
+                 .vertexPipelineStoresAndAtomics = features.vertexPipelineStoresAndAtomics,
+                 .fragmentStoresAndAtomics = features.fragmentStoresAndAtomics,
+                 .shaderImageGatherExtended = features.shaderImageGatherExtended,
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index db6ddea6..fdf60544 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -333,6 +333,7 @@ void Rasterizer::ApplyLbp3FillClears() {
+ // and an optional callback run right after each traced draw executes.
+ u32 g_lbp3TraceIndex = 0;
+ void (*g_lbp3AfterDraw)(u32 index) = nullptr;
++bool (*g_lbp3QueryDraw)(u32 index) = nullptr; // [DEBUG-gas]
+ void (*g_lbp3FgAfterDraw)(u64 vs_hash, u64 ps_hash, u32 num_indices) = nullptr;
+ void (*g_lbp3FgOnFill)(u64 dst, u64 bytes, u32 value, u32 mask, bool full) = nullptr;
+ bool (*g_lbp3ViewportJitter)(float width, float height, float* dx, float* dy) = nullptr;
+@@ -352,6 +353,9 @@ void Rasterizer::TraceDraw(const GraphicsPipeline* pipeline) {
+     std::snprintf(buf, sizeof(buf), " n=%u vs=%016llx ps=%016llx", regs.num_indices,
+                   hash(Shader::SwStage::Vertex), hash(Shader::SwStage::Fragment));
+     line += buf;
++    std::snprintf(buf, sizeof(buf), " [DEBUG-gas prim %u inst %u]", u32(regs.primitive_type),
++                  regs.num_instances.NumInstances());
++    line += buf;
+     for (u32 i = 0; i < AmdGpu::NUM_COLOR_BUFFERS; ++i) {
+         const auto& cb = regs.color_buffers[i];
+         if (!cb) {
+@@ -362,6 +366,15 @@ void Rasterizer::TraceDraw(const GraphicsPipeline* pipeline) {
+         std::snprintf(buf, sizeof(buf), " rt%u=%llx(blend %08x)", i, (unsigned long long)cb.Address(),
+                       blend);
+         line += buf;
++        // [DEBUG-gas] the cache image the target resolves to, and the slice rendered
++        if (const auto& [id, desc] = cb_descs[i]; id) {
++            const auto& img = texture_cache.GetImage(id);
++            std::snprintf(buf, sizeof(buf), "[DEBUG-gas img#%u t%u %ux%ux%u L%u slice %u+%u]",
++                          id.index, u32(img.info.type), img.info.size.width, img.info.size.height,
++                          img.info.size.depth, img.info.resources.layers,
++                          desc.view_info.range.base.layer, desc.view_info.range.extent.layers);
++            line += buf;
++        }
+     }
+     const auto& db = regs.depth_buffer;
+     if (db.DepthValid() || db.DepthWriteValid()) {
+@@ -377,6 +390,9 @@ void Rasterizer::TraceDraw(const GraphicsPipeline* pipeline) {
+                       (unsigned long long)image.info.guest_address, image.info.size.width,
+                       image.info.size.height, vk::to_string(image.info.pixel_format).c_str());
+         line += buf;
++        std::snprintf(buf, sizeof(buf), "[DEBUG-gas img#%u t%u d%u L%u]", bound_images[i].index,
++                      u32(image.info.type), image.info.size.depth, image.info.resources.layers);
++        line += buf;
+     }
+     std::fprintf(stderr, "%s\n", line.c_str());
+ }
+@@ -425,6 +441,27 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
+ 
+     pipeline->BindResources(set_writes, push_data);
+     UpdateDynamicState(pipeline, is_indexed);
++    // [DEBUG-gas] pipeline statistics around a chosen traced draw: does it rasterise anything?
++    static vk::QueryPool lbp3_stats_pool{};
++    const bool lbp3_query =
++        g_lbp3TraceDraws && g_lbp3QueryDraw && g_lbp3QueryDraw(g_lbp3TraceIndex);
++    if (lbp3_query) {
++        if (!lbp3_stats_pool) {
++            const auto [res, pool] = instance.GetDevice().createQueryPool(vk::QueryPoolCreateInfo{
++                .queryType = vk::QueryType::ePipelineStatistics,
++                .queryCount = 1,
++                .pipelineStatistics = vk::QueryPipelineStatisticFlagBits::eInputAssemblyPrimitives |
++                                      vk::QueryPipelineStatisticFlagBits::eVertexShaderInvocations |
++                                      vk::QueryPipelineStatisticFlagBits::eClippingInvocations |
++                                      vk::QueryPipelineStatisticFlagBits::eClippingPrimitives |
++                                      vk::QueryPipelineStatisticFlagBits::eFragmentShaderInvocations,
++            });
++            lbp3_stats_pool = pool;
++        }
++        scheduler.EndRendering();
++        scheduler.CommandBuffer().resetQueryPool(lbp3_stats_pool, 0, 1);
++        scheduler.CommandBuffer().beginQuery(lbp3_stats_pool, 0, {});
++    }
+     scheduler.BeginRendering(state);
+ 
+     const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
+@@ -441,6 +478,21 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
+         cmdbuf.draw(regs.num_indices, regs.num_instances.NumInstances(), vertex_offset,
+                     instance_offset);
+     }
++    if (lbp3_query) {  // [DEBUG-gas]
++        scheduler.EndRendering();
++        scheduler.CommandBuffer().endQuery(lbp3_stats_pool, 0);
++        scheduler.Finish();
++        u64 s[5]{};
++        (void)instance.GetDevice().getQueryPoolResults(
++            lbp3_stats_pool, 0, 1, sizeof(s), s, sizeof(s),
++            vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWait);
++        std::fprintf(stderr,
++                     "[DEBUG-gas] draw #%u stats: ia prims %llu, vs %llu, clip in %llu, clip out %llu, "
++                     "fs %llu (indexed %d, vertex offset %u, instance offset %u)\n",
++                     g_lbp3TraceIndex, (unsigned long long)s[0], (unsigned long long)s[1],
++                     (unsigned long long)s[2], (unsigned long long)s[3], (unsigned long long)s[4],
++                     is_indexed, u32(vertex_offset), u32(instance_offset));
++    }
+     DebugState.IncDrawCall();
+     if (g_lbp3TraceDraws && g_lbp3AfterDraw) {
+         g_lbp3AfterDraw(g_lbp3TraceIndex);
+@@ -608,10 +660,108 @@ void Rasterizer::DispatchDirect() {
+     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
+     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
+     DebugState.IncDispatch();
++    Lbp3QueueCsReadback(cs);  // [DEBUG-gas]
++    QueueFluidResults(cs);
+ 
+     ResetBindings(true);
+ }
+ 
++// LBP3: the fire and gas effects (issue #27). Two compute shaders of the fluid simulation write
++// buffers that the game's CPU jobs read to build the effects' index buffers (the boxes the volume
++// is drawn with). On the PS4 the CPU sees the GPU's writes; here they stay in the GPU's copy, so
++// the CPU found nothing and wrote only restart indices: no flames. The buffers those dispatches
++// write are copied to guest memory at the next fence, before its label is written: the jobs read
++// the results as soon as they see the label (the simulation runs in lock-step with them, about 17
++// round trips a frame), so the copy waits for the GPU. A copy that doesn't wait arrives a frame
++// late and the flames drift off the burning object. Cost, in the fire/gas test level only: native
++// 4K with frame generation 26.5 -> 24.1 fps, 1440 work 17.8 -> 25.0 ms (the graphics queue waits
++// longer for the jobs). LBP3_FLUID_READBACK=0: off.
++// shortcut: matched by the shaders' hashes (game version 01.28); a game update that changes them
++// turns this off silently. Upgrade to readbacks of what the CPU actually reads once precise
++// readbacks work in this port (they stall the boot today), and the cost to compute on its own
++// Vulkan queue.
++void Rasterizer::QueueFluidResults(const Shader::Info& cs) {
++    static constexpr std::array<u64, 2> kFluidShaders = {
++        0xf8ca5fa410806334ULL, // 12 a frame, four 0x21000-byte outputs
++        0xdb624fa6942b9961ULL, // 5 a frame, one 0x20000-byte output
++    };
++    static const bool enabled = [] {
++        const char* v = std::getenv("LBP3_FLUID_READBACK");
++        const bool on = !(v && v[0] == '0');
++        if (!on) {
++            std::fprintf(stderr, "[gpu] fluid readback: off (LBP3_FLUID_READBACK=0)\n");
++        }
++        return on;
++    }();
++    if (!enabled || std::find(kFluidShaders.begin(), kFluidShaders.end(), cs.pgm_hash) ==
++                        kFluidShaders.end()) {
++        return;
++    }
++    for (const auto& desc : cs.buffers) {
++        if (desc.IsSpecial() || !desc.is_written) {
++            continue;
++        }
++        const auto sharp = desc.GetSharp(cs);
++        if (sharp.base_address != 0 && sharp.GetSize() != 0) {
++            fluid_results.emplace_back(sharp.base_address, sharp.GetSize());
++        }
++    }
++}
++
++void Rasterizer::DownloadFluidResults() {
++    for (const auto& [address, size] : fluid_results) {
++        buffer_cache.ReadMemory(address, size, false, true);
++    }
++    fluid_results.clear();
++}
++
++// [DEBUG-gas] LBP3_CS_READBACK=1 (or =<cs hash>,<cs hash>...): copy the buffers those compute
++// shaders write (up to 4 MB each) back to guest memory at the next fence.
++static std::vector<std::pair<VAddr, u64>> lbp3_cs_written;
++static u64 lbp3_cs_readback_bytes = 0, lbp3_cs_readback_fences = 0;
++void Rasterizer::Lbp3QueueCsReadback(const Shader::Info& cs) {
++    static const char* spec = std::getenv("LBP3_CS_READBACK");
++    if (!spec) {
++        return;
++    }
++    if (std::strcmp(spec, "1") != 0) {
++        char hash[20];
++        std::snprintf(hash, sizeof(hash), "%016llx", (unsigned long long)cs.pgm_hash);
++        if (!std::strstr(spec, hash)) {
++            return;
++        }
++    }
++    for (const auto& desc : cs.buffers) {
++        if (desc.IsSpecial() || !desc.is_written) {
++            continue;
++        }
++        const auto sharp = desc.GetSharp(cs);
++        if (sharp.base_address && sharp.GetSize() <= 4_MB) {
++            lbp3_cs_written.emplace_back(sharp.base_address, sharp.GetSize());
++        }
++    }
++}
++
++void Rasterizer::Lbp3ProcessCsReadback() {
++    if (lbp3_cs_written.empty()) {
++        return;
++    }
++    if (g_lbp3TraceDraws) {
++        std::fprintf(stderr, "[DEBUG-gas] fence after #%u: %zu readbacks pending\n", g_lbp3TraceIndex,
++                     lbp3_cs_written.size());
++    }
++    for (const auto& [addr, size] : lbp3_cs_written) {
++        buffer_cache.ReadMemory(addr, size, false, true);
++        lbp3_cs_readback_bytes += size;
++    }
++    lbp3_cs_written.clear();
++    if ((++lbp3_cs_readback_fences % 300) == 1) {
++        std::fprintf(stderr, "[DEBUG-gas] cs readback: %llu fences, %llu MB requested\n",
++                     (unsigned long long)lbp3_cs_readback_fences,
++                     (unsigned long long)(lbp3_cs_readback_bytes >> 20));
++    }
++}
++
+ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
+     RENDERER_TRACE;
+ 
+@@ -671,6 +821,8 @@ void Rasterizer::OnSubmit() {
+ 
+ void Rasterizer::OnFence() {
+     texture_cache.ProcessDownloadImages();
++    DownloadFluidResults();
++    Lbp3ProcessCsReadback();  // [DEBUG-gas]
+ }
+ 
+ bool Rasterizer::BindResources(const Pipeline* pipeline) {
+@@ -823,6 +975,49 @@ void Rasterizer::BindIndexBuffer(u32 index_offset, bool is_indirect) {
+     const u64 requested_size = u64(num_indices) * index_size;
+     const u64 mapped_size = memory->ClampRangeSize(index_address, requested_size);
+     const u32 index_buffer_size = static_cast<u32>(Common::AlignDown(mapped_size, index_size));
++    if (g_lbp3TraceDraws && g_lbp3QueryDraw && g_lbp3QueryDraw(g_lbp3TraceIndex)) {  // [DEBUG-gas]
++        // every fan in the buffer: its first index and length, and the vertex range used
++        std::string fans;
++        u32 fan_count = 0, fan_start = ~0u, fan_len = 0, lo = ~0u, hi = 0;
++        const u32 total = u32(mapped_size / index_size);
++        for (u32 i = 0; i <= total; ++i) {
++            const u32 v = i == total ? 0xffffffffu
++                          : is_index16 ? reinterpret_cast<const u16*>(index_address)[i]
++                                       : reinterpret_cast<const u32*>(index_address)[i];
++            const bool restart = i == total || v == (is_index16 ? 0xffffu : 0xffffffffu);
++            if (restart) {
++                if (fan_len) {
++                    ++fan_count;
++                    if (fans.size() < 1500) {
++                        fans += " " + std::to_string(fan_start) + "/" + std::to_string(fan_len);
++                    }
++                }
++                fan_len = 0;
++                continue;
++            }
++            if (!fan_len) {
++                fan_start = v;
++            }
++            ++fan_len;
++            lo = std::min(lo, v);
++            hi = std::max(hi, v);
++        }
++        std::fprintf(stderr, "[DEBUG-gas] draw #%u fans %u, vertices %u..%u:%s\n", g_lbp3TraceIndex,
++                     fan_count, fan_count ? lo : 0, hi, fans.c_str());
++        std::string first;
++        for (u32 i = 0; i < 12 && u64(i + 1) * index_size <= mapped_size; ++i) {
++            const u32 v = is_index16 ? reinterpret_cast<const u16*>(index_address)[i]
++                                     : reinterpret_cast<const u32*>(index_address)[i];
++            first += " " + std::to_string(v);
++        }
++        std::fprintf(stderr,
++                     "[DEBUG-gas] draw #%u index: addr %llx type %u num %u max %u offset %u indirect %d "
++                     "mapped %llu bound %u restart %u/%x first:%s\n",
++                     g_lbp3TraceIndex, (unsigned long long)index_address,
++                     u32(regs.index_buffer_type.index_type), regs.num_indices, regs.max_index_size,
++                     index_offset, is_indirect, (unsigned long long)mapped_size, index_buffer_size,
++                     regs.enable_primitive_restart, regs.primitive_restart_index, first.c_str());
++    }
+     vk::Buffer index_buffer{};
+     u64 buffer_offset{};
+     if (index_buffer_size != 0) {
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.h b/src/video_core/renderer_vulkan/vk_rasterizer.h
+index 3d8190ce..f8cf1b5e 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.h
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.h
+@@ -26,6 +26,7 @@ namespace Vulkan {
+ extern std::atomic<bool> g_lbp3TraceDraws;
+ extern u32 g_lbp3TraceIndex;
+ extern void (*g_lbp3AfterDraw)(u32 index);
++extern bool (*g_lbp3QueryDraw)(u32 index); // [DEBUG-gas] pipeline statistics for this traced draw?
+ // LBP3 frame-generation capture (LBP3_FG_DUMP): run after every executed draw, and for every
+ // masked fill the rasterizer inspects. Copies only; never set unless the capture is on.
+ extern void (*g_lbp3FgAfterDraw)(u64 vs_hash, u64 ps_hash, u32 num_indices);
+@@ -93,6 +94,11 @@ public:
+     void CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds);
+     u32 ReadDataFromGds(u32 gsd_offset);
+     bool InvalidateMemory(VAddr addr, u64 size, bool assume_locks = false);
++    void Lbp3QueueCsReadback(const Shader::Info& cs); // [DEBUG-gas]
++    void Lbp3ProcessCsReadback();                      // [DEBUG-gas]
++    // LBP3: the fluid simulation's results the CPU reads (issue #27; vk_rasterizer.cpp).
++    void QueueFluidResults(const Shader::Info& cs);
++    void DownloadFluidResults();
+     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
+     /// LBP3: a guest thread's write fault at addr was handled; unprotect the window around it
+     /// too (LBP3_FAULT_WINDOW, BufferCache::ExtendWriteFault).
+@@ -184,6 +190,8 @@ private:
+     };
+     std::array<ImageBinding, Shader::NUM_IMAGES> image_bindings;
+     std::array<ImageBinding, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
++    // LBP3 (issue #27): fluid results to copy for the CPU at the next fence.
++    std::vector<std::pair<VAddr, u64>> fluid_results;
+     ImageBinding db_desc;
+ 
+     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
+diff --git a/src/video_core/texture_cache/texture_cache.cpp b/src/video_core/texture_cache/texture_cache.cpp
+index f4ad3128..96c5d073 100644
+--- a/src/video_core/texture_cache/texture_cache.cpp
++++ b/src/video_core/texture_cache/texture_cache.cpp
+@@ -7,7 +7,6 @@
+ #include <cstdlib>
+ #include <limits>
+ #include <mutex>
+-#include <set>
+ #include <string>
+ #include <string_view>
+ #include <xxhash.h>
+@@ -182,6 +181,23 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
+ 
+ TextureCache::~TextureCache() = default;
+ 
++// LBP3: the fluid simulation's images the CPU reads (issue #27). The fire and gas jobs (spu.prx
++// Flip_Alive, Flip_Apply_Boundary_Markers, Flip_Add_Wind) read a 64x512 R8 render target (the
++// density volume reduced to one column per slice) and a 64x32x16 RGBA8 storage volume, both linear
++// and 64 wide. Without them the flames drift sideways and the gas shows no cloud. Queued here and
++// downloaded at the next submit or fence (ProcessDownloadImages), as the captures are; two a frame
++// while fire or gas is on screen. LBP3_FLUID_READBACK=0: off (with the buffers, vk_rasterizer.cpp).
++// shortcut: matched by shape (linear, 64 wide); another linear 64-wide image the game never reads
++// would be downloaded for nothing. Upgrade to readbacks of what the CPU actually reads once
++// precise readbacks work in this port.
++static bool IsFluidCpuReadImage(const ImageInfo& info) {
++    static const bool enabled = [] {
++        const char* v = std::getenv("LBP3_FLUID_READBACK");
++        return !(v && v[0] == '0');
++    }();
++    return enabled && !info.props.is_tiled && info.size.width == 64 && info.guest_address != 0;
++}
++
+ void TextureCache::ProcessDownloadImages() {
+     std::unique_lock lk{download_images_mutex};
+     // Without readbackLinearImages the set holds only capture-target candidates (FindRenderTarget),
+@@ -189,13 +205,15 @@ void TextureCache::ProcessDownloadImages() {
+     // stay on the GPU: a Bunkum cutscene draws one 1920x2160 over the pool the captures use, and
+     // a synchronous download of it took 118 ms.
+     const volatile u8* capture = g_lbp3CaptureQueued.load(std::memory_order_relaxed);
+-    if (readback_linear_images || (capture && *capture != 0)) {
+-        for (const ImageId image_id : download_images) {
+-            if (True(slot_images[image_id].flags & ImageFlagBits::GpuModified)) {
+-                ++g_lbp3ImageReadbacks;
+-            }
+-            DownloadImageMemory(image_id, true);
++    const bool all = readback_linear_images || (capture && *capture != 0);
++    for (const ImageId image_id : download_images) {
++        if (!all && !IsFluidCpuReadImage(slot_images[image_id].info)) {
++            continue;
++        }
++        if (True(slot_images[image_id].flags & ImageFlagBits::GpuModified)) {
++            ++g_lbp3ImageReadbacks;
+         }
++        DownloadImageMemory(image_id, true);
+     }
+     download_images.clear();
+ }
+@@ -1054,8 +1072,9 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
+     Image& image = slot_images[image_id];
+     if (desc.type == BindingType::Storage) {
+         image.flags |= ImageFlagBits::GpuModified;
+-        if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
+-            image.info.guest_address != 0) {
++        if ((readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
++             image.info.guest_address != 0) ||
++            IsFluidCpuReadImage(image.info)) {
+             std::unique_lock lk{download_images_mutex};
+             download_images.emplace(image_id);
+         }
+@@ -1074,8 +1093,8 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
+ // the image is written back to guest memory, that copy reads zeros and the photo is black.
+ // Such targets are queued here and downloaded (synchronously, at the submit or fence after the
+ // draw) while the game has a capture job queued (ProcessDownloadImages), even without
+-// LBP3_READBACK_IMAGES. The game's other linear targets (64-wide R8 ones drawn every frame, a 3D
+-// storage volume) are never queued; LBP3_READBACK_IMAGES downloads every linear target.
++// LBP3_READBACK_IMAGES. The fluid's 64-wide linear images are downloaded every time
++// (IsFluidCpuReadImage); LBP3_READBACK_IMAGES downloads every linear target.
+ static bool IsCpuReadRenderTarget(const ImageInfo& info) {
+     return !info.props.is_tiled && !info.props.is_depth && info.num_bits == 32 &&
+            info.num_samples == 1 && info.size.depth == 1 && info.resources.layers == 1 &&
+@@ -1086,7 +1105,7 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
+     Image& image = slot_images[image_id];
+     image.flags |= ImageFlagBits::GpuModified;
+     if ((readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) ||
+-        IsCpuReadRenderTarget(image.info)) {
++        IsCpuReadRenderTarget(image.info) || IsFluidCpuReadImage(image.info)) {
+         std::unique_lock lk{download_images_mutex};
+         download_images.emplace(image_id);
+     }

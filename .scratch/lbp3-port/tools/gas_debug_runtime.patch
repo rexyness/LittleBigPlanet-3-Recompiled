@@ -1,0 +1,193 @@
+diff --git a/runtime/src/core/debugger.cpp b/runtime/src/core/debugger.cpp
+index 54c3266..647d859 100644
+--- a/runtime/src/core/debugger.cpp
++++ b/runtime/src/core/debugger.cpp
+@@ -124,9 +124,20 @@ LONG CALLBACK Handler(EXCEPTION_POINTERS* ep) {
+     const DWORD code = ep->ExceptionRecord->ExceptionCode;
+ 
+     if (code == EXCEPTION_SINGLE_STEP && g_watchAddr && (c.Dr6 & 1)) {
+-        if (g_watchHits++ < 60) {
++        const uint64_t value = *reinterpret_cast<const uint64_t*>(g_watchAddr);
++        // [DEBUG-gas] LBP3_HWWATCH_SKIP=<hex>: don't log writes of that value (the per-frame fill)
++        static const uint64_t skip = [] {
++            const char* v = std::getenv("LBP3_HWWATCH_SKIP");
++            return v ? std::strtoull(v, nullptr, 16) : 0x5a5a5a5a5a5a5a5aull;
++        }();
++        static std::atomic<uint64_t> skipped{0};
++        if (value == skip) {
++            if ((++skipped & 1023) == 0)
++                std::fprintf(stderr, "[DEBUG-gas] hwwatch: %llu writes of the skipped value\n",
++                             static_cast<unsigned long long>(skipped.load()));
++        } else if (g_watchHits++ < 60) {
+             const uint64_t base = reinterpret_cast<uint64_t>(g_watchModule->base);
+-            const uint64_t value = *reinterpret_cast<const uint64_t*>(g_watchAddr);
++            std::fprintf(stderr, "[DEBUG-gas] hwwatch: rip %llx abs\n", static_cast<unsigned long long>(c.Rip));
+             std::fprintf(stderr, "[hwwatch] write to eboot+0x%llx (now %016llx) by eboot+0x%llx, thread %lu\n",
+                          static_cast<unsigned long long>(g_watchAddr - base), static_cast<unsigned long long>(value),
+                          static_cast<unsigned long long>(c.Rip - base), GetCurrentThreadId());
+@@ -158,7 +169,22 @@ LONG CALLBACK Handler(EXCEPTION_POINTERS* ep) {
+     if (it == g_breakpoints.end()) return EXCEPTION_CONTINUE_SEARCH;
+     Breakpoint& bp = it->second;
+ 
+-    if (bp.hits++ < kMaxHitsLogged) {
++    if (bp.dumpReg == "gashist") {  // [DEBUG-gas] spu.prx+0x184e6: the fluid list builder's call
++        if (bp.hits++ < kMaxHitsLogged) {
++            const auto* cells = reinterpret_cast<const uint32_t*>(c.Rcx);
++            const uint32_t count = static_cast<uint32_t>(c.R8);
++            uint32_t types[16] = {}, inactive = 0;
++            for (uint32_t i = 0; i < count; ++i) {
++                if (cells[i] < 0x1000000) ++inactive;
++                else ++types[(cells[i] >> 16) & 0xf];
++            }
++            std::string hist;
++            for (int t = 0; t < 16; ++t)
++                if (types[t]) hist += " t" + std::to_string(t) + "=" + std::to_string(types[t]);
++            std::fprintf(stderr, "[DEBUG-gas] lists: mode %u out %llx cells %llx count %u inactive %u:%s\n",
++                         static_cast<uint32_t>(c.Rdi), c.Rsi, c.Rcx, count, inactive, hist.c_str());
++        }
++    } else if (bp.hits++ < kMaxHitsLogged) {
+         std::fprintf(stderr, "[break] %s (hit %d, thread %lu)\n", bp.label.c_str(), bp.hits.load(),
+                      GetCurrentThreadId());
+         std::fprintf(stderr, "    rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n", c.Rax, c.Rbx, c.Rcx, c.Rdx);
+@@ -211,13 +237,78 @@ LONG CALLBACK Handler(EXCEPTION_POINTERS* ep) {
+     return EXCEPTION_CONTINUE_EXECUTION;
+ }
+ 
++// [DEBUG-gas] the read probe (debugger.h ArmReadProbe)
++std::mutex g_probeMutex;
++std::unordered_map<uint64_t, DWORD> g_probePages;  // page -> the protection to give back
++std::vector<Module*> g_probeModules;
++std::atomic<int> g_probeLogged{0};
++
++std::string ProbeWhere(uint64_t a) {
++    char buf[96];
++    for (const Module* m : g_probeModules)
++        if (m->Contains(reinterpret_cast<const void*>(a))) {
++            std::snprintf(buf, sizeof(buf), "%s+0x%llx", m->fileName.c_str(),
++                          static_cast<unsigned long long>(a - reinterpret_cast<uint64_t>(m->base)));
++            return buf;
++        }
++    std::snprintf(buf, sizeof(buf), "%llx", static_cast<unsigned long long>(a));
++    return buf;
++}
++
++LONG CALLBACK ReadProbeHandler(EXCEPTION_POINTERS* ep) {
++    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
++    const uint64_t addr = ep->ExceptionRecord->ExceptionInformation[1];
++    const uint64_t page = addr & ~0xfffull;
++    {
++        std::lock_guard lock(g_probeMutex);
++        auto it = g_probePages.find(page);
++        if (it == g_probePages.end()) return EXCEPTION_CONTINUE_SEARCH;
++        DWORD old;
++        VirtualProtect(reinterpret_cast<void*>(page), 0x1000, it->second, &old);
++        g_probePages.erase(it);
++    }
++    if (g_probeLogged++ < 600) {
++        const ULONG_PTR kind = ep->ExceptionRecord->ExceptionInformation[0];
++        std::string thread = "?";
++        PWSTR desc = nullptr;
++        if (SUCCEEDED(GetThreadDescription(GetCurrentThread(), &desc)) && desc) {
++            char narrow[64] = {};
++            WideCharToMultiByte(CP_UTF8, 0, desc, -1, narrow, sizeof(narrow) - 1, nullptr, nullptr);
++            thread = narrow;
++            LocalFree(desc);
++        }
++        std::fprintf(stderr, "[DEBUG-gas] read probe: %s %llx by %s (thread %lu %s)\n",
++                     kind == 0 ? "read" : kind == 1 ? "write" : "exec", static_cast<unsigned long long>(addr),
++                     ProbeWhere(ep->ContextRecord->Rip).c_str(), GetCurrentThreadId(), thread.c_str());
++    }
++    return EXCEPTION_CONTINUE_EXECUTION;
++}
++
+ }  // namespace
+ 
++void ArmReadProbe(uint64_t addr, uint64_t size) {
++    static std::once_flag once;
++    std::call_once(once, [] { AddVectoredExceptionHandler(1, ReadProbeHandler); });
++    size_t armed = 0;
++    for (uint64_t page = addr & ~0xfffull; page < addr + size; page += 0x1000) {
++        std::lock_guard lock(g_probeMutex);  // armed and recorded together, so no fault can miss it
++        DWORD old;
++        if (g_probePages.contains(page) ||
++            !VirtualProtect(reinterpret_cast<void*>(page), 0x1000, PAGE_NOACCESS, &old))
++            continue;
++        g_probePages.emplace(page, old);
++        ++armed;
++    }
++    std::fprintf(stderr, "[DEBUG-gas] read probe armed on %zu pages at %llx+%llx\n", armed,
++                 static_cast<unsigned long long>(addr), static_cast<unsigned long long>(size));
++}
++
+ void ArmNow(const std::vector<std::string>& specs, const std::vector<Module*>& modules);
+ 
+ // LBP3_BREAK_DELAY=<seconds> arms the breakpoints later (from a background
+ // thread), so their 200 logged hits cover a stall rather than the boot.
+ void Arm(const std::vector<std::string>& specs, const std::vector<Module*>& modules) {
++    g_probeModules = modules;  // [DEBUG-gas]
+     if (const char* w = std::getenv("LBP3_HWWATCH"); w && !modules.empty()) {
+         g_watchModule = modules[0];  // eboot.bin is loaded first
+         if (w[0] == '*') {
+diff --git a/runtime/src/core/debugger.h b/runtime/src/core/debugger.h
+index 85b190f..91b0835 100644
+--- a/runtime/src/core/debugger.h
++++ b/runtime/src/core/debugger.h
+@@ -13,4 +13,8 @@ namespace core::debugger {
+ // "module+0xoffset" specs; resolved and armed once modules are loaded.
+ void Arm(const std::vector<std::string>& specs, const std::vector<Module*>& modules);
+ 
++// [DEBUG-gas] the first access to each page of the range is logged (instruction, thread), then
++// the page gets its protection back. Remote command "readprobe <hex addr> <hex size>".
++void ArmReadProbe(uint64_t addr, uint64_t size);
++
+ }  // namespace core::debugger
+diff --git a/runtime/src/gpu/renderer.cpp b/runtime/src/gpu/renderer.cpp
+index 1d06a16..6e6a794 100644
+--- a/runtime/src/gpu/renderer.cpp
++++ b/runtime/src/gpu/renderer.cpp
+@@ -406,10 +406,12 @@ void DumpImage(VideoCore::Image& image, const char* base);
+ 
+ // LBP3_DUMP_DRAWS=<n>[,<n>...]: while a frame is traced, save render target 0
+ // right after draw #n (the numbering of the [draw] log lines) to analysis/targets/draws/.
++static std::vector<uint32_t> wanted;
++// [DEBUG-gas] the same draws get pipeline statistics (vk_rasterizer.cpp)
++bool WantedDraw(uint32_t index) { return std::find(wanted.begin(), wanted.end(), index) != wanted.end(); }
+ void AfterTracedDraw(uint32_t index) {
+     // The list comes from LBP3_DUMP_DRAWS or, re-read at every traced frame, from
+     // analysis\dump_draws.txt (so draws can be picked after looking at a trace).
+-    static std::vector<uint32_t> wanted;
+     if (index == 1) {
+         wanted.clear();
+         std::string spec;
+@@ -482,6 +484,7 @@ void MaybeDumpRenderTargets() {
+             std::fprintf(stderr, "[draw] ---- frame %d begins ----\n", target);
+             Vulkan::g_lbp3TraceIndex = 0;
+             Vulkan::g_lbp3AfterDraw = AfterTracedDraw;
++            Vulkan::g_lbp3QueryDraw = WantedDraw;  // [DEBUG-gas]
+             Vulkan::g_lbp3TraceDraws = true;
+         } else if (flips == target) {
+             Vulkan::g_lbp3TraceDraws = false;
+diff --git a/runtime/src/input/gamepad_sdl.cpp b/runtime/src/input/gamepad_sdl.cpp
+index 3cfb042..6f97634 100644
+--- a/runtime/src/input/gamepad_sdl.cpp
++++ b/runtime/src/input/gamepad_sdl.cpp
+@@ -12,6 +12,7 @@
+ #include "video/presenter.h"
+ #include "gpu/renderer.h"
+ #include "gpu/dlss.h"
++#include "core/debugger.h"  // [DEBUG-gas] readprobe
+ #ifndef WIN32_LEAN_AND_MEAN
+ #define WIN32_LEAN_AND_MEAN
+ #endif
+@@ -435,6 +436,11 @@ void Parse(const std::string& line) {
+         SetVirtualPlayers(n);
+         return;
+     }
++    if (word == "readprobe") {  // [DEBUG-gas] "readprobe <hex addr> <hex size>"
++        std::string a, s;
++        if (in >> a >> s) core::debugger::ArmReadProbe(std::stoull(a, nullptr, 16), std::stoull(s, nullptr, 16));
++        return;
++    }
+     Command c;
+     if (word == "f9" || word == "f10") {  // the debug hotkeys (dump / perf report)
+         video::TriggerHotkey(word == "f9" ? SDLK_F9 : SDLK_F10);

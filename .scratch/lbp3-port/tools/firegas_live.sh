@@ -20,13 +20,14 @@ start)
   human_keep || exit 1
   use_baseline "${FG_SAVE:-analysis/savedata_firegas_20261121}" || exit 1
   rm -f analysis/input_cmd.txt analysis/frame_split.csv
+  brk=; [ -n "$FG_BREAK" ] && brk=",'--break=$FG_BREAK'"  # FG_BREAK=module+0xoffset[:extra]: a runtime breakpoint
   exe_m=$(cygpath -m "$EXE"); root_m=$(cygpath -m "$PWD"); cache_w=$(cygpath -w "$PWD/analysis/firegas_cache")
   disp=$(head -n 1 analysis/test_display.txt 2>/dev/null | tr -d '\r ')
   env LBP3_VOLUME=0 LBP3_REMOTE_INPUT=1 LBP3_OSK_PLAIN=1 SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT=0x0000/0x0000 \
     LBP3_DISPLAY="$disp" LBP3_RES=3840x2160 LBP3_RES_SHADERS=1 LBP3_UPSCALER=dlss LBP3_UPSCALER_MODE=quality \
     LBP3_FRAMEGEN=1 LBP3_FRAMEGEN_MODE=warp LBP3_ASYNC_PIPELINES=1 LBP3_WINDOW=borderless LBP3_STATUS_FLIPS=30 \
     LBP3_LBPPC_COOP=1 LBP3_FRAME_SPLIT=1 LBP3_SHADER_CACHE_DIR="$cache_w" "$@" powershell -NoProfile -Command \
-    "(Start-Process -PassThru -FilePath '$exe_m' -ArgumentList '--run','--skip-intro' -WorkingDirectory '$root_m' -RedirectStandardOutput '$root_m/analysis/remote_stdout.txt' -RedirectStandardError '$root_m/analysis/remote_stderr.txt').Id" > analysis/firegas_pid.txt
+    "(Start-Process -PassThru -NoNewWindow -FilePath '$exe_m' -ArgumentList '--run','--skip-intro'$brk -WorkingDirectory '$root_m' -RedirectStandardOutput '$root_m/analysis/remote_stdout.txt' -RedirectStandardError '$root_m/analysis/remote_stderr.txt').Id" > analysis/firegas_pid.txt
   echo "$tag $*" > analysis/firegas_current.txt
   sleep 30
   tasklist 2>/dev/null | grep -qi lbp3.exe && echo "started" || echo "GAME NOT RUNNING" ;;
