@@ -13,6 +13,7 @@
 #include <cstring>
 #include <string>
 
+#include "gpu/dlss.h"
 #include "hle/audio_downmix.h"
 #include "hle/modal.h"
 #include "hle/my_unlocks.h"
@@ -138,6 +139,8 @@ std::string StatsLine(const video::live::Snapshot& s) {
     if (s.generatedShare > 0.01) line += Fmt(" (game %.0f)", s.gameFps);
     line += Fmt("  |  game work %.1f ms", s.workMs);
     if (s.latencyMs >= 0) line += Fmt("  |  latency %.0f ms", s.latencyMs);
+    // A DLSS build's upscaler, when asked for: its mode, or why it can't run (gpu/dlss.h).
+    if (const std::string dlss = gpu::dlss::StatusLine(); !dlss.empty()) line += "  |  " + dlss;
     return line;
 }
 

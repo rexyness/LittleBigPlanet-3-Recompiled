@@ -48,8 +48,17 @@ Output Process(void* cmd, void* displayImage);
 void Remote(const std::string& key, const std::string& value);
 // The output size Prepare kept when DLSS upscales from a smaller render size; 0x0 otherwise.
 void OutputSize(uint32_t* w, uint32_t* h);
+// For the stats line (ui/menu_overlay.cpp): "DLSS Quality" while it runs, "no DLSS: <why>" when it
+// was asked for (LBP3_UPSCALER=dlss) and can't run, "" when it wasn't asked for. Any thread.
+std::string StatusLine();
+// At each submit-and-flip (the game thread), how the camera changed since the last one
+// (hle/videoout.cpp's FrameGenCamMotion; -1 = unknown). A camera cut by frame generation's rules
+// resets DLSS's history at that frame's flip (NVIDIA's guide 3.13).
+void NoteSubmit(double camJump, double camMoved, double camTurned);
 #else
+inline void NoteSubmit(double, double, double) {}
 inline void OutputSize(uint32_t* w, uint32_t* h) { *w = *h = 0; }
+inline std::string StatusLine() { return {}; }
 inline void Prepare() {}
 inline int Probe() {
     std::printf("dlss: not a DLSS build\n");

@@ -655,7 +655,7 @@ void TraceSimSteps() {
 struct CamMotion { double jump = -1, moved = -1, turned = -1; };
 CamMotion FrameGenCamMotion() {
     CamMotion m;
-    if (!video::framegen::Enabled()) return m;
+    if (!video::framegen::Enabled() && !gpu::dlss::Active()) return m;  // also the DLSS upscaler's cut reset
     uint8_t* base = core::EbootBase();
     if (!base) return m;
     uint64_t view = 0;
@@ -721,6 +721,7 @@ int PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void* const* 
     core::seslog::NoteFlip();  // online only: steps per flip for the [ses-win] lines
     const int simSteps = FrameGenSimSteps();
     const CamMotion cam = FrameGenCamMotion();
+    gpu::dlss::NoteSubmit(cam.jump, cam.moved, cam.turned);  // a DLSS build: a camera cut resets its history
     if (gpu::fg::Enabled()) {  // LBP3_FG_DUMP: counters and the main view (camera now +0x20, before +0x160)
         if (uint8_t* base = core::EbootBase()) {
             using Counter = int(PS4_SYSV_ABI*)();

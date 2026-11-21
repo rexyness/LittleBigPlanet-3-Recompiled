@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <span>
@@ -64,6 +65,21 @@ constexpr float kHudT = 8.0f;  // as frame generation's HUD put-back
 
 bool g_wanted = false;  // LBP3_UPSCALER=dlss
 bool g_ready = false;   // NGX started and DLSS available
+bool g_passes = false;  // our own compute passes are built (the stretch works even without DLSS)
+
+// Camera cuts (NoteSubmit, the game thread): one flag per submitted frame, taken at its flip.
+std::mutex g_cutMutex;
+std::deque<bool> g_cuts;
+double g_camPrevJump = -1, g_camPrevMoved = -1, g_camPrevTurned = -1;
+
+// The stats line's word on it (StatusLine): why it can't run, when it was asked for.
+std::mutex g_statusMutex;
+bool g_asked = false;
+std::string g_whyNot;
+void SetWhyNot(const std::string& why) {
+    std::lock_guard lk(g_statusMutex);
+    g_whyNot = why;
+}
 
 // Settings (environment, read with LBP3_UPSCALER). Each piece has its own switch so it can be
 // judged on its own.
@@ -532,7 +548,7 @@ void (*g_prevOnFill)(u64, u64, u32, u32, bool) = nullptr;
 
 struct Stats {
     uint32_t flips = 0, upscaled = 0, noHud = 0, noVel = 0, noDepth = 0, failed = 0;
-    uint32_t jitteredFrames = 0, smaaSkipped = 0, stretched = 0;
+    uint32_t jitteredFrames = 0, smaaSkipped = 0, stretched = 0, cuts = 0;
     uint64_t biasedSamplers = 0;  // samplers a scene draw bound with the mip bias
     std::map<uint64_t, uint64_t> jitterTargets;  // rt0 -> jittered draws (LBP3_DLSS_TRACE)
 } g_stats;
@@ -750,10 +766,10 @@ void Log() {
     std::fprintf(stderr,
                  "[dlss] %s %ux%u -> %ux%u: %u of %u flips upscaled; not: %u without the HUD-less image, %u "
                  "without vectors, %u without depth, %u failed (%u of those stretched); %u frames jittered, SMAA "
-                 "left out in %u, %.0f samplers a frame with mip bias %.2f\n",
+                 "left out in %u, %.0f samplers a frame with mip bias %.2f, %u camera cuts\n",
                  ModeLabel(), g_featW, g_featH, g_featOutW, g_featOutH, g_stats.upscaled, g_stats.flips, g_stats.noHud, g_stats.noVel,
                  g_stats.noDepth, g_stats.failed, g_stats.stretched, g_stats.jitteredFrames, g_stats.smaaSkipped,
-                 double(g_stats.biasedSamplers) / std::max<uint32_t>(1, g_stats.flips), g_mipBias);
+                 double(g_stats.biasedSamplers) / std::max<uint32_t>(1, g_stats.flips), g_mipBias, g_stats.cuts);
     if (g_trace && !g_stats.jitterTargets.empty()) {
         std::string list;
         for (const auto& [rt0, n] : g_stats.jitterTargets) {
@@ -839,6 +855,7 @@ void ReadSettings() {
 void Prepare() {
     const char* v = std::getenv("LBP3_UPSCALER");
     if (!v || _stricmp(v, "dlss") != 0) return;
+    g_asked = true;
     InitCommon();
     Lbp3Res::Size out = Lbp3Res::kNative;
     Lbp3Res::Parse(std::getenv("LBP3_RES"), &out);  // as Lbp3Res::Current() would read it
@@ -858,6 +875,7 @@ void Prepare() {
     std::string why, gpu;
     if (!CanRunInChild(&why, &gpu)) {
         std::fprintf(stderr, "[dlss] no upscaler this run: %s. The game renders at %ux%u.\n", why.c_str(), out.w, out.h);
+        SetWhyNot(why);
         g_disabled = true;
         return;
     }
@@ -886,7 +904,8 @@ int Probe() {
 
 void RegisterVulkanExtensions() {
     const char* v = std::getenv("LBP3_UPSCALER");
-    g_wanted = v && _stricmp(v, "dlss") == 0 && !g_disabled;
+    g_asked = v && _stricmp(v, "dlss") == 0;
+    g_wanted = g_asked && !g_disabled;
     if (!g_wanted) return;
     InitCommon();
     ReadSettings();
@@ -897,6 +916,14 @@ void RegisterVulkanExtensions() {
 bool Start() {
     if (!g_wanted || g_ready) return g_ready;
     auto* inst = internal::GetInstance();
+    // Our own passes first: if NGX then fails after Prepare already shrank the render size, the
+    // picture is still stretched to the output size (Process).
+    if (!MakePipelines()) {
+        std::fprintf(stderr, "[dlss] could not build the upscaler's own passes: no upscaler this run\n");
+        SetWhyNot("its own passes couldn't be built");
+        return false;
+    }
+    g_passes = true;
     const VkInstance vi = static_cast<VkInstance>(inst->GetInstance());
     const VkPhysicalDevice pd = static_cast<VkPhysicalDevice>(inst->GetPhysicalDevice());
     const VkDevice dev = static_cast<VkDevice>(inst->GetDevice());
@@ -905,6 +932,9 @@ bool Start() {
         VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr, VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr, &g_common);
     if (NVSDK_NGX_FAILED(r)) {
         std::fprintf(stderr, "[dlss] NGX did not start (0x%08x): no upscaler this run\n", unsigned(r));
+        char why[64];
+        std::snprintf(why, sizeof(why), "NVIDIA's NGX didn't start (0x%08x)", unsigned(r));
+        SetWhyNot(why);
         return false;
     }
     r = NVSDK_NGX_VULKAN_GetCapabilityParameters(&g_caps);
@@ -925,10 +955,9 @@ bool Start() {
                                     " or later")
                                        .c_str()
                                  : "");
-        return false;
-    }
-    if (!MakePipelines()) {
-        std::fprintf(stderr, "[dlss] could not build the upscaler's own passes: no upscaler this run\n");
+        SetWhyNot(needsDriver ? "the driver is too old for DLSS (" + std::to_string(major) + "." + std::to_string(minor) +
+                                    " or later)"
+                              : std::string("DLSS isn't available on this GPU"));
         return false;
     }
     if (g_outW) {  // NVIDIA's own render size for the mode, against the one Prepare chose
@@ -953,6 +982,29 @@ bool Active() { return g_ready; }
 void OutputSize(uint32_t* w, uint32_t* h) {
     *w = g_outW;
     *h = g_outH;
+}
+
+void NoteSubmit(double jump, double moved, double turned) {
+    if (!g_ready) return;
+    // Frame generation's camera rules (video/framegen.cpp CutRule, its default thresholds): the
+    // view*proj translation jumped past 1000 (5,753 at a cut, at most ~250 in play) and not as a
+    // continuation of the last frame's jump, or the camera moved more than 150 units / turned more
+    // than 6 degrees and six times as much as the frame before.
+    bool cut = false;
+    if (jump > 1000.0 && !(g_camPrevJump >= 0 && jump < 4.0 * g_camPrevJump)) cut = true;
+    if (moved >= 0 && g_camPrevMoved >= 0 && moved > 150.0 && moved > 6.0 * g_camPrevMoved) cut = true;
+    if (turned >= 0 && g_camPrevTurned >= 0 && turned > 6.0 && turned > 6.0 * std::max(g_camPrevTurned, 0.1)) cut = true;
+    g_camPrevJump = jump, g_camPrevMoved = moved, g_camPrevTurned = turned;
+    std::lock_guard lk(g_cutMutex);
+    g_cuts.push_back(cut);
+    while (g_cuts.size() > 8) g_cuts.pop_front();
+}
+
+std::string StatusLine() {
+    if (!g_asked) return {};
+    if (g_ready) return std::string("DLSS ") + ModeLabel();
+    std::lock_guard lk(g_statusMutex);
+    return g_whyNot.empty() ? std::string("DLSS starting") : "no DLSS: " + g_whyNot;
 }
 
 void Remote(const std::string& key, const std::string& value) {
@@ -1018,6 +1070,9 @@ Output Evaluate(void* cmdp, void* imagep, const Frame& f, float jx, float jy) {
         if (NVSDK_NGX_FAILED(r) || !g_feature) {
             std::fprintf(stderr, "[dlss] could not create DLSS for %ux%u -> %ux%u (0x%08x): no upscaler this run\n", W, H,
                          OW, OH, unsigned(r));
+            char why[96];
+            std::snprintf(why, sizeof(why), "DLSS couldn't be created for %ux%u -> %ux%u", W, H, OW, OH);
+            SetWhyNot(why);
             g_feature = nullptr;
             g_ready = false;
             return out;
@@ -1153,7 +1208,22 @@ Output Process(void* cmdp, void* imagep) {
     const float jx = jittered ? g_jx : 0.0f, jy = jittered ? g_jy : 0.0f;
     g_frameJittered = false;
     ++g_flipCount;
-    if (!g_ready) return {};
+    bool cut = false;  // this frame's camera cut (NoteSubmit), in submit order
+    {
+        std::lock_guard lk(g_cutMutex);
+        if (!g_cuts.empty()) {
+            cut = g_cuts.front();
+            g_cuts.pop_front();
+        }
+    }
+    if (!g_ready) {
+        // DLSS failed after the render size was already shrunk: at least fill the output size.
+        if (g_passes && g_outW) {
+            const auto& d = static_cast<VideoCore::Image*>(imagep)->info.size;
+            if (d.width != g_outW || d.height != g_outH) return Stretch(cmdp, imagep);
+        }
+        return {};
+    }
     if (!g_hooked) {
         Hook();  // from the next frame on
         return {};
@@ -1171,6 +1241,11 @@ Output Process(void* cmdp, void* imagep) {
         g_remote.clear();
     }
     Log();
+    if (cut) {  // nothing from before the cut belongs in this frame's picture
+        g_reset = true;
+        ++g_stats.cuts;
+        if (g_trace) std::fprintf(stderr, "[dlss] flip %llu: camera cut, history reset\n", static_cast<unsigned long long>(g_flipCount));
+    }
     Output out = Evaluate(cmdp, imagep, f, jx, jy);
     g_prevUpscaled = out.image != nullptr;  // the gate for the next frame's jitter and SMAA skip
     if (!out.image && g_outW) {
