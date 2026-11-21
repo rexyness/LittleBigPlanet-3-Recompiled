@@ -765,7 +765,8 @@ void PageGraphics(App& a) {
         Toggle("Keep in-world text readable", &s.fg_text, "Generated frames keep thin bright text sharp (the map's \"Loading...\" ring).");
         ImGui::EndDisabled();
         Toggle("Sharper stickers", &s.sharper_stickers,
-               "Stickers you place are drawn with twice the PS4's detail. Uses about 192 MB more graphics memory. "
+               "Stickers you place are drawn into 512-px tiles instead of the PS4's 256, so they keep a little more "
+               "detail. Uses about 192 MB more graphics memory. "
                "Off: stickers look exactly as on the PS4. Takes effect when the game starts.");
     }
     EndCard();

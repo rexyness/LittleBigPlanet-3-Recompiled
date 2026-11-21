@@ -183,7 +183,7 @@ How many sticker tiles the game gives each world unit of a stickered surface, as
 _Avoid_: sticker resolution, decal quality
 
 **Sharper stickers**:
-The port's setting that makes sticker tiles 512 px, so every sticker has twice the PS4's detail per axis at any sticker density. On by default; `LBP3_STICKERS=ps4` or the launcher's checkbox keeps the PS4's atlas.
+The port's setting that makes sticker tiles 512 px instead of 256, so stickers keep more of their detail (about +10% measured at full sticker density; a sticker blown up past its own image gains nothing). On by default; `LBP3_STICKERS=ps4` or the launcher's checkbox keeps the PS4's atlas.
 
 ## Planning
 

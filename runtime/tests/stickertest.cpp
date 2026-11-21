@@ -1,5 +1,5 @@
 // LBP3_STICKERS (core/sticker_patches.cpp): the sticker atlas at 512-px tiles. Pins the ten sites
-// and their bytes (checked against the 1.28 eboot, .scratch/sticker-atlas/spike.md), the setting's
+// and their bytes (checked against the 1.28 eboot; prototype/sticker-atlas .scratch/sticker-atlas/spike.md), the setting's
 // values, and that the edits go in all together or not at all. Offline; no game, no GPU.
 #include <cstdio>
 #include <cstring>
